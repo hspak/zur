@@ -1,5 +1,7 @@
 const std = @import("std");
+const fs = std.fs;
 const mem = std.mem;
+const os = std.os;
 const testing = std.testing;
 
 const aur = @import("aur.zig");
@@ -9,14 +11,20 @@ const v = @import("version.zig");
 pub const Pacman = struct {
     allocator: *mem.Allocator,
     pkgs: std.StringHashMap(*Package),
+    zur_path: []const u8,
+    updates: usize = 0,
 
     const Self = @This();
 
     pub fn init(allocator: *mem.Allocator) !Self {
+        const home = os.getenv("HOME") orelse return error.NoHomeEnvVarFound;
+        const zur_dir = ".zur";
+
         try curl.init();
         return Self{
             .allocator = allocator,
             .pkgs = std.StringHashMap(*Package).init(allocator),
+            .zur_path = try mem.concat(allocator, u8, &[_][]const u8{ home, "/", zur_dir }),
         };
     }
 
@@ -26,6 +34,7 @@ pub const Pacman = struct {
             self.allocator.destroy(pkg);
         }
         self.pkgs.deinit();
+        curl.deinit();
     }
 
     // TODO: use libalpm once this issue is fixed:
@@ -65,18 +74,54 @@ pub const Pacman = struct {
     // https://github.com/ziglang/zig/issues/1499
     pub fn compareVersions(self: *Self) !void {
         var pkgs_iter = self.pkgs.iterator();
-
         while (pkgs_iter.next()) |pkg| {
             const local_version = try v.Version.init(pkg.value.version);
             const remote_version = try v.Version.init(pkg.value.aur_version.?);
             if (local_version.olderThan(remote_version)) {
                 pkg.value.requires_update = true;
-                std.debug.print("{s} is out of date {s} -> {s}!\n", .{ pkg.key, pkg.value.version, pkg.value.aur_version.? });
+                self.updates += 1;
             }
         }
     }
 
-    pub fn downloadUpdates(self: *Self) !void {}
+    pub fn downloadUpdates(self: *Self) !void {
+        if (self.updates == 0) {
+            // TODO output some helpful msg
+            return;
+        }
+        try fs.cwd().makePath(self.zur_path);
+
+        var pkgs_iter = self.pkgs.iterator();
+        while (pkgs_iter.next()) |pkg| {
+            if (pkg.value.requires_update) {
+                std.log.info("Updating {s}: {s} -> {s}", .{ pkg.key, pkg.value.version, pkg.value.aur_version.? });
+                const snapshot_path = try self.downloadPackage(pkg.key, pkg.value);
+                std.log.info("Downloading snapshot: {s}/{s}.tar.gz", .{ snapshot_path, pkg.key });
+                try self.extractPackage(snapshot_path, pkg.key);
+            }
+        }
+    }
+
+    fn downloadPackage(self: *Self, pkg_name: []const u8, pkg: *Package) ![]const u8 {
+        var url = try std.fmt.allocPrintZ(self.allocator, "https://aur.archlinux.org/cgit/aur.git/snapshot/{s}.tar.gz", .{pkg_name});
+        const path = try std.fmt.allocPrint(self.allocator, "{s}/{s}-{s}", .{ self.zur_path, pkg_name, pkg.aur_version });
+        const file_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}.tar.gz", .{ path, pkg_name });
+
+        const snapshot = try curl.get(self.allocator, url);
+        try fs.cwd().makePath(path);
+        const snapshot_file = try fs.cwd().createFile(file_path, .{});
+        try snapshot_file.writeAll(snapshot.items);
+        return path;
+    }
+
+    fn extractPackage(self: *Self, snapshot_path: []const u8, pkg_name: []const u8) !void {
+        const file_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}.tar.gz", .{ snapshot_path, pkg_name });
+        const result = try std.ChildProcess.exec(.{
+            .allocator = self.allocator,
+            .argv = &[_][]const u8{ "tar", "-xf", file_path, "-C", snapshot_path, "--strip-components=1" },
+        });
+        try fs.cwd().deleteFile(file_path);
+    }
 };
 
 pub const Package = struct {

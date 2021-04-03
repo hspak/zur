@@ -9,7 +9,10 @@ pub fn init() !void {
     if (curl_global_init(CURL_GLOBAL_ALL) != .CURLE_OK) {
         return error.CURLGlobalInitFailed;
     }
-    defer curl_global_cleanup();
+}
+
+pub fn deinit() void {
+    curl_global_cleanup();
 }
 
 pub fn get(allocator: *std.mem.Allocator, uri: [*:0]const u8) !std.ArrayList(u8) {

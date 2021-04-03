@@ -12,6 +12,6 @@ pub fn main() !void {
     try pm.fetchLocalPackages();
     try pm.fetchRemoteAurVersions();
     try pm.compareVersions();
-    // Download out-of-date packages Use $HOME/.zur
+    try pm.downloadUpdates();
     // Save the PKGBUILDS and hooks and stuff
 }
