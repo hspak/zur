@@ -8,6 +8,12 @@ const aur = @import("aur.zig");
 const curl = @import("curl.zig");
 const v = @import("version.zig");
 
+pub const Package = struct {
+    version: []const u8,
+    aur_version: ?[]const u8 = null,
+    requires_update: bool = false,
+};
+
 pub const Pacman = struct {
     allocator: *mem.Allocator,
     pkgs: std.StringHashMap(*Package),
@@ -20,11 +26,10 @@ pub const Pacman = struct {
         const home = os.getenv("HOME") orelse return error.NoHomeEnvVarFound;
         const zur_dir = ".zur";
 
-        try curl.init();
         return Self{
             .allocator = allocator,
             .pkgs = std.StringHashMap(*Package).init(allocator),
-            .zur_path = try mem.concat(allocator, u8, &[_][]const u8{ home, "/", zur_dir }),
+            .zur_path = try fs.path.join(allocator, &[_][]const u8{ home, zur_dir }),
         };
     }
 
@@ -34,12 +39,15 @@ pub const Pacman = struct {
             self.allocator.destroy(pkg);
         }
         self.pkgs.deinit();
-        curl.deinit();
     }
 
     // TODO: use libalpm once this issue is fixed:
     // https://github.com/ziglang/zig/issues/1499
     pub fn fetchLocalPackages(self: *Self) !void {
+        if (self.pkgs.count() != 0) {
+            return error.BadInitialPkgsState;
+        }
+
         const result = try std.ChildProcess.exec(.{
             .allocator = self.allocator,
             .argv = &[_][]const u8{ "pacman", "-Qm" },
@@ -62,8 +70,27 @@ pub const Pacman = struct {
         }
     }
 
+    pub fn setInstallPackages(self: *Self, pkg_list: std.ArrayList([]const u8)) !void {
+        if (self.pkgs.count() != 0) {
+            return error.BadInitialPkgsState;
+        }
+
+        for (pkg_list.items) |pkg_name| {
+            std.log.info("Installing {s}", .{pkg_name});
+
+            // This is the hack:
+            // We're setting an impossible version to initialize the packages to install.
+            var new_pkg = try self.allocator.create(Package);
+            new_pkg.version = "0-0";
+            try self.pkgs.putNoClobber(pkg_name, new_pkg);
+        }
+    }
+
     pub fn fetchRemoteAurVersions(self: *Self) !void {
-        var remote_resp = try aur.query(self.allocator, self);
+        var remote_resp = try aur.queryAll(self.allocator, self);
+        if (remote_resp.resultcount == 0) {
+            return error.ZeroResultsFromAurQuery;
+        }
         for (remote_resp.results) |result| {
             var curr_pkg = self.pkgs.get(result.Name).?;
             curr_pkg.aur_version = result.Version;
@@ -84,9 +111,9 @@ pub const Pacman = struct {
         }
     }
 
-    pub fn downloadUpdates(self: *Self) !void {
+    pub fn processOutOfDate(self: *Self) !void {
         if (self.updates == 0) {
-            // TODO output some helpful msg
+            std.log.info("All AUR packages are up-to-date.", .{});
             return;
         }
         try fs.cwd().makePath(self.zur_path);
@@ -94,24 +121,36 @@ pub const Pacman = struct {
         var pkgs_iter = self.pkgs.iterator();
         while (pkgs_iter.next()) |pkg| {
             if (pkg.value.requires_update) {
-                std.log.info("Updating {s}: {s} -> {s}", .{ pkg.key, pkg.value.version, pkg.value.aur_version.? });
+                // The install hack is bleeding into here.
+                if (!std.mem.eql(u8, pkg.value.version, "0-0")) {
+                    std.log.info("Updating {s}: {s} -> {s}", .{ pkg.key, pkg.value.version, pkg.value.aur_version.? });
+                }
                 const snapshot_path = try self.downloadPackage(pkg.key, pkg.value);
-                std.log.info("Downloading snapshot: {s}/{s}.tar.gz", .{ snapshot_path, pkg.key });
                 try self.extractPackage(snapshot_path, pkg.key);
+                try self.compareUpdateAndInstall(pkg.key, pkg.value);
             }
         }
     }
 
     fn downloadPackage(self: *Self, pkg_name: []const u8, pkg: *Package) ![]const u8 {
-        var url = try std.fmt.allocPrintZ(self.allocator, "https://aur.archlinux.org/cgit/aur.git/snapshot/{s}.tar.gz", .{pkg_name});
-        const path = try std.fmt.allocPrint(self.allocator, "{s}/{s}-{s}", .{ self.zur_path, pkg_name, pkg.aur_version });
-        const file_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}.tar.gz", .{ path, pkg_name });
+        const file_name = try mem.join(self.allocator, ".", &[_][]const u8{ pkg_name, "tar.gz" });
+        const dir_name = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg.aur_version.? });
 
+        const full_dir = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, dir_name });
+        const full_file_path = try fs.path.join(self.allocator, &[_][]const u8{ full_dir, file_name });
+
+        const url = try mem.joinZ(self.allocator, "/", &[_][]const u8{ aur.Snapshot, file_name });
+        std.log.info("Downloading from: {s}", .{url});
         const snapshot = try curl.get(self.allocator, url);
-        try fs.cwd().makePath(path);
-        const snapshot_file = try fs.cwd().createFile(file_path, .{});
+        defer snapshot.deinit();
+        std.log.info("Downloaded to: {s}", .{full_file_path});
+
+        try fs.cwd().makePath(full_dir);
+        const snapshot_file = try fs.cwd().createFile(full_file_path, .{});
+        defer snapshot_file.close();
+
         try snapshot_file.writeAll(snapshot.items);
-        return path;
+        return full_dir;
     }
 
     fn extractPackage(self: *Self, snapshot_path: []const u8, pkg_name: []const u8) !void {
@@ -122,10 +161,74 @@ pub const Pacman = struct {
         });
         try fs.cwd().deleteFile(file_path);
     }
-};
 
-pub const Package = struct {
-    version: []const u8,
-    aur_version: ?[]const u8 = null,
-    requires_update: bool = false,
+    fn compareUpdateAndInstall(self: *Self, pkg_name: []const u8, pkg: *Package) !void {
+        var old_files = try self.snapshotFiles(pkg_name, pkg.version);
+        if (old_files == null) {
+            // We have no older version in stored in the filesystem.
+            // Fallback to just raw printing
+            return self.bareInstall(pkg_name, pkg);
+        }
+        defer old_files.?.deinit();
+        var new_files = try self.snapshotFiles(pkg_name, pkg.aur_version.?);
+        defer new_files.?.deinit();
+
+        // compare each relevant file
+        // - PKGBUILD: install
+        // - PKGBUILD: source
+        // - PKGBUILD: build
+        // - PKGBUILD: check
+        // - PKGBUILD: package
+        // - PKGBUILD: prepare
+        // - *.install: diff the entire file
+        // - *.sh: diff the entire file
+    }
+
+    fn bareInstall(self: *Self, pkg_name: []const u8, pkg: *Package) !void {
+        const pkg_dir = try std.mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg.aur_version.? });
+        const full_pkg_dir = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, pkg_dir });
+        try os.chdir(full_pkg_dir);
+        var pkg_files = try self.snapshotFiles(pkg_name, pkg.aur_version.?);
+        var pkg_files_iter = pkg_files.?.iterator();
+        var stdout = &std.io.getStdOut().writer();
+        while (pkg_files_iter.next()) |pkg_file| {
+            if (std.mem.eql(u8, pkg_file.key, ".SRCINFO")) {
+                continue;
+            }
+            const format = "==== File: {s} =================================\n{s}";
+            const output = try std.fmt.allocPrint(self.allocator, format, .{ pkg_file.key, pkg_file.value });
+            const bw = try stdout.write(output);
+        }
+        const bw = try stdout.write("Install? [y/n]: ");
+        const stdin = std.io.getStdIn().reader();
+        const input = try stdin.readByte();
+        if (input == 'y') {
+            std.log.info("TODO", .{});
+        } else {
+            std.log.info("Install declined. Goodbye!", .{});
+        }
+        // childprocess - makepkg -sicC
+    }
+
+    fn snapshotFiles(self: *Self, pkg_name: []const u8, pkg_version: []const u8) !?std.StringHashMap([]u8) {
+        const dir_name = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg_version });
+        const path = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, dir_name });
+        var walker = fs.walkPath(self.allocator, path) catch |err| switch (err) {
+            error.FileNotFound => {
+                return null;
+            },
+            else => unreachable,
+        };
+        defer walker.deinit();
+        var files_map = std.StringHashMap([]u8).init(self.allocator);
+        while (try walker.next()) |node| {
+            // TODO: hardcoded assumption
+            var file_contents = try fs.cwd().readFileAlloc(self.allocator, node.basename, 8192);
+
+            var copyName = try self.allocator.alloc(u8, node.basename.len);
+            std.mem.copy(u8, copyName, node.basename);
+            try files_map.putNoClobber(copyName, file_contents);
+        }
+        return files_map;
+    }
 };

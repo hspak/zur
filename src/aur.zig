@@ -5,6 +5,8 @@ const pacman = @import("pacman.zig");
 
 const Host = "https://aur.archlinux.org/rpc/?v=5&type=info";
 
+pub const Snapshot = "https://aur.archlinux.org/cgit/aur.git/snapshot";
+
 pub const RPCRespV5 = struct {
     version: usize,
     type: []const u8,
@@ -39,7 +41,7 @@ pub const Info = struct {
     Keywords: ?[][]const u8 = null,
 };
 
-pub fn query(allocator: *std.mem.Allocator, pm: *pacman.Pacman) !RPCRespV5 {
+pub fn queryAll(allocator: *std.mem.Allocator, pm: *pacman.Pacman) !RPCRespV5 {
     const uri = try buildInfoQuery(allocator, pm);
     var resp = try curl.get(allocator, uri);
     defer resp.deinit();
@@ -57,8 +59,8 @@ fn buildInfoQuery(allocator: *std.mem.Allocator, pm: *pacman.Pacman) ![*:0]const
     var uri = std.ArrayList(u8).init(allocator);
     try uri.appendSlice(Host);
 
-    var pkgsIter = pm.pkgs.iterator();
-    while (pkgsIter.next()) |pkg| {
+    var pkgs_iter = pm.pkgs.iterator();
+    while (pkgs_iter.next()) |pkg| {
         try uri.appendSlice("&arg[]=");
 
         var copyKey = try allocator.alloc(u8, pkg.key.len);
