@@ -36,7 +36,7 @@ pub const Pacman = struct {
     pub fn deinit(self: *Self) void {
         var pkgs_iter = self.pkgs.iterator();
         while (pkgs_iter.next()) |pkg| {
-            self.allocator.destroy(pkg);
+            self.allocator.destroy(pkg.value);
         }
         self.pkgs.deinit();
     }
@@ -154,7 +154,8 @@ pub const Pacman = struct {
     }
 
     fn extractPackage(self: *Self, snapshot_path: []const u8, pkg_name: []const u8) !void {
-        const file_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}.tar.gz", .{ snapshot_path, pkg_name });
+        const file_name = try mem.join(self.allocator, ".", &[_][]const u8{ pkg_name, "tar.gz" });
+        const file_path = try fs.path.join(self.allocator, &[_][]const u8{ snapshot_path, file_name });
         const result = try std.ChildProcess.exec(.{
             .allocator = self.allocator,
             .argv = &[_][]const u8{ "tar", "-xf", file_path, "-C", snapshot_path, "--strip-components=1" },
@@ -184,49 +185,76 @@ pub const Pacman = struct {
         // - *.sh: diff the entire file
     }
 
+    // TODO: handle recursively installing dependencies from AUR
+    // 0. Parse the dep list from .SRCINFO
+    // 1. We need a strategy to split official/AUR deps
+    // 2. Install official deps
+    // 3. Install AUR deps
+    // 4. Then install the package
     fn bareInstall(self: *Self, pkg_name: []const u8, pkg: *Package) !void {
         const pkg_dir = try std.mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg.aur_version.? });
         const full_pkg_dir = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, pkg_dir });
         try os.chdir(full_pkg_dir);
+
         var pkg_files = try self.snapshotFiles(pkg_name, pkg.aur_version.?);
         var pkg_files_iter = pkg_files.?.iterator();
-        var stdout = &std.io.getStdOut().writer();
+        var stdout_writer = &std.io.getStdOut().writer();
         while (pkg_files_iter.next()) |pkg_file| {
-            if (std.mem.eql(u8, pkg_file.key, ".SRCINFO")) {
-                continue;
-            }
             const format = "==== File: {s} =================================\n{s}";
             const output = try std.fmt.allocPrint(self.allocator, format, .{ pkg_file.key, pkg_file.value });
-            const bw = try stdout.write(output);
+            _ = try stdout_writer.write(output);
         }
-        const bw = try stdout.write("Install? [y/n]: ");
-        const stdin = std.io.getStdIn().reader();
-        const input = try stdin.readByte();
+
+        _ = try stdout_writer.write("Install? [y/n]: ");
+        const stdin = std.io.getStdIn();
+        const input = try stdin.reader().readByte();
         if (input == 'y') {
-            std.log.info("TODO", .{});
+            const argv = &[_][]const u8{ "makepkg", "-sicC" };
+            const makepkg_runner = try std.ChildProcess.init(argv, self.allocator);
+            defer makepkg_runner.deinit();
+
+            // TODO: when `makepkg` invokes `sudo` it seems to take the confirmation character from earlier.
+            // Find out how to prevent that.
+            makepkg_runner.stdin = stdin;
+            makepkg_runner.stdout = std.io.getStdOut();
+            makepkg_runner.stdin_behavior = std.ChildProcess.StdIo.Inherit;
+            makepkg_runner.stdout_behavior = std.ChildProcess.StdIo.Inherit;
+            try makepkg_runner.spawn();
+            _ = try makepkg_runner.wait();
         } else {
-            std.log.info("Install declined. Goodbye!", .{});
+            _ = try stdout_writer.write("Install declined. Goodbye!\n");
         }
-        // childprocess - makepkg -sicC
     }
 
     fn snapshotFiles(self: *Self, pkg_name: []const u8, pkg_version: []const u8) !?std.StringHashMap([]u8) {
         const dir_name = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg_version });
         const path = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, dir_name });
-        var walker = fs.walkPath(self.allocator, path) catch |err| switch (err) {
+        var dir = fs.openDirAbsolute(path, .{ .access_sub_paths = false, .iterate = true, .no_follow = true }) catch |err| switch (err) {
             error.FileNotFound => {
                 return null;
             },
             else => unreachable,
         };
-        defer walker.deinit();
-        var files_map = std.StringHashMap([]u8).init(self.allocator);
-        while (try walker.next()) |node| {
-            // TODO: hardcoded assumption
-            var file_contents = try fs.cwd().readFileAlloc(self.allocator, node.basename, 8192);
+        defer dir.close();
 
-            var copyName = try self.allocator.alloc(u8, node.basename.len);
-            std.mem.copy(u8, copyName, node.basename);
+        var files_map = std.StringHashMap([]u8).init(self.allocator);
+        var dir_iter = dir.iterate();
+        while (try dir_iter.next()) |node| {
+            if (std.mem.eql(u8, node.name, ".SRCINFO")) {
+                continue;
+            }
+            if (std.mem.containsAtLeast(u8, node.name, 1, "pkg.tar")) {
+                continue;
+            }
+            if (node.kind != fs.File.Kind.File) {
+                continue;
+            }
+
+            // TODO: hardcoded assumption
+            var file_contents = try fs.cwd().readFileAlloc(self.allocator, node.name, 8192);
+
+            var copyName = try self.allocator.alloc(u8, node.name.len);
+            std.mem.copy(u8, copyName, node.name);
             try files_map.putNoClobber(copyName, file_contents);
         }
         return files_map;
