@@ -247,54 +247,78 @@ test "Version.olderThan - slang" {
     const new = try Version.init("2.3.1a-2");
     const expected = true;
     const actual = old.olderThan(new);
+    const reverse_expected = false;
+    const reverse_actual = new.olderThan(old);
     testing.expectEqual(expected, actual);
+    testing.expectEqual(reverse_expected, reverse_actual);
 }
 test "Version.olderThan - libinput - 1" {
     const old = try Version.init("1.10.0-1");
     const new = try Version.init("1.10.0+25+g3e77f2e9-1");
     const expected = true;
     const actual = old.olderThan(new);
+    const reverse_expected = false;
+    const reverse_actual = new.olderThan(old);
     testing.expectEqual(expected, actual);
+    testing.expectEqual(reverse_expected, reverse_actual);
 }
 test "Version.olderThan - libinput - 2" {
     const old = try Version.init("1.10.0+25+g3e77f2e9-1");
     const new = try Version.init("1.10.1-1");
     const expected = true;
     const actual = old.olderThan(new);
+    const reverse_expected = false;
+    const reverse_actual = new.olderThan(old);
     testing.expectEqual(expected, actual);
+    testing.expectEqual(reverse_expected, reverse_actual);
 }
 test "Version.olderThan - gnome-keyring" {
     const old = try Version.init("1:3.27.2-1");
     const new = try Version.init("1:3.27.4+8+gff229abc-1");
     const expected = true;
     const actual = old.olderThan(new);
+    const reverse_expected = false;
+    const reverse_actual = new.olderThan(old);
     testing.expectEqual(expected, actual);
+    testing.expectEqual(reverse_expected, reverse_actual);
 }
 test "Version.olderThan - libxml2" {
     const old = try Version.init("2.9.7+4+g72182550-2");
     const new = try Version.init("2.9.8-1");
     const expected = true;
     const actual = old.olderThan(new);
+    const reverse_expected = false;
+    const reverse_actual = new.olderThan(old);
     testing.expectEqual(expected, actual);
+    testing.expectEqual(reverse_expected, reverse_actual);
 }
 test "Version.olderThan - libnm" {
     const old = try Version.init("1.10.5dev+3+g5159c34ea-1");
     const new = try Version.init("1.10.6-1");
     const expected = true;
     const actual = old.olderThan(new);
+    const reverse_expected = false;
+    const reverse_actual = new.olderThan(old);
     testing.expectEqual(expected, actual);
+    testing.expectEqual(reverse_expected, reverse_actual);
 }
 test "Version.olderThan - libytnef" {
     const old = try Version.init("1.9.3+7+g24fe30e-2");
     const new = try Version.init("1:1.9.3-1");
     const expected = true;
     const actual = old.olderThan(new);
+    const reverse_expected = false;
+    const reverse_actual = new.olderThan(old);
     testing.expectEqual(expected, actual);
+    testing.expectEqual(reverse_expected, reverse_actual);
 }
 test "Version.olderThan - neovim-nightly-bin" {
     const old = try Version.init("0.5.0+dev+1130+g7c204af87-1");
     const new = try Version.init("0.5.0+dev+1157+g0ab88c2ea-1");
     const expected = true;
     const actual = old.olderThan(new);
+    const reverse_expected = false;
+    const reverse_actual = new.olderThan(old);
     testing.expectEqual(expected, actual);
+    testing.expectEqual(reverse_expected, reverse_actual);
 }
