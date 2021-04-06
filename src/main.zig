@@ -3,7 +3,7 @@ const io = std.io;
 const process = std.process;
 
 const curl = @import("curl.zig");
-const pacman = @import("pacman.zig");
+const Pacman = @import("pacman.zig").Pacman;
 
 pub fn main() !void {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.c_allocator);
@@ -16,20 +16,20 @@ pub fn main() !void {
     try curl.init();
     defer curl.deinit();
 
-    var pm = try pacman.Pacman.init(allocator);
-    defer pm.deinit();
+    var pacman = try Pacman.init(allocator);
+    defer pacman.deinit();
 
     // default to updating all AUR packages
     if (pkg_list.items.len == 0) {
-        try pm.fetchLocalPackages();
+        try pacman.fetchLocalPackages();
     } else {
         // This is a slight hack to have the install process share
         // the same code path as the update process.
-        try pm.setInstallPackages(pkg_list);
+        try pacman.setInstallPackages(pkg_list);
     }
-    try pm.fetchRemoteAurVersions();
-    try pm.compareVersions();
-    try pm.processOutOfDate();
+    try pacman.fetchRemoteAurVersions();
+    try pacman.compareVersions();
+    try pacman.processOutOfDate();
 }
 
 fn parseArgs(allocator: *std.mem.Allocator) !std.ArrayList([]const u8) {

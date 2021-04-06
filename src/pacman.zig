@@ -6,7 +6,7 @@ const testing = std.testing;
 
 const aur = @import("aur.zig");
 const curl = @import("curl.zig");
-const v = @import("version.zig");
+const Version = @import("version.zig").Version;
 
 pub const Package = struct {
     version: []const u8,
@@ -15,12 +15,12 @@ pub const Package = struct {
 };
 
 pub const Pacman = struct {
+    const Self = @This();
+
     allocator: *mem.Allocator,
     pkgs: std.StringHashMap(*Package),
     zur_path: []const u8,
     updates: usize = 0,
-
-    const Self = @This();
 
     pub fn init(allocator: *mem.Allocator) !Self {
         const home = os.getenv("HOME") orelse return error.NoHomeEnvVarFound;
@@ -102,8 +102,8 @@ pub const Pacman = struct {
     pub fn compareVersions(self: *Self) !void {
         var pkgs_iter = self.pkgs.iterator();
         while (pkgs_iter.next()) |pkg| {
-            const local_version = try v.Version.init(pkg.value.version);
-            const remote_version = try v.Version.init(pkg.value.aur_version.?);
+            const local_version = try Version.init(pkg.value.version);
+            const remote_version = try Version.init(pkg.value.aur_version.?);
             if (local_version.olderThan(remote_version)) {
                 pkg.value.requires_update = true;
                 self.updates += 1;
@@ -167,7 +167,7 @@ pub const Pacman = struct {
         var old_files = try self.snapshotFiles(pkg_name, pkg.version);
         if (old_files == null) {
             // We have no older version in stored in the filesystem.
-            // Fallback to just raw printing
+            // Fallback to just installing
             return self.bareInstall(pkg_name, pkg);
         }
         defer old_files.?.deinit();
@@ -251,7 +251,7 @@ pub const Pacman = struct {
             }
 
             // TODO: hardcoded assumption
-            var file_contents = try fs.cwd().readFileAlloc(self.allocator, node.name, 8192);
+            var file_contents = try fs.cwd().readFileAlloc(self.allocator, node.name, 1024 * 1024);
 
             var copyName = try self.allocator.alloc(u8, node.name.len);
             std.mem.copy(u8, copyName, node.name);
