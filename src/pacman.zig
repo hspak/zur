@@ -6,6 +6,7 @@ const testing = std.testing;
 
 const aur = @import("aur.zig");
 const curl = @import("curl.zig");
+const Pkgbuild = @import("pkgbuild.zig").Pkgbuild;
 const Version = @import("version.zig").Version;
 
 pub const Package = struct {
@@ -174,13 +175,19 @@ pub const Pacman = struct {
         var new_files = try self.snapshotFiles(pkg_name, pkg.aur_version.?);
         defer new_files.?.deinit();
 
-        // compare each relevant file
-        // - PKGBUILD: install
-        // - PKGBUILD: source
-        // - PKGBUILD: build
-        // - PKGBUILD: check
-        // - PKGBUILD: package
-        // - PKGBUILD: prepare
+        var old_pkgbuild = Pkgbuild.init(self.allocator, old_files.?.get("PKGBUILD").?);
+        defer old_pkgbuild.deinit();
+        try old_pkgbuild.readLines();
+        var new_pkgbuild = Pkgbuild.init(self.allocator, new_files.?.get("PKGBUILD").?);
+        defer new_pkgbuild.deinit();
+        try new_pkgbuild.readLines();
+
+        const old_install = old_pkgbuild.relevant_fields.get("install").?;
+        const new_install = new_pkgbuild.relevant_fields.get("install").?;
+        if (!mem.eql(u8, old_install, new_install)) {
+            std.log.info("PKGBUILD 'install' field updated\n{s}\n", .{new_install});
+        }
+
         // - *.install: diff the entire file
         // - *.sh: diff the entire file
     }
@@ -243,7 +250,7 @@ pub const Pacman = struct {
             if (std.mem.eql(u8, node.name, ".SRCINFO")) {
                 continue;
             }
-            if (std.mem.containsAtLeast(u8, node.name, 1, "pkg.tar")) {
+            if (std.mem.containsAtLeast(u8, node.name, 1, "tar")) {
                 continue;
             }
             if (node.kind != fs.File.Kind.File) {
@@ -251,7 +258,7 @@ pub const Pacman = struct {
             }
 
             // TODO: hardcoded assumption
-            var file_contents = try fs.cwd().readFileAlloc(self.allocator, node.name, 1024 * 1024);
+            var file_contents = try dir.readFileAlloc(self.allocator, node.name, 1024 * 1024);
 
             var copyName = try self.allocator.alloc(u8, node.name.len);
             std.mem.copy(u8, copyName, node.name);
