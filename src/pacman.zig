@@ -250,7 +250,7 @@ pub const Pacman = struct {
             if (std.mem.eql(u8, node.name, ".SRCINFO")) {
                 continue;
             }
-            if (std.mem.containsAtLeast(u8, node.name, 1, "tar")) {
+            if (std.mem.containsAtLeast(u8, node.name, 1, ".tar.")) {
                 continue;
             }
             if (node.kind != fs.File.Kind.File) {
