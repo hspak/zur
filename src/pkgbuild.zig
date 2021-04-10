@@ -77,7 +77,10 @@ pub const Pkgbuild = struct {
                 },
                 // PKGBUILD functions() {}
                 '(' => {
+                    // functions get a () in their keys because
+                    // 'pkgver' can both be a function and a key=value
                     try buf.appendSlice("()");
+
                     var key = buf.toOwnedSlice();
                     const close_paren = try stream.readByte();
                     if (close_paren != ')') {

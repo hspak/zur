@@ -77,7 +77,7 @@ pub const Pacman = struct {
         }
 
         for (pkg_list.items) |pkg_name| {
-            std.log.info("Installing {s}", .{pkg_name});
+            std.log.info("installing {s}", .{pkg_name});
 
             // This is the hack:
             // We're setting an impossible version to initialize the packages to install.
@@ -141,10 +141,10 @@ pub const Pacman = struct {
         const full_file_path = try fs.path.join(self.allocator, &[_][]const u8{ full_dir, file_name });
 
         const url = try mem.joinZ(self.allocator, "/", &[_][]const u8{ aur.Snapshot, file_name });
-        std.log.info("Downloading from: {s}", .{url});
+        std.log.info("downloading from: {s}", .{url});
         const snapshot = try curl.get(self.allocator, url);
         defer snapshot.deinit();
-        std.log.info("Downloaded to: {s}", .{full_file_path});
+        std.log.info("downloaded to: {s}", .{full_file_path});
 
         try fs.cwd().makePath(full_dir);
         const snapshot_file = try fs.cwd().createFile(full_file_path, .{});
@@ -165,29 +165,53 @@ pub const Pacman = struct {
     }
 
     fn compareUpdateAndInstall(self: *Self, pkg_name: []const u8, pkg: *Package) !void {
-        var old_files = try self.snapshotFiles(pkg_name, pkg.version);
-        if (old_files == null) {
+        var old_files_maybe = try self.snapshotFiles(pkg_name, pkg.version);
+        if (old_files_maybe == null) {
             // We have no older version in stored in the filesystem.
             // Fallback to just installing
             return self.bareInstall(pkg_name, pkg);
         }
-        defer old_files.?.deinit();
-        var new_files = try self.snapshotFiles(pkg_name, pkg.aur_version.?);
-        defer new_files.?.deinit();
+        var old_files = old_files_maybe.?;
+        defer old_files.deinit();
 
-        var old_pkgbuild = Pkgbuild.init(self.allocator, old_files.?.get("PKGBUILD").?);
+        var new_files_maybe = try self.snapshotFiles(pkg_name, pkg.aur_version.?);
+        var new_files = new_files_maybe.?;
+        defer new_files.deinit();
+
+        var old_pkgbuild = Pkgbuild.init(self.allocator, old_files.get("PKGBUILD").?);
         defer old_pkgbuild.deinit();
         try old_pkgbuild.readLines();
-        var new_pkgbuild = Pkgbuild.init(self.allocator, new_files.?.get("PKGBUILD").?);
+        var new_pkgbuild = Pkgbuild.init(self.allocator, new_files.get("PKGBUILD").?);
         defer new_pkgbuild.deinit();
         try new_pkgbuild.readLines();
 
         try new_pkgbuild.comparePrev(old_pkgbuild);
         new_pkgbuild.printUpdated();
-        // TODO *.install: diff the entire file
-        // TODO *.sh: diff the entire file
-        // TODO manual input
 
+        var at_least_one_diff = false;
+        var new_iter = new_files.iterator();
+        while (new_iter.next()) |file| {
+            if (mem.endsWith(u8, file.key, ".install") or mem.endsWith(u8, file.key, ".sh")) {
+                if (!std.mem.eql(u8, old_files.get(file.key).?, new_files.get(file.key).?)) {
+                    at_least_one_diff = true;
+                    var stdout_writer = &std.io.getStdOut().writer();
+                    const output = try std.fmt.allocPrint(self.allocator, "{s} was updated:\n{s}", .{ file.key, new_files.get(file.key).? });
+                    _ = try stdout_writer.write(output);
+
+                    _ = try stdout_writer.write("\nContinue? [y/n]: ");
+                    const stdin = std.io.getStdIn();
+                    const input = try stdin.reader().readByte();
+                    if (input != 'y') {
+                        return;
+                    } else {
+                        _ = try stdout_writer.write("Continue declined. Goodbye!\n");
+                    }
+                }
+            }
+        }
+        if (!at_least_one_diff) {
+            std.log.info("no meaningful diff's found", .{});
+        }
         try self.install(pkg_name, pkg);
     }
 
@@ -240,6 +264,7 @@ pub const Pacman = struct {
     fn snapshotFiles(self: *Self, pkg_name: []const u8, pkg_version: []const u8) !?std.StringHashMap([]u8) {
         const dir_name = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg_version });
         const path = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, dir_name });
+
         var dir = fs.openDirAbsolute(path, .{ .access_sub_paths = false, .iterate = true, .no_follow = true }) catch |err| switch (err) {
             error.FileNotFound => {
                 return null;
@@ -247,6 +272,7 @@ pub const Pacman = struct {
             else => unreachable,
         };
         defer dir.close();
+        std.log.info("reading files in {s}", .{path});
 
         var files_map = std.StringHashMap([]u8).init(self.allocator);
         var dir_iter = dir.iterate();
@@ -258,9 +284,11 @@ pub const Pacman = struct {
                 continue;
             }
 
+            // The arbitrary 4096 byte file size limit is _probably_ fine here.
+            // No one is going to want to read a novel before installing.
             var file_contents = dir.readFileAlloc(self.allocator, node.name, 4096) catch |err| switch (err) {
                 error.FileTooBig => {
-                    std.log.warn("skipping diff setup for large file: '{s}'", .{node.name});
+                    std.log.warn("skipping diff for large file: '{s}'", .{node.name});
                     continue;
                 },
                 else => unreachable,
