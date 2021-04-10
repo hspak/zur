@@ -182,14 +182,13 @@ pub const Pacman = struct {
         defer new_pkgbuild.deinit();
         try new_pkgbuild.readLines();
 
-        const old_install = old_pkgbuild.relevant_fields.get("install").?;
-        const new_install = new_pkgbuild.relevant_fields.get("install").?;
-        if (!mem.eql(u8, old_install, new_install)) {
-            std.log.info("PKGBUILD 'install' field updated\n{s}\n", .{new_install});
-        }
+        try new_pkgbuild.comparePrev(old_pkgbuild);
+        new_pkgbuild.printUpdated();
+        // TODO *.install: diff the entire file
+        // TODO *.sh: diff the entire file
+        // TODO manual input
 
-        // - *.install: diff the entire file
-        // - *.sh: diff the entire file
+        return self.install(pkg_name, pkg);
     }
 
     // TODO: handle recursively installing dependencies from AUR
@@ -199,10 +198,6 @@ pub const Pacman = struct {
     // 3. Install AUR deps
     // 4. Then install the package
     fn bareInstall(self: *Self, pkg_name: []const u8, pkg: *Package) !void {
-        const pkg_dir = try std.mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg.aur_version.? });
-        const full_pkg_dir = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, pkg_dir });
-        try os.chdir(full_pkg_dir);
-
         var pkg_files = try self.snapshotFiles(pkg_name, pkg.aur_version.?);
         var pkg_files_iter = pkg_files.?.iterator();
         var stdout_writer = &std.io.getStdOut().writer();
@@ -216,23 +211,31 @@ pub const Pacman = struct {
         const stdin = std.io.getStdIn();
         const input = try stdin.reader().readByte();
         if (input == 'y') {
-            const argv = &[_][]const u8{ "makepkg", "-sicC" };
-            const makepkg_runner = try std.ChildProcess.init(argv, self.allocator);
-            defer makepkg_runner.deinit();
-
-            // TODO: when `makepkg` invokes `sudo` it seems to take the confirmation character from earlier.
-            // Find out how to prevent that.
-            makepkg_runner.stdin = stdin;
-            makepkg_runner.stdout = std.io.getStdOut();
-            makepkg_runner.stdin_behavior = std.ChildProcess.StdIo.Inherit;
-            makepkg_runner.stdout_behavior = std.ChildProcess.StdIo.Inherit;
-            try makepkg_runner.spawn();
-            _ = try makepkg_runner.wait();
+            try self.install(pkg_name, pkg);
         } else {
             _ = try stdout_writer.write("Install declined. Goodbye!\n");
         }
     }
 
+    fn install(self: *Self, pkg_name: []const u8, pkg: *Package) !void {
+        const pkg_dir = try std.mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg.aur_version.? });
+        const full_pkg_dir = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, pkg_dir });
+        try os.chdir(full_pkg_dir);
+
+        const argv = &[_][]const u8{ "makepkg", "-sicC" };
+        const makepkg_runner = try std.ChildProcess.init(argv, self.allocator);
+        defer makepkg_runner.deinit();
+
+        // TODO: when `makepkg` invokes `sudo` it seems to take the confirmation character from earlier.
+        // Find out how to prevent that.
+        const stdin = std.io.getStdIn();
+        makepkg_runner.stdin = stdin;
+        makepkg_runner.stdout = std.io.getStdOut();
+        makepkg_runner.stdin_behavior = std.ChildProcess.StdIo.Inherit;
+        makepkg_runner.stdout_behavior = std.ChildProcess.StdIo.Inherit;
+        try makepkg_runner.spawn();
+        _ = try makepkg_runner.wait();
+    }
     fn snapshotFiles(self: *Self, pkg_name: []const u8, pkg_version: []const u8) !?std.StringHashMap([]u8) {
         const dir_name = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg_version });
         const path = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, dir_name });
@@ -251,6 +254,12 @@ pub const Pacman = struct {
                 continue;
             }
             if (std.mem.containsAtLeast(u8, node.name, 1, ".tar.")) {
+                continue;
+            }
+            if (std.mem.endsWith(u8, node.name, ".deb")) {
+                continue;
+            }
+            if (std.mem.endsWith(u8, node.name, ".rpm")) {
                 continue;
             }
             if (node.kind != fs.File.Kind.File) {

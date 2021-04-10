@@ -1,18 +1,27 @@
 const std = @import("std");
 const testing = std.testing;
 
+const RelevantFields = &[_][]const u8{
+    "install",
+    "source",
+    "pkgver()",
+    "check()",
+    "package()",
+    "install()",
+};
+
 pub const Pkgbuild = struct {
     const Self = @This();
 
     allocator: *std.mem.Allocator,
     file_contents: []const u8,
-    relevant_fields: std.StringHashMap([]const u8),
+    relevant_fields: std.StringHashMap(*Content),
 
     pub fn init(allocator: *std.mem.Allocator, file_contents: []const u8) Self {
         return Self{
             .allocator = allocator,
             .file_contents = file_contents,
-            .relevant_fields = std.StringHashMap([]const u8).init(allocator),
+            .relevant_fields = std.StringHashMap(*Content).init(allocator),
         };
     }
 
@@ -20,8 +29,10 @@ pub const Pkgbuild = struct {
         defer self.relevant_fields.deinit();
         var iter = self.relevant_fields.iterator();
         while (iter.next()) |entry| {
+            // TODO: the fact that I have to do this might be a sign that we need a new data structure
             self.allocator.free(entry.key);
-            self.allocator.free(entry.value);
+            self.allocator.free(entry.value.value);
+            self.allocator.destroy(entry.value);
         }
     }
 
@@ -55,7 +66,9 @@ pub const Pkgbuild = struct {
                                 }
                             }
                         } else if (lookahead == '\n') {
-                            try self.relevant_fields.putNoClobber(key, buf.toOwnedSlice());
+                            var content = try self.allocator.create(Content);
+                            content.value = buf.toOwnedSlice();
+                            try self.relevant_fields.putNoClobber(key, content);
                             break;
                         } else {
                             try buf.append(lookahead);
@@ -64,6 +77,7 @@ pub const Pkgbuild = struct {
                 },
                 // PKGBUILD functions() {}
                 '(' => {
+                    try buf.appendSlice("()");
                     var key = buf.toOwnedSlice();
                     const close_paren = try stream.readByte();
                     if (close_paren != ')') {
@@ -79,7 +93,9 @@ pub const Pkgbuild = struct {
                         try buf.append(lookahead);
                         // TODO: Is it a valid assumption that the function closing paren is always on a new line?
                         if (lookahead == '}' and prev == '\n') {
-                            try self.relevant_fields.putNoClobber(key, buf.toOwnedSlice());
+                            var content = try self.allocator.create(Content);
+                            content.value = buf.toOwnedSlice();
+                            try self.relevant_fields.putNoClobber(key, content);
                             break;
                         }
                         prev = lookahead;
@@ -92,9 +108,43 @@ pub const Pkgbuild = struct {
             }
         }
     }
+
+    pub fn comparePrev(self: *Self, prev_pkgbuild: Pkgbuild) !void {
+        const fields_to_compare = &[_][]const u8{ "install", "source", "pkgver()", "check()", "build()", "package()" };
+        for (fields_to_compare) |field| {
+            const prev = prev_pkgbuild.relevant_fields.get(field);
+            const curr = self.relevant_fields.get(field);
+            if (prev == null and curr != null) {
+                curr.?.updated = true;
+            } else if (prev != null and curr == null) {
+                curr.?.value = "(removed)";
+                curr.?.updated = true;
+            } else if (prev == null and curr == null) {
+                continue;
+            }
+
+            if (!std.mem.eql(u8, prev.?.value, curr.?.value)) {
+                curr.?.updated = true;
+            }
+        }
+    }
+
+    pub fn printUpdated(self: *Self) void {
+        var iter = self.relevant_fields.iterator();
+        while (iter.next()) |field| {
+            if (field.value.updated) {
+                std.log.info("{s} was updated {s}", .{ field.key, field.value.value });
+            }
+        }
+    }
 };
 
-test "Pkgbuild - google-chrome-dev" {
+const Content = struct {
+    value: []const u8,
+    updated: bool = false,
+};
+
+test "Pkgbuild - readLines - google-chrome-dev" {
     var file_contents =
         \\# Maintainer: Knut Ahlers <knut at ahlers dot me>
         \\# Contributor: Det <nimetonmaili g-mail>
@@ -159,15 +209,26 @@ test "Pkgbuild - google-chrome-dev" {
         \\	rm "$pkgdir"/opt/google/chrome-$_channel/product_logo_*.png
         \\}
     ;
-    var expectedMap = std.StringHashMap([]const u8).init(testing.allocator);
+    var expectedMap = std.StringHashMap(*Content).init(testing.allocator);
     defer expectedMap.deinit();
-    try expectedMap.putNoClobber("install", "$pkgname.install");
-    try expectedMap.putNoClobber("source",
+
+    var install_content = try testing.allocator.create(Content);
+    defer testing.allocator.destroy(install_content);
+    install_content.value = "$pkgname.install";
+    try expectedMap.putNoClobber("install", install_content);
+
+    var source_content = try testing.allocator.create(Content);
+    defer testing.allocator.destroy(source_content);
+    source_content.value =
         \\"https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-${_channel}/google-chrome-${_channel}_${pkgver}-1_amd64.deb"
         \\'eula_text.html'
         \\"google-chrome-$_channel.sh"
-    );
-    try expectedMap.putNoClobber("package",
+    ;
+    try expectedMap.putNoClobber("source", source_content);
+
+    var package_content = try testing.allocator.create(Content);
+    defer testing.allocator.destroy(package_content);
+    package_content.value =
         \\{
         \\	msg2 "Extracting the data.tar.xz..."
         \\	bsdtar -xf data.tar.xz -C "$pkgdir/"
@@ -195,12 +256,87 @@ test "Pkgbuild - google-chrome-dev" {
         \\	rm -r "$pkgdir"/etc/cron.daily/ "$pkgdir"/opt/google/chrome-$_channel/cron/
         \\	rm "$pkgdir"/opt/google/chrome-$_channel/product_logo_*.png
         \\}
-    );
+    ;
+    try expectedMap.putNoClobber("package()", package_content);
+
     var pkgbuild = Pkgbuild.init(testing.allocator, file_contents);
     defer pkgbuild.deinit();
     try pkgbuild.readLines();
 
-    testing.expectEqualSlices(u8, expectedMap.get("install").?, pkgbuild.relevant_fields.get("install").?);
-    testing.expectEqualSlices(u8, expectedMap.get("source").?, pkgbuild.relevant_fields.get("source").?);
-    testing.expectEqualSlices(u8, expectedMap.get("package").?, pkgbuild.relevant_fields.get("package").?);
+    testing.expectEqualStrings(expectedMap.get("install").?.value, pkgbuild.relevant_fields.get("install").?.value);
+    testing.expectEqualStrings(expectedMap.get("source").?.value, pkgbuild.relevant_fields.get("source").?.value);
+    testing.expectEqualStrings(expectedMap.get("package()").?.value, pkgbuild.relevant_fields.get("package()").?.value);
+}
+
+test "Pkgbuild - compare" {
+    var old =
+        \\pkgname=google-chrome-dev
+        \\pkgver=91.0.4464.5
+        \\pkgrel=1
+        \\pkgdesc="The popular and trusted web browser by Google (Dev Channel)"
+        \\arch=('x86_64')
+        \\url="https://www.google.com/chrome"
+        \\license=('custom:chrome')
+        \\depends=('alsa-lib' 'gtk3' 'libcups' 'libxss' 'libxtst' 'nss')
+        \\optdepends=('optdepends')
+        \\provides=('google-chrome')
+        \\options=('!emptydirs' '!strip')
+        \\install=$pkgname.install
+        \\_channel=unstable
+        \\source=("source")
+        \\sha512sums=('sha' 'sum' '512')
+        \\pkgver() {
+        \\    pkgver function
+        \\}
+        \\check() {
+        \\    check function
+        \\}
+        \\package() {
+        \\    package function
+        \\}
+        \\install() {
+        \\    install function
+        \\}
+    ;
+    var new =
+        \\pkgname=google-chrome-dev
+        \\pkgver=9001
+        \\pkgrel=1
+        \\pkgdesc="The popular and trusted web browser by Google (Dev Channel)"
+        \\arch=('x86_64')
+        \\url="https://www.google.com/chrome"
+        \\license=('custom:chrome')
+        \\depends=('alsa-lib' 'gtk3' 'libcups' 'libxss' 'libxtst' 'nss')
+        \\optdepends=('optdepends')
+        \\provides=('google-chrome')
+        \\options=('!emptydirs' '!strip')
+        \\install=malicious.install
+        \\_channel=unstable
+        \\source=("source")
+        \\sha512sums=('sha' 'sum' '512')
+        \\pkgver() {
+        \\    pkgver function
+        \\    aha! I changed to perform some nasty shell commands
+        \\}
+        \\check() {
+        \\    check function
+        \\}
+        \\package() {
+        \\    package function
+        \\}
+        \\install() {
+        \\    install function
+        \\}
+    ;
+
+    var pkgbuild_old = Pkgbuild.init(testing.allocator, old);
+    defer pkgbuild_old.deinit();
+    try pkgbuild_old.readLines();
+    var pkgbuild_new = Pkgbuild.init(testing.allocator, new);
+    defer pkgbuild_new.deinit();
+    try pkgbuild_new.readLines();
+
+    try pkgbuild_new.comparePrev(pkgbuild_old);
+    testing.expect(pkgbuild_new.relevant_fields.get("install").?.updated);
+    testing.expect(pkgbuild_new.relevant_fields.get("pkgver()").?.updated);
 }
