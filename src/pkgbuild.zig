@@ -110,8 +110,7 @@ pub const Pkgbuild = struct {
     }
 
     pub fn comparePrev(self: *Self, prev_pkgbuild: Pkgbuild) !void {
-        const fields_to_compare = &[_][]const u8{ "install", "source", "pkgver()", "check()", "build()", "package()" };
-        for (fields_to_compare) |field| {
+        for (RelevantFields) |field| {
             const prev = prev_pkgbuild.relevant_fields.get(field);
             const curr = self.relevant_fields.get(field);
             if (prev == null and curr != null) {

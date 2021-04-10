@@ -188,7 +188,7 @@ pub const Pacman = struct {
         // TODO *.sh: diff the entire file
         // TODO manual input
 
-        return self.install(pkg_name, pkg);
+        try self.install(pkg_name, pkg);
     }
 
     // TODO: handle recursively installing dependencies from AUR
@@ -236,6 +236,7 @@ pub const Pacman = struct {
         try makepkg_runner.spawn();
         _ = try makepkg_runner.wait();
     }
+
     fn snapshotFiles(self: *Self, pkg_name: []const u8, pkg_version: []const u8) !?std.StringHashMap([]u8) {
         const dir_name = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg_version });
         const path = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, dir_name });
@@ -253,21 +254,17 @@ pub const Pacman = struct {
             if (std.mem.eql(u8, node.name, ".SRCINFO")) {
                 continue;
             }
-            if (std.mem.containsAtLeast(u8, node.name, 1, ".tar.")) {
-                continue;
-            }
-            if (std.mem.endsWith(u8, node.name, ".deb")) {
-                continue;
-            }
-            if (std.mem.endsWith(u8, node.name, ".rpm")) {
-                continue;
-            }
             if (node.kind != fs.File.Kind.File) {
                 continue;
             }
 
-            // TODO: hardcoded assumption
-            var file_contents = try dir.readFileAlloc(self.allocator, node.name, 1024 * 1024);
+            var file_contents = dir.readFileAlloc(self.allocator, node.name, 4096) catch |err| switch (err) {
+                error.FileTooBig => {
+                    std.log.warn("skipping diff setup for large file: '{s}'", .{node.name});
+                    continue;
+                },
+                else => unreachable,
+            };
 
             var copyName = try self.allocator.alloc(u8, node.name.len);
             std.mem.copy(u8, copyName, node.name);
