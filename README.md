@@ -1,3 +1,8 @@
 # Zur (WIP)
+### Aur helper written in Zig.
 
-I'm officially a madman writing my own AUR helper.
+## Build
+**Dependencies**
+- Arch Linux (pacman)
+- Curl
+- Zig (master)
