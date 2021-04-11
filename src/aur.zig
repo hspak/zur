@@ -41,8 +41,8 @@ pub const Info = struct {
     Keywords: ?[][]const u8 = null,
 };
 
-pub fn queryAll(allocator: *std.mem.Allocator, pm: *pacman.Pacman) !RPCRespV5 {
-    const uri = try buildInfoQuery(allocator, pm);
+pub fn queryAll(allocator: *std.mem.Allocator, pkgs: std.StringHashMap(*pacman.Package)) !RPCRespV5 {
+    const uri = try buildInfoQuery(allocator, pkgs);
     var resp = try curl.get(allocator, uri);
     defer resp.deinit();
 
@@ -50,16 +50,15 @@ pub fn queryAll(allocator: *std.mem.Allocator, pm: *pacman.Pacman) !RPCRespV5 {
     @setEvalBranchQuota(100000);
     var json_resp = std.json.TokenStream.init(resp.items);
     var result = try std.json.parse(RPCRespV5, &json_resp, std.json.ParseOptions{ .allocator = allocator });
-    // defer std.json.parseFree(aur.RPCRespV5, result, std.json.ParseOptions{ .allocator = allocator });
 
     return result;
 }
 
-fn buildInfoQuery(allocator: *std.mem.Allocator, pm: *pacman.Pacman) ![*:0]const u8 {
+fn buildInfoQuery(allocator: *std.mem.Allocator, pkgs: std.StringHashMap(*pacman.Package)) ![*:0]const u8 {
     var uri = std.ArrayList(u8).init(allocator);
     try uri.appendSlice(Host);
 
-    var pkgs_iter = pm.pkgs.iterator();
+    var pkgs_iter = pkgs.iterator();
     while (pkgs_iter.next()) |pkg| {
         try uri.appendSlice("&arg[]=");
 

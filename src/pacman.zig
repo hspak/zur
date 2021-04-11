@@ -26,6 +26,7 @@ pub const Package = struct {
     }
 
     pub fn deinit(self: *Self, allocator: *mem.Allocator) void {
+        if (self.aur_version != null) allocator.free(self.aur_version.?);
         allocator.destroy(self);
     }
 };
@@ -105,13 +106,16 @@ pub const Pacman = struct {
     }
 
     pub fn fetchRemoteAurVersions(self: *Self) !void {
-        var remote_resp = try aur.queryAll(self.allocator, self);
+        var remote_resp = try aur.queryAll(self.allocator, self.pkgs);
+        defer std.json.parseFree(aur.RPCRespV5, remote_resp, std.json.ParseOptions{ .allocator = self.allocator });
         if (remote_resp.resultcount == 0) {
             return error.ZeroResultsFromAurQuery;
         }
         for (remote_resp.results) |result| {
+            var copyAurVersion = try self.allocator.alloc(u8, result.Version.len);
+            std.mem.copy(u8, copyAurVersion, result.Version);
             var curr_pkg = self.pkgs.get(result.Name).?;
-            curr_pkg.aur_version = result.Version;
+            curr_pkg.aur_version = copyAurVersion;
         }
     }
 
