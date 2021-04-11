@@ -105,9 +105,7 @@ pub const Pacman = struct {
         while (pkgs_iter.next()) |pkg| {
             const local_version = try Version.init(pkg.value.version);
 
-            // TODO: (pkg.value.aur_version == null) isn't working, hence this workaround
-            const wtf = pkg.value.aur_version orelse "null";
-            if (std.mem.eql(u8, wtf, "null")) {
+            if (pkg.value.aur_version) |_| {} else {
                 std.log.warn("{s} was orphaned, skipping\n", .{pkg.key});
                 continue;
             }
