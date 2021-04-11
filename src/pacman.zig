@@ -10,9 +10,24 @@ const Pkgbuild = @import("pkgbuild.zig").Pkgbuild;
 const Version = @import("version.zig").Version;
 
 pub const Package = struct {
+    const Self = @This();
+
     version: []const u8,
     aur_version: ?[]const u8 = null,
     requires_update: bool = false,
+
+    // allocator.create does not respect default values so safeguard via an init() call
+    pub fn init(allocator: *mem.Allocator, version: []const u8) !*Self {
+        var new_pkg = try allocator.create(Self);
+        new_pkg.version = version;
+        new_pkg.aur_version = null;
+        new_pkg.requires_update = false;
+        return new_pkg;
+    }
+
+    pub fn deinit(self: *Self, allocator: *mem.Allocator) void {
+        allocator.destroy(self);
+    }
 };
 
 pub const Pacman = struct {
@@ -37,7 +52,7 @@ pub const Pacman = struct {
     pub fn deinit(self: *Self) void {
         var pkgs_iter = self.pkgs.iterator();
         while (pkgs_iter.next()) |pkg| {
-            self.allocator.destroy(pkg.value);
+            pkg.value.deinit(self.allocator);
         }
         self.pkgs.deinit();
     }
@@ -65,8 +80,9 @@ pub const Pacman = struct {
             const name = line_iter.next() orelse return error.UnknownPacmanQmOutputFormat;
             const version = line_iter.next() orelse return error.UnknownPacmanQmOutputFormat;
 
-            var new_pkg = try self.allocator.create(Package);
-            new_pkg.version = version;
+            var new_pkg = try Package.init(self.allocator, version);
+            // deinit happens at Pacman.deinit()
+
             try self.pkgs.putNoClobber(name, new_pkg);
         }
     }
@@ -81,8 +97,9 @@ pub const Pacman = struct {
 
             // This is the hack:
             // We're setting an impossible version to initialize the packages to install.
-            var new_pkg = try self.allocator.create(Package);
-            new_pkg.version = "0-0";
+            var new_pkg = try Package.init(self.allocator, "0-0");
+            // deinit happens at Pacman.deinit()
+
             try self.pkgs.putNoClobber(pkg_name, new_pkg);
         }
     }
@@ -105,7 +122,7 @@ pub const Pacman = struct {
         while (pkgs_iter.next()) |pkg| {
             const local_version = try Version.init(pkg.value.version);
 
-            if (pkg.value.aur_version) |_| {} else {
+            if (pkg.value.aur_version == null) {
                 std.log.warn("{s} was orphaned, skipping\n", .{pkg.key});
                 continue;
             }
