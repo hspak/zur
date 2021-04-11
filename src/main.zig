@@ -7,6 +7,8 @@ const Pacman = @import("pacman.zig").Pacman;
 
 const build_version = @import("build_options").version;
 
+pub const log_level: std.log.Level = .info;
+
 pub fn main() !void {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.c_allocator);
     defer arena_state.deinit();
