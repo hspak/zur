@@ -10,6 +10,26 @@ const RelevantFields = &[_][]const u8{
     "install()",
 };
 
+const Content = struct {
+    const Self = @This();
+
+    value: []const u8,
+    updated: bool = false,
+
+    // allocator.create does not respect default values so safeguard via an init() call
+    pub fn init(allocator: *std.mem.Allocator, value: []const u8) !*Self {
+        var new = try allocator.create(Self);
+        new.value = value;
+        new.updated = false;
+        return new;
+    }
+
+    pub fn deinit(self: *Self, allocator: *std.mem.Allocator) void {
+        allocator.free(self.value);
+        allocator.destroy(self);
+    }
+};
+
 pub const Pkgbuild = struct {
     const Self = @This();
 
@@ -29,10 +49,8 @@ pub const Pkgbuild = struct {
         defer self.relevant_fields.deinit();
         var iter = self.relevant_fields.iterator();
         while (iter.next()) |entry| {
-            // TODO: the fact that I have to do this might be a sign that we need a new data structure
             self.allocator.free(entry.key);
-            self.allocator.free(entry.value.value);
-            self.allocator.destroy(entry.value);
+            entry.value.deinit(self.allocator);
         }
     }
 
@@ -66,8 +84,9 @@ pub const Pkgbuild = struct {
                                 }
                             }
                         } else if (lookahead == '\n') {
-                            var content = try self.allocator.create(Content);
-                            content.value = buf.toOwnedSlice();
+                            var content = try Content.init(self.allocator, buf.toOwnedSlice());
+                            // Content.deinit() happens in Pkgbuild.deinit()
+
                             try self.relevant_fields.putNoClobber(key, content);
                             break;
                         } else {
@@ -96,8 +115,9 @@ pub const Pkgbuild = struct {
                         try buf.append(lookahead);
                         // TODO: Is it a valid assumption that the function closing paren is always on a new line?
                         if (lookahead == '}' and prev == '\n') {
-                            var content = try self.allocator.create(Content);
-                            content.value = buf.toOwnedSlice();
+                            var content = try Content.init(self.allocator, buf.toOwnedSlice());
+                            // Content.deinit() happens in Pkgbuild.deinit()
+
                             try self.relevant_fields.putNoClobber(key, content);
                             break;
                         }
@@ -139,11 +159,6 @@ pub const Pkgbuild = struct {
             }
         }
     }
-};
-
-const Content = struct {
-    value: []const u8,
-    updated: bool = false,
 };
 
 test "Pkgbuild - readLines - google-chrome-dev" {
@@ -214,23 +229,24 @@ test "Pkgbuild - readLines - google-chrome-dev" {
     var expectedMap = std.StringHashMap(*Content).init(testing.allocator);
     defer expectedMap.deinit();
 
-    var install_content = try testing.allocator.create(Content);
-    defer testing.allocator.destroy(install_content);
-    install_content.value = "$pkgname.install";
+    var install_val = std.ArrayList(u8).init(testing.allocator);
+    try install_val.appendSlice("$pkgname.install");
+    var install_content = try Content.init(testing.allocator, install_val.toOwnedSlice());
+    defer install_content.deinit(testing.allocator);
     try expectedMap.putNoClobber("install", install_content);
 
-    var source_content = try testing.allocator.create(Content);
-    defer testing.allocator.destroy(source_content);
-    source_content.value =
+    var source_val = std.ArrayList(u8).init(testing.allocator);
+    try source_val.appendSlice(
         \\"https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-${_channel}/google-chrome-${_channel}_${pkgver}-1_amd64.deb"
         \\'eula_text.html'
         \\"google-chrome-$_channel.sh"
-    ;
+    );
+    var source_content = try Content.init(testing.allocator, source_val.toOwnedSlice());
+    defer source_content.deinit(testing.allocator);
     try expectedMap.putNoClobber("source", source_content);
 
-    var package_content = try testing.allocator.create(Content);
-    defer testing.allocator.destroy(package_content);
-    package_content.value =
+    var package_val = std.ArrayList(u8).init(testing.allocator);
+    try package_val.appendSlice(
         \\{
         \\	msg2 "Extracting the data.tar.xz..."
         \\	bsdtar -xf data.tar.xz -C "$pkgdir/"
@@ -258,7 +274,9 @@ test "Pkgbuild - readLines - google-chrome-dev" {
         \\	rm -r "$pkgdir"/etc/cron.daily/ "$pkgdir"/opt/google/chrome-$_channel/cron/
         \\	rm "$pkgdir"/opt/google/chrome-$_channel/product_logo_*.png
         \\}
-    ;
+    );
+    var package_content = try Content.init(testing.allocator, package_val.toOwnedSlice());
+    defer package_content.deinit(testing.allocator);
     try expectedMap.putNoClobber("package()", package_content);
 
     var pkgbuild = Pkgbuild.init(testing.allocator, file_contents);
