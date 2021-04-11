@@ -5,12 +5,17 @@ const process = std.process;
 const curl = @import("curl.zig");
 const Pacman = @import("pacman.zig").Pacman;
 
+const build_version = @import("build_options").version;
+
 pub fn main() !void {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.c_allocator);
     defer arena_state.deinit();
     var allocator = &arena_state.allocator;
 
-    var pkg_list = try parseArgs(allocator);
+    var pkg_list = parseArgs(allocator) catch |err| switch (err) {
+        error.NoAction => return,
+        else => unreachable,
+    };
     defer pkg_list.deinit();
 
     try curl.init();
@@ -38,8 +43,10 @@ fn parseArgs(allocator: *std.mem.Allocator) !std.ArrayList([]const u8) {
     var action = args_iter.next(allocator) orelse return std.ArrayList([]const u8).init(allocator);
     if (std.mem.eql(u8, try action, "-h") or std.mem.eql(u8, try action, "--help")) {
         try printHelp();
+        return error.NoAction;
     } else if (std.mem.eql(u8, try action, "-v") or std.mem.eql(u8, try action, "--version")) {
-        try printHelp();
+        try printVersion();
+        return error.NoAction;
     } else if (!std.mem.eql(u8, try action, "-S")) {
         return error.UnsupportedAction;
     }
@@ -57,7 +64,7 @@ fn printHelp() !void {
         \\usage: zur [action]
         \\
         \\  actions:
-        \\    -S <pkg1> <pkg2>  install packages
+        \\    -S <pkg1> [pkg2]...  install packages
         \\
         \\  default action: update out-of-date AUR packages
         \\
@@ -68,5 +75,5 @@ fn printHelp() !void {
 
 fn printVersion() !void {
     var stdout = &io.getStdOut().writer();
-    const btyes_written = try stdout.write("version: TODO\n");
+    _ = try stdout.write("version: " ++ build_version ++ "\n");
 }
