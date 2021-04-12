@@ -12,6 +12,7 @@ const Version = @import("version.zig").Version;
 pub const Package = struct {
     const Self = @This();
 
+    base_name: ?[]const u8 = null,
     version: []const u8,
     aur_version: ?[]const u8 = null,
     requires_update: bool = false,
@@ -19,6 +20,7 @@ pub const Package = struct {
     // allocator.create does not respect default values so safeguard via an init() call
     pub fn init(allocator: *mem.Allocator, version: []const u8) !*Self {
         var new_pkg = try allocator.create(Self);
+        new_pkg.base_name = null;
         new_pkg.version = version;
         new_pkg.aur_version = null;
         new_pkg.requires_update = false;
@@ -26,6 +28,7 @@ pub const Package = struct {
     }
 
     pub fn deinit(self: *Self, allocator: *mem.Allocator) void {
+        if (self.base_name != null) allocator.free(self.base_name.?);
         if (self.aur_version != null) allocator.free(self.aur_version.?);
         allocator.destroy(self);
     }
@@ -112,10 +115,19 @@ pub const Pacman = struct {
             return error.ZeroResultsFromAurQuery;
         }
         for (remote_resp.results) |result| {
-            var copyAurVersion = try self.allocator.alloc(u8, result.Version.len);
-            std.mem.copy(u8, copyAurVersion, result.Version);
+            var copy_aur_version = try self.allocator.alloc(u8, result.Version.len);
+            std.mem.copy(u8, copy_aur_version, result.Version);
+
             var curr_pkg = self.pkgs.get(result.Name).?;
-            curr_pkg.aur_version = copyAurVersion;
+            curr_pkg.aur_version = copy_aur_version;
+
+            // Only store Package.base_name if the name doesn't match base name.
+            // We use the null state to see if they defer.
+            if (!mem.eql(u8, result.Name, result.PackageBase)) {
+                var copy_base_name = try self.allocator.alloc(u8, result.PackageBase.len);
+                std.mem.copy(u8, copy_base_name, result.PackageBase);
+                curr_pkg.base_name = copy_base_name;
+            }
         }
     }
 
@@ -166,7 +178,14 @@ pub const Pacman = struct {
         const full_dir = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, dir_name });
         const full_file_path = try fs.path.join(self.allocator, &[_][]const u8{ full_dir, file_name });
 
-        const url = try mem.joinZ(self.allocator, "/", &[_][]const u8{ aur.Snapshot, file_name });
+        // TODO: There must be a more idiomatic way of doing this
+        var url: [:0]const u8 = undefined;
+        if (pkg.base_name) |base_name| {
+            const name = try mem.join(self.allocator, ".", &[_][]const u8{ base_name, "tar.gz" });
+            url = try mem.joinZ(self.allocator, "/", &[_][]const u8{ aur.Snapshot, name });
+        } else {
+            url = try mem.joinZ(self.allocator, "/", &[_][]const u8{ aur.Snapshot, file_name });
+        }
         std.log.info("downloading from: {s}", .{url});
         const snapshot = try curl.get(self.allocator, url);
         defer snapshot.deinit();
@@ -287,6 +306,7 @@ pub const Pacman = struct {
         _ = try makepkg_runner.wait();
     }
 
+    // TODO: We need to handle package-base: some AUR packages' snapshots are stored as the base, and not the actual package name
     fn snapshotFiles(self: *Self, pkg_name: []const u8, pkg_version: []const u8) !?std.StringHashMap([]u8) {
         const dir_name = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg_version });
         const path = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, dir_name });
