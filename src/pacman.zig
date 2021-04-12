@@ -5,6 +5,7 @@ const os = std.os;
 const testing = std.testing;
 
 const aur = @import("aur.zig");
+const color = @import("color.zig");
 const curl = @import("curl.zig");
 const Pkgbuild = @import("pkgbuild.zig").Pkgbuild;
 const Version = @import("version.zig").Version;
@@ -97,7 +98,6 @@ pub const Pacman = struct {
         }
 
         for (pkg_list.items) |pkg_name| {
-            std.log.info("installing {s}", .{pkg_name});
 
             // This is the hack:
             // We're setting an impossible version to initialize the packages to install.
@@ -139,9 +139,10 @@ pub const Pacman = struct {
             const local_version = try Version.init(pkg.value.version);
 
             if (pkg.value.aur_version == null) {
-                std.log.warn("{s} was orphaned, skipping\n", .{pkg.key});
+                print(" {s}{s}{s} was orphaned, skipping\n", .{ color.Bold, pkg.key, color.Reset });
                 continue;
             }
+
             const remote_version = try Version.init(pkg.value.aur_version.?);
             if (local_version.olderThan(remote_version)) {
                 pkg.value.requires_update = true;
@@ -152,7 +153,12 @@ pub const Pacman = struct {
 
     pub fn processOutOfDate(self: *Self) !void {
         if (self.updates == 0) {
-            std.log.info("All AUR packages are up-to-date.", .{});
+            print("{s}::{s} {s}All AUR packages are up-to-date.{s}\n", .{
+                color.BoldForegroundBlue,
+                color.Reset,
+                color.Bold,
+                color.Reset,
+            });
             return;
         }
         try fs.cwd().makePath(self.zur_path);
@@ -162,7 +168,27 @@ pub const Pacman = struct {
             if (pkg.value.requires_update) {
                 // The install hack is bleeding into here.
                 if (!std.mem.eql(u8, pkg.value.version, "0-0")) {
-                    std.log.info("Updating {s}: {s} -> {s}", .{ pkg.key, pkg.value.version, pkg.value.aur_version.? });
+                    print("{s}::{s} Updating {s}{s}{s}: {s}{s}{s} -> {s}{s}{s}\n", .{
+                        color.BoldForegroundBlue,
+                        color.Reset,
+                        color.Bold,
+                        pkg.key,
+                        color.Reset,
+                        color.ForegroundRed,
+                        pkg.value.version,
+                        color.Reset,
+                        color.ForegroundGreen,
+                        pkg.value.aur_version.?,
+                        color.Reset,
+                    });
+                } else {
+                    print("{s}::{s} Installing {s}{s}{s}\n", .{
+                        color.BoldForegroundBlue,
+                        color.Reset,
+                        color.Bold,
+                        pkg.key,
+                        color.Reset,
+                    });
                 }
                 const snapshot_path = try self.downloadPackage(pkg.key, pkg.value);
                 try self.extractPackage(snapshot_path, pkg.key);
@@ -186,10 +212,10 @@ pub const Pacman = struct {
         } else {
             url = try mem.joinZ(self.allocator, "/", &[_][]const u8{ aur.Snapshot, file_name });
         }
-        std.log.info("downloading from: {s}", .{url});
+        print(" downloading from: {s}{s}{s}\n", .{ color.Bold, url, color.Reset });
         const snapshot = try curl.get(self.allocator, url);
         defer snapshot.deinit();
-        std.log.info("downloaded to: {s}", .{full_file_path});
+        print(" downloaded to: {s}{s}{s}\n", .{ color.Bold, full_file_path, color.Reset });
 
         try fs.cwd().makePath(full_dir);
         const snapshot_file = try fs.cwd().createFile(full_file_path, .{});
@@ -239,23 +265,24 @@ pub const Pacman = struct {
             if (mem.endsWith(u8, file.key, ".install") or mem.endsWith(u8, file.key, ".sh")) {
                 if (!std.mem.eql(u8, old_files.get(file.key).?, new_files.get(file.key).?)) {
                     at_least_one_diff = true;
-                    var stdout_writer = &std.io.getStdOut().writer();
-                    const output = try std.fmt.allocPrint(self.allocator, "{s} was updated:\n{s}", .{ file.key, new_files.get(file.key).? });
-                    _ = try stdout_writer.write(output);
+                    print("{s}{s}{s} was updated:\n{s}\n", .{
+                        color.Bold,
+                        file.key,
+                        color.Reset,
+                        new_files.get(file.key).?,
+                    });
 
-                    _ = try stdout_writer.write("\nContinue? [y/n]: ");
+                    print("\nContinue? [Y/n]: ", .{});
                     const stdin = std.io.getStdIn();
                     const input = try stdin.reader().readByte();
-                    if (input != 'y') {
+                    if (input != 'y' and input != 'Y') {
                         return;
-                    } else {
-                        _ = try stdout_writer.write("Continue declined. Goodbye!\n");
                     }
                 }
             }
         }
         if (!at_least_one_diff) {
-            std.log.info("no meaningful diff's found", .{});
+            print(" no meaningful diff's found\n", .{});
         }
         try self.install(pkg_name, pkg);
     }
@@ -269,20 +296,25 @@ pub const Pacman = struct {
     fn bareInstall(self: *Self, pkg_name: []const u8, pkg: *Package) !void {
         var pkg_files = try self.snapshotFiles(pkg_name, pkg.aur_version.?);
         var pkg_files_iter = pkg_files.?.iterator();
-        var stdout_writer = &std.io.getStdOut().writer();
         while (pkg_files_iter.next()) |pkg_file| {
-            const format = "==== File: {s} =================================\n{s}";
-            const output = try std.fmt.allocPrint(self.allocator, format, .{ pkg_file.key, pkg_file.value });
-            _ = try stdout_writer.write(output);
+            const format = "\n{s}::{s} File: {s}{s}{s} {s}===================={s}\n{s}";
+            print(format, .{
+                color.BoldForegroundBlue,
+                color.Reset,
+                color.Bold,
+                pkg_file.key,
+                color.Reset,
+                color.BoldForegroundBlue,
+                color.Reset,
+                pkg_file.value,
+            });
         }
 
-        _ = try stdout_writer.write("Install? [y/n]: ");
+        print("Install? [Y/n]: ", .{});
         const stdin = std.io.getStdIn();
         const input = try stdin.reader().readByte();
-        if (input == 'y') {
+        if (input == 'y' or input == 'Y') {
             try self.install(pkg_name, pkg);
-        } else {
-            _ = try stdout_writer.write("Install declined. Goodbye!\n");
         }
     }
 
@@ -318,12 +350,15 @@ pub const Pacman = struct {
             else => unreachable,
         };
         defer dir.close();
-        std.log.info("reading files in {s}", .{path});
+        print(" reading files in {s}{s}{s}\n", .{ color.Bold, path, color.Reset });
 
         var files_map = std.StringHashMap([]u8).init(self.allocator);
         var dir_iter = dir.iterate();
         while (try dir_iter.next()) |node| {
             if (std.mem.eql(u8, node.name, ".SRCINFO")) {
+                continue;
+            }
+            if (mem.containsAtLeast(u8, node.name, 1, ".tar.")) {
                 continue;
             }
             if (node.kind != fs.File.Kind.File) {
@@ -334,7 +369,7 @@ pub const Pacman = struct {
             // No one is going to want to read a novel before installing.
             var file_contents = dir.readFileAlloc(self.allocator, node.name, 4096) catch |err| switch (err) {
                 error.FileTooBig => {
-                    std.log.warn("skipping diff for large file: '{s}'", .{node.name});
+                    print(" skipping diff for large file: {s}{s}{s}\n", .{ color.Bold, node.name, color.Reset });
                     continue;
                 },
                 else => unreachable,
@@ -347,3 +382,8 @@ pub const Pacman = struct {
         return files_map;
     }
 };
+
+fn print(comptime format: []const u8, args: anytype) void {
+    var stdout_writer = std.io.getStdOut().writer();
+    std.fmt.format(stdout_writer, format, args) catch unreachable;
+}
