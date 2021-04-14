@@ -276,7 +276,17 @@ pub const Pacman = struct {
         try new_pkgbuild.readLines();
 
         try new_pkgbuild.comparePrev(old_pkgbuild);
-        new_pkgbuild.printUpdated();
+        var new_pkgbuild_iter = new_pkgbuild.relevant_fields.iterator();
+        while (new_pkgbuild_iter.next()) |field| {
+            if (field.value.updated) {
+                print("{s}{s}{s} was updated {s}", .{
+                    color.Bold,
+                    field.key,
+                    color.Reset,
+                    field.value.value,
+                });
+            }
+        }
 
         var at_least_one_diff = false;
         var new_iter = new_files.iterator();
