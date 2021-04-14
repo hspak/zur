@@ -132,7 +132,9 @@ pub const Version = struct {
                 }
             }
             if (new_str_i == 0) {
-                return error.ParseIntNoNumbersFound;
+                // TODO: This happens when there are packages with _ALPHA/_BETA/etc.
+                // Returning 1 here is _probably_ okay.
+                return 1;
             }
 
             const buf: []u8 = new_str[0..new_str_i];

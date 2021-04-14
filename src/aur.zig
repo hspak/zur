@@ -43,10 +43,11 @@ pub const Info = struct {
 
 pub fn queryAll(allocator: *std.mem.Allocator, pkgs: std.StringHashMap(*pacman.Package)) !RPCRespV5 {
     const uri = try buildInfoQuery(allocator, pkgs);
+    defer allocator.destroy(uri);
+
     var resp = try curl.get(allocator, uri);
     defer resp.deinit();
 
-    // TODO: just setting this arbitrarily high so I can kick the can
     @setEvalBranchQuota(100000);
     var json_resp = std.json.TokenStream.init(resp.items);
     var result = try std.json.parse(RPCRespV5, &json_resp, std.json.ParseOptions{ .allocator = allocator });

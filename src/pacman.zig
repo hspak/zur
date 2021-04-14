@@ -40,8 +40,10 @@ pub const Pacman = struct {
 
     allocator: *mem.Allocator,
     pkgs: std.StringHashMap(*Package),
+    aur_resp: aur.RPCRespV5,
     zur_path: []const u8,
     updates: usize = 0,
+    stdin_has_input: bool = false,
 
     pub fn init(allocator: *mem.Allocator) !Self {
         const home = os.getenv("HOME") orelse return error.NoHomeEnvVarFound;
@@ -51,6 +53,9 @@ pub const Pacman = struct {
             .allocator = allocator,
             .pkgs = std.StringHashMap(*Package).init(allocator),
             .zur_path = try fs.path.join(allocator, &[_][]const u8{ home, zur_dir }),
+            .aur_resp = undefined,
+            .updates = 0,
+            .stdin_has_input = false,
         };
     }
 
@@ -98,7 +103,6 @@ pub const Pacman = struct {
         }
 
         for (pkg_list.items) |pkg_name| {
-
             // This is the hack:
             // We're setting an impossible version to initialize the packages to install.
             var new_pkg = try Package.init(self.allocator, "0-0");
@@ -110,23 +114,17 @@ pub const Pacman = struct {
 
     pub fn fetchRemoteAurVersions(self: *Self) !void {
         var remote_resp = try aur.queryAll(self.allocator, self.pkgs);
-        defer std.json.parseFree(aur.RPCRespV5, remote_resp, std.json.ParseOptions{ .allocator = self.allocator });
         if (remote_resp.resultcount == 0) {
             return error.ZeroResultsFromAurQuery;
         }
         for (remote_resp.results) |result| {
-            var copy_aur_version = try self.allocator.alloc(u8, result.Version.len);
-            std.mem.copy(u8, copy_aur_version, result.Version);
-
             var curr_pkg = self.pkgs.get(result.Name).?;
-            curr_pkg.aur_version = copy_aur_version;
+            curr_pkg.aur_version = result.Version;
 
             // Only store Package.base_name if the name doesn't match base name.
             // We use the null state to see if they defer.
             if (!mem.eql(u8, result.Name, result.PackageBase)) {
-                var copy_base_name = try self.allocator.alloc(u8, result.PackageBase.len);
-                std.mem.copy(u8, copy_base_name, result.PackageBase);
-                curr_pkg.base_name = copy_base_name;
+                curr_pkg.base_name = result.PackageBase;
             }
         }
     }
@@ -139,7 +137,13 @@ pub const Pacman = struct {
             const local_version = try Version.init(pkg.value.version);
 
             if (pkg.value.aur_version == null) {
-                print(" {s}{s}{s} was orphaned, skipping\n", .{ color.Bold, pkg.key, color.Reset });
+                print("{s}warning:{s} {s}{s}{s} was orphaned or non-existant in AUR, skipping\n", .{
+                    color.BoldForegroundYellow,
+                    color.Reset,
+                    color.Bold,
+                    pkg.key,
+                    color.Reset,
+                });
                 continue;
             }
 
@@ -147,6 +151,17 @@ pub const Pacman = struct {
             if (local_version.olderThan(remote_version)) {
                 pkg.value.requires_update = true;
                 self.updates += 1;
+            }
+        }
+
+        if (self.updates == 0) {
+            return;
+        }
+        pkgs_iter = self.pkgs.iterator();
+        print("{s}::{s} Packages to be updated:\n", .{ color.BoldForegroundBlue, color.Reset });
+        while (pkgs_iter.next()) |pkg| {
+            if (pkg.value.requires_update) {
+                print(" {s}\n", .{pkg.key});
             }
         }
     }
@@ -182,11 +197,14 @@ pub const Pacman = struct {
                         color.Reset,
                     });
                 } else {
-                    print("{s}::{s} Installing {s}{s}{s}\n", .{
+                    print("{s}::{s} Installing {s}{s}{s} {s}{s}{s}\n", .{
                         color.BoldForegroundBlue,
                         color.Reset,
                         color.Bold,
                         pkg.key,
+                        color.Reset,
+                        color.ForegroundGreen,
+                        pkg.value.aur_version.?,
                         color.Reset,
                     });
                 }
@@ -212,6 +230,7 @@ pub const Pacman = struct {
         } else {
             url = try mem.joinZ(self.allocator, "/", &[_][]const u8{ aur.Snapshot, file_name });
         }
+
         print(" downloading from: {s}{s}{s}\n", .{ color.Bold, url, color.Reset });
         const snapshot = try curl.get(self.allocator, url);
         defer snapshot.deinit();
@@ -273,16 +292,18 @@ pub const Pacman = struct {
                     });
 
                     print("\nContinue? [Y/n]: ", .{});
-                    const stdin = std.io.getStdIn();
-                    const input = try stdin.reader().readByte();
+                    var stdin = std.io.getStdIn();
+                    const input = try self.stdinReadByte();
                     if (input != 'y' and input != 'Y') {
                         return;
+                    } else {
+                        print("\n", .{});
                     }
                 }
             }
         }
         if (!at_least_one_diff) {
-            print(" no meaningful diff's found\n", .{});
+            print("{s}::{s} No meaningful diff's found\n", .{ color.ForegroundBlue, color.Reset });
         }
         try self.install(pkg_name, pkg);
     }
@@ -310,11 +331,14 @@ pub const Pacman = struct {
             });
         }
 
+        // TODO: stdin flushing is a non-zig problem opt to manually read and stuff
         print("Install? [Y/n]: ", .{});
-        const stdin = std.io.getStdIn();
-        const input = try stdin.reader().readByte();
+        var stdin = std.io.getStdIn();
+        const input = try self.stdinReadByte();
         if (input == 'y' or input == 'Y') {
             try self.install(pkg_name, pkg);
+        } else {
+            print("\n", .{});
         }
     }
 
@@ -327,15 +351,15 @@ pub const Pacman = struct {
         const makepkg_runner = try std.ChildProcess.init(argv, self.allocator);
         defer makepkg_runner.deinit();
 
-        // TODO: when `makepkg` invokes `sudo` it seems to take the confirmation character from earlier.
-        // Find out how to prevent that.
-        const stdin = std.io.getStdIn();
-        makepkg_runner.stdin = stdin;
+        try self.stdinClearByte();
+        makepkg_runner.stdin = std.io.getStdIn();
         makepkg_runner.stdout = std.io.getStdOut();
         makepkg_runner.stdin_behavior = std.ChildProcess.StdIo.Inherit;
         makepkg_runner.stdout_behavior = std.ChildProcess.StdIo.Inherit;
-        try makepkg_runner.spawn();
-        _ = try makepkg_runner.wait();
+
+        // TODO: Ctrl+c from a [sudo] prompt causes some weird output behavior.
+        // I probably need signal handling for this to properly work.
+        const term_id = try makepkg_runner.spawnAndWait();
     }
 
     // TODO: We need to handle package-base: some AUR packages' snapshots are stored as the base, and not the actual package name
@@ -369,7 +393,13 @@ pub const Pacman = struct {
             // No one is going to want to read a novel before installing.
             var file_contents = dir.readFileAlloc(self.allocator, node.name, 4096) catch |err| switch (err) {
                 error.FileTooBig => {
-                    print(" skipping diff for large file: {s}{s}{s}\n", .{ color.Bold, node.name, color.Reset });
+                    print("  {s}-->{s} skipping diff for large file: {s}{s}{s}\n", .{
+                        color.ForegroundBlue,
+                        color.Reset,
+                        color.Bold,
+                        node.name,
+                        color.Reset,
+                    });
                     continue;
                 },
                 else => unreachable,
@@ -380,6 +410,24 @@ pub const Pacman = struct {
             try files_map.putNoClobber(copyName, file_contents);
         }
         return files_map;
+    }
+
+    fn stdinReadByte(self: *Self) !u8 {
+        var stdin = std.io.getStdIn();
+        const input = try stdin.reader().readByte();
+        self.stdin_has_input = true;
+        return input;
+    }
+
+    // We want to "eat" a character so that it doesn't get exposed to the child process.
+    // There's likely a more correct way to handle this.
+    fn stdinClearByte(self: *Self) !void {
+        if (!self.stdin_has_input) {
+            return;
+        }
+        var stdin = std.io.getStdIn();
+        _ = try stdin.reader().readBytesNoEof(1);
+        self.stdin_has_input = false;
     }
 };
 

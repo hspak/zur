@@ -95,6 +95,7 @@ pub const Pkgbuild = struct {
                     }
                 },
                 // PKGBUILD functions() {}
+                // TODO: looks like PKGBUILDS shared across multiple packages can do something like package_PKGNAME()
                 '(' => {
                     // functions get a () in their keys because
                     // 'pkgver' can both be a function and a key=value
