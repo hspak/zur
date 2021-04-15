@@ -276,6 +276,7 @@ pub const Pacman = struct {
         try new_pkgbuild.readLines();
 
         try new_pkgbuild.comparePrev(old_pkgbuild);
+        try new_pkgbuild.indentValues(2);
         var new_pkgbuild_iter = new_pkgbuild.relevant_fields.iterator();
         while (new_pkgbuild_iter.next()) |field| {
             if (field.value.updated) {
@@ -415,9 +416,17 @@ pub const Pacman = struct {
                 else => unreachable,
             };
 
+            var buf = std.ArrayList(u8).init(self.allocator);
+            var lines_iter = mem.split(file_contents, "\n");
+            while (lines_iter.next()) |line| {
+                try buf.appendSlice("  ");
+                try buf.appendSlice(line);
+                try buf.append('\n');
+            }
+
             var copyName = try self.allocator.alloc(u8, node.name.len);
             std.mem.copy(u8, copyName, node.name);
-            try files_map.putNoClobber(copyName, file_contents);
+            try files_map.putNoClobber(copyName, buf.toOwnedSlice());
         }
         return files_map;
     }
