@@ -182,7 +182,7 @@ pub const Pacman = struct {
         while (pkgs_iter.next()) |pkg| {
             if (pkg.value.requires_update) {
                 // The install hack is bleeding into here.
-                if (!std.mem.eql(u8, pkg.value.version, "0-0")) {
+                if (!mem.eql(u8, pkg.value.version, "0-0")) {
                     print("{s}::{s} Updating {s}{s}{s}: {s}{s}{s} -> {s}{s}{s}\n", .{
                         color.BoldForegroundBlue,
                         color.Reset,
@@ -295,7 +295,7 @@ pub const Pacman = struct {
         var new_iter = new_files.iterator();
         while (new_iter.next()) |file| {
             if (mem.endsWith(u8, file.key, ".install") or mem.endsWith(u8, file.key, ".sh")) {
-                if (!std.mem.eql(u8, old_files.get(file.key).?, new_files.get(file.key).?)) {
+                if (!mem.eql(u8, old_files.get(file.key).?, new_files.get(file.key).?)) {
                     at_least_one_diff = true;
                     print("{s}{s}{s} was updated:\n{s}\n", .{
                         color.Bold,
@@ -331,20 +331,48 @@ pub const Pacman = struct {
         var pkg_files = try self.snapshotFiles(pkg_name, pkg.aur_version.?);
         var pkg_files_iter = pkg_files.?.iterator();
         while (pkg_files_iter.next()) |pkg_file| {
-            const format = "\n{s}::{s} File: {s}{s}{s} {s}===================={s}\n{s}";
-            print(format, .{
-                color.BoldForegroundBlue,
-                color.Reset,
-                color.Bold,
-                pkg_file.key,
-                color.Reset,
-                color.BoldForegroundBlue,
-                color.Reset,
-                pkg_file.value,
-            });
+            if (mem.eql(u8, pkg_file.key, "PKGBUILD")) {
+                var pkgbuild = Pkgbuild.init(self.allocator, pkg_file.value);
+                defer pkgbuild.deinit();
+                try pkgbuild.readLines();
+                const format = "\n{s}::{s} File: {s}PKGBUILD{s} {s}===================={s}\n";
+                print(format, .{
+                    color.BoldForegroundBlue,
+                    color.Reset,
+                    color.Bold,
+                    color.Reset,
+                    color.BoldForegroundBlue,
+                    color.Reset,
+                });
+
+                // TODO: Might be worth looking into an ordered Hash Map so this is a non-issue
+                // Loop twice so that the PKGBUILD functions come after all the key=value
+                var fields_iter = pkgbuild.relevant_fields.iterator();
+                while (fields_iter.next()) |field| {
+                    if (mem.containsAtLeast(u8, field.key, 1, "()")) continue;
+                    print("  {s}={s}\n", .{ field.key, field.value.value });
+                }
+                try pkgbuild.indentValues(2);
+                fields_iter = pkgbuild.relevant_fields.iterator();
+                while (fields_iter.next()) |field| {
+                    if (!mem.containsAtLeast(u8, field.key, 1, "()")) continue;
+                    print("  {s} {s}\n", .{ field.key, field.value.value });
+                }
+            } else {
+                const format = "\n{s}::{s} File: {s}{s}{s} {s}===================={s}\n{s}";
+                print(format, .{
+                    color.BoldForegroundBlue,
+                    color.Reset,
+                    color.Bold,
+                    pkg_file.key,
+                    color.Reset,
+                    color.BoldForegroundBlue,
+                    color.Reset,
+                    pkg_file.value,
+                });
+            }
         }
 
-        // TODO: stdin flushing is a non-zig problem opt to manually read and stuff
         print("Install? [Y/n]: ", .{});
         var stdin = std.io.getStdIn();
         const input = try self.stdinReadByte();
@@ -356,7 +384,7 @@ pub const Pacman = struct {
     }
 
     fn install(self: *Self, pkg_name: []const u8, pkg: *Package) !void {
-        const pkg_dir = try std.mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg.aur_version.? });
+        const pkg_dir = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg.aur_version.? });
         const full_pkg_dir = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, pkg_dir });
         try os.chdir(full_pkg_dir);
 
@@ -375,7 +403,6 @@ pub const Pacman = struct {
         const term_id = try makepkg_runner.spawnAndWait();
     }
 
-    // TODO: We need to handle package-base: some AUR packages' snapshots are stored as the base, and not the actual package name
     fn snapshotFiles(self: *Self, pkg_name: []const u8, pkg_version: []const u8) !?std.StringHashMap([]u8) {
         const dir_name = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg_version });
         const path = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, dir_name });
@@ -392,7 +419,7 @@ pub const Pacman = struct {
         var files_map = std.StringHashMap([]u8).init(self.allocator);
         var dir_iter = dir.iterate();
         while (try dir_iter.next()) |node| {
-            if (std.mem.eql(u8, node.name, ".SRCINFO")) {
+            if (mem.eql(u8, node.name, ".SRCINFO")) {
                 continue;
             }
             if (mem.containsAtLeast(u8, node.name, 1, ".tar.")) {
@@ -419,7 +446,7 @@ pub const Pacman = struct {
             };
 
             // PKGBUILD's have their own indent logic
-            if (!std.mem.eql(u8, node.name, "PKGBUILD")) {
+            if (!mem.eql(u8, node.name, "PKGBUILD")) {
                 var buf = std.ArrayList(u8).init(self.allocator);
                 var lines_iter = mem.split(file_contents, "\n");
                 while (lines_iter.next()) |line| {
@@ -428,11 +455,11 @@ pub const Pacman = struct {
                     try buf.append('\n');
                 }
                 var copyName = try self.allocator.alloc(u8, node.name.len);
-                std.mem.copy(u8, copyName, node.name);
+                mem.copy(u8, copyName, node.name);
                 try files_map.putNoClobber(copyName, buf.toOwnedSlice());
             } else {
                 var copyName = try self.allocator.alloc(u8, node.name.len);
-                std.mem.copy(u8, copyName, node.name);
+                mem.copy(u8, copyName, node.name);
                 try files_map.putNoClobber(copyName, file_contents);
             }
         }
