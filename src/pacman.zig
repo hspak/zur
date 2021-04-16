@@ -158,7 +158,7 @@ pub const Pacman = struct {
             return;
         }
         pkgs_iter = self.pkgs.iterator();
-        print("{s}::{s} Packages to be updated:\n", .{ color.BoldForegroundBlue, color.Reset });
+        print("{s}::{s} Packages to be installed or updated:\n", .{ color.BoldForegroundBlue, color.Reset });
         while (pkgs_iter.next()) |pkg| {
             if (pkg.value.requires_update) {
                 print(" {s}\n", .{pkg.key});
@@ -181,6 +181,8 @@ pub const Pacman = struct {
         var pkgs_iter = self.pkgs.iterator();
         while (pkgs_iter.next()) |pkg| {
             if (pkg.value.requires_update) {
+                // TODO: Short circuit here if we already have a built package available.
+
                 // The install hack is bleeding into here.
                 if (!mem.eql(u8, pkg.value.version, "0-0")) {
                     print("{s}::{s} Updating {s}{s}{s}: {s}{s}{s} -> {s}{s}{s}\n", .{
@@ -244,6 +246,7 @@ pub const Pacman = struct {
         return full_dir;
     }
 
+    // TODO: Maybe one day if there's and easy way to extract tar.gz archives in Zig (be it stdlib or 3rd party), we can replace this.
     fn extractPackage(self: *Self, snapshot_path: []const u8, pkg_name: []const u8) !void {
         const file_name = try mem.join(self.allocator, ".", &[_][]const u8{ pkg_name, "tar.gz" });
         const file_path = try fs.path.join(self.allocator, &[_][]const u8{ snapshot_path, file_name });
@@ -400,7 +403,34 @@ pub const Pacman = struct {
 
         // TODO: Ctrl+c from a [sudo] prompt causes some weird output behavior.
         // I probably need signal handling for this to properly work.
-        const term_id = try makepkg_runner.spawnAndWait();
+        // TODO: We also need some additional cleanup steps if it fails.
+        _ = try makepkg_runner.spawnAndWait();
+
+        // TODO: Clean up older package after N updates?
+        try self.moveBuiltPackages(pkg_name, pkg);
+    }
+
+    fn moveBuiltPackages(self: *Self, pkg_name: []const u8, pkg: *Package) !void {
+        const pkg_dir = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg.aur_version.? });
+        const full_pkg_dir = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, pkg_dir });
+
+        try os.chdir(self.zur_path);
+        const archive_dir = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, "pkg" });
+        try fs.cwd().makePath(archive_dir);
+
+        var dir = fs.openDirAbsolute(full_pkg_dir, .{ .access_sub_paths = false, .iterate = true, .no_follow = true }) catch |err| switch (err) {
+            error.FileNotFound => return,
+            else => unreachable,
+        };
+        var dir_iter = dir.iterate();
+        while (try dir_iter.next()) |node| {
+            if (!mem.containsAtLeast(u8, node.name, 1, ".pkg.tar.zst")) {
+                continue;
+            }
+            const full_old_name = try fs.path.join(self.allocator, &[_][]const u8{ full_pkg_dir, node.name });
+            const full_new_name = try fs.path.join(self.allocator, &[_][]const u8{ archive_dir, node.name });
+            try fs.cwd().rename(full_old_name, full_new_name);
+        }
     }
 
     fn snapshotFiles(self: *Self, pkg_name: []const u8, pkg_version: []const u8) !?std.StringHashMap([]u8) {
@@ -408,9 +438,7 @@ pub const Pacman = struct {
         const path = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, dir_name });
 
         var dir = fs.openDirAbsolute(path, .{ .access_sub_paths = false, .iterate = true, .no_follow = true }) catch |err| switch (err) {
-            error.FileNotFound => {
-                return null;
-            },
+            error.FileNotFound => return null,
             else => unreachable,
         };
         defer dir.close();
