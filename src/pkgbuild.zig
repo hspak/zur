@@ -35,19 +35,19 @@ pub const Pkgbuild = struct {
 
     allocator: *std.mem.Allocator,
     file_contents: []const u8,
-    relevant_fields: std.StringHashMap(*Content),
+    fields: std.StringHashMap(*Content),
 
     pub fn init(allocator: *std.mem.Allocator, file_contents: []const u8) Self {
         return Self{
             .allocator = allocator,
             .file_contents = file_contents,
-            .relevant_fields = std.StringHashMap(*Content).init(allocator),
+            .fields = std.StringHashMap(*Content).init(allocator),
         };
     }
 
     pub fn deinit(self: *Self) void {
-        defer self.relevant_fields.deinit();
-        var iter = self.relevant_fields.iterator();
+        defer self.fields.deinit();
+        var iter = self.fields.iterator();
         while (iter.next()) |entry| {
             self.allocator.free(entry.key);
             entry.value.deinit(self.allocator);
@@ -87,7 +87,7 @@ pub const Pkgbuild = struct {
                             var content = try Content.init(self.allocator, buf.toOwnedSlice());
                             // Content.deinit() happens in Pkgbuild.deinit()
 
-                            try self.relevant_fields.putNoClobber(key, content);
+                            try self.fields.putNoClobber(key, content);
                             break;
                         } else {
                             try buf.append(lookahead);
@@ -119,7 +119,7 @@ pub const Pkgbuild = struct {
                             var content = try Content.init(self.allocator, buf.toOwnedSlice());
                             // Content.deinit() happens in Pkgbuild.deinit()
 
-                            try self.relevant_fields.putNoClobber(key, content);
+                            try self.fields.putNoClobber(key, content);
                             break;
                         }
                         prev = lookahead;
@@ -135,8 +135,8 @@ pub const Pkgbuild = struct {
 
     pub fn comparePrev(self: *Self, prev_pkgbuild: Pkgbuild) !void {
         for (RelevantFields) |field| {
-            const prev = prev_pkgbuild.relevant_fields.get(field);
-            const curr = self.relevant_fields.get(field);
+            const prev = prev_pkgbuild.fields.get(field);
+            const curr = self.fields.get(field);
             if (prev == null and curr != null) {
                 curr.?.updated = true;
             } else if (prev != null and curr == null) {
@@ -154,7 +154,7 @@ pub const Pkgbuild = struct {
 
     pub fn indentValues(self: *Self, spaces_count: usize) !void {
         var buf = std.ArrayList(u8).init(self.allocator);
-        var fields_iter = self.relevant_fields.iterator();
+        var fields_iter = self.fields.iterator();
         while (fields_iter.next()) |field| {
             if (!std.mem.containsAtLeast(u8, field.key, 1, "()")) {
                 continue;
@@ -297,9 +297,9 @@ test "Pkgbuild - readLines - google-chrome-dev" {
     defer pkgbuild.deinit();
     try pkgbuild.readLines();
 
-    testing.expectEqualStrings(expectedMap.get("install").?.value, pkgbuild.relevant_fields.get("install").?.value);
-    testing.expectEqualStrings(expectedMap.get("source").?.value, pkgbuild.relevant_fields.get("source").?.value);
-    testing.expectEqualStrings(expectedMap.get("package()").?.value, pkgbuild.relevant_fields.get("package()").?.value);
+    testing.expectEqualStrings(expectedMap.get("install").?.value, pkgbuild.fields.get("install").?.value);
+    testing.expectEqualStrings(expectedMap.get("source").?.value, pkgbuild.fields.get("source").?.value);
+    testing.expectEqualStrings(expectedMap.get("package()").?.value, pkgbuild.fields.get("package()").?.value);
 }
 
 test "Pkgbuild - compare" {
@@ -371,8 +371,8 @@ test "Pkgbuild - compare" {
     try pkgbuild_new.readLines();
 
     try pkgbuild_new.comparePrev(pkgbuild_old);
-    testing.expect(pkgbuild_new.relevant_fields.get("install").?.updated);
-    testing.expect(pkgbuild_new.relevant_fields.get("pkgver()").?.updated);
+    testing.expect(pkgbuild_new.fields.get("install").?.updated);
+    testing.expect(pkgbuild_new.fields.get("pkgver()").?.updated);
 }
 
 test "Pkgbuild - indentValue - google-chrome-dev" {
@@ -483,5 +483,5 @@ test "Pkgbuild - indentValue - google-chrome-dev" {
     try pkgbuild.readLines();
     try pkgbuild.indentValues(2);
 
-    testing.expectEqualStrings(expectedMap.get("package()").?.value, pkgbuild.relevant_fields.get("package()").?.value);
+    testing.expectEqualStrings(expectedMap.get("package()").?.value, pkgbuild.fields.get("package()").?.value);
 }

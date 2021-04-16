@@ -277,7 +277,7 @@ pub const Pacman = struct {
 
         try new_pkgbuild.comparePrev(old_pkgbuild);
         try new_pkgbuild.indentValues(2);
-        var new_pkgbuild_iter = new_pkgbuild.relevant_fields.iterator();
+        var new_pkgbuild_iter = new_pkgbuild.fields.iterator();
         while (new_pkgbuild_iter.next()) |field| {
             if (field.value.updated) {
                 print("{s}::{s} {s}{s}{s} was updated {s}", .{
@@ -347,13 +347,13 @@ pub const Pacman = struct {
 
                 // TODO: Might be worth looking into an ordered Hash Map so this is a non-issue
                 // Loop twice so that the PKGBUILD functions come after all the key=value
-                var fields_iter = pkgbuild.relevant_fields.iterator();
+                var fields_iter = pkgbuild.fields.iterator();
                 while (fields_iter.next()) |field| {
                     if (mem.containsAtLeast(u8, field.key, 1, "()")) continue;
                     print("  {s}={s}\n", .{ field.key, field.value.value });
                 }
                 try pkgbuild.indentValues(2);
-                fields_iter = pkgbuild.relevant_fields.iterator();
+                fields_iter = pkgbuild.fields.iterator();
                 while (fields_iter.next()) |field| {
                     if (!mem.containsAtLeast(u8, field.key, 1, "()")) continue;
                     print("  {s} {s}\n", .{ field.key, field.value.value });
