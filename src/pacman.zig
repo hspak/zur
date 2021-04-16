@@ -280,7 +280,9 @@ pub const Pacman = struct {
         var new_pkgbuild_iter = new_pkgbuild.relevant_fields.iterator();
         while (new_pkgbuild_iter.next()) |field| {
             if (field.value.updated) {
-                print("{s}{s}{s} was updated {s}", .{
+                print("{s}::{s} {s}{s}{s} was updated {s}", .{
+                    color.BoldForegroundBlue,
+                    color.Reset,
                     color.Bold,
                     field.key,
                     color.Reset,
@@ -416,17 +418,23 @@ pub const Pacman = struct {
                 else => unreachable,
             };
 
-            var buf = std.ArrayList(u8).init(self.allocator);
-            var lines_iter = mem.split(file_contents, "\n");
-            while (lines_iter.next()) |line| {
-                try buf.appendSlice("  ");
-                try buf.appendSlice(line);
-                try buf.append('\n');
+            // PKGBUILD's have their own indent logic
+            if (!std.mem.eql(u8, node.name, "PKGBUILD")) {
+                var buf = std.ArrayList(u8).init(self.allocator);
+                var lines_iter = mem.split(file_contents, "\n");
+                while (lines_iter.next()) |line| {
+                    try buf.appendSlice("  ");
+                    try buf.appendSlice(line);
+                    try buf.append('\n');
+                }
+                var copyName = try self.allocator.alloc(u8, node.name.len);
+                std.mem.copy(u8, copyName, node.name);
+                try files_map.putNoClobber(copyName, buf.toOwnedSlice());
+            } else {
+                var copyName = try self.allocator.alloc(u8, node.name.len);
+                std.mem.copy(u8, copyName, node.name);
+                try files_map.putNoClobber(copyName, file_contents);
             }
-
-            var copyName = try self.allocator.alloc(u8, node.name.len);
-            std.mem.copy(u8, copyName, node.name);
-            try files_map.putNoClobber(copyName, buf.toOwnedSlice());
         }
         return files_map;
     }
