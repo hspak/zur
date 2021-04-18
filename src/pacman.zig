@@ -181,7 +181,18 @@ pub const Pacman = struct {
         var pkgs_iter = self.pkgs.iterator();
         while (pkgs_iter.next()) |pkg| {
             if (pkg.value.requires_update) {
-                // TODO: Short circuit here if we already have a built package available.
+                if (try self.localPackageExists(pkg.key, pkg.value.aur_version.?)) {
+                    print("{s}warning:{s} Found existing up-to-date package: {s}{s}-{s}{s}, deferring to pacman -U...\n", .{
+                        color.BoldForegroundYellow,
+                        color.Reset,
+                        color.Bold,
+                        pkg.key,
+                        pkg.value.aur_version.?,
+                        color.Reset,
+                    });
+                    try self.installExistingPackage(pkg.key, pkg.value);
+                    return;
+                }
 
                 // The install hack is bleeding into here.
                 if (!mem.eql(u8, pkg.value.version, "0-0")) {
@@ -215,6 +226,34 @@ pub const Pacman = struct {
                 try self.compareUpdateAndInstall(pkg.key, pkg.value);
             }
         }
+    }
+
+    fn localPackageExists(self: *Self, pkg_name: []const u8, new_ver: []const u8) !bool {
+        const full_pkg_name = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, new_ver, "x86_64.pkg.tar.zst" });
+        const zur_pkg_dir = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, "pkg" });
+
+        var dir = try fs.openDirAbsolute(zur_pkg_dir, .{ .access_sub_paths = false, .iterate = true, .no_follow = true });
+        var dir_iter = dir.iterate();
+        while (try dir_iter.next()) |node| {
+            if (mem.eql(u8, node.name, full_pkg_name)) {
+                return true;
+            } else {
+                if (!mem.eql(u8, node.name, "brightnessztl-0.2-1-x86_64.pkg.tar.zst")) {
+                    continue;
+                }
+                var i: u32 = 0;
+                while (i < 38) : (i += 1) {
+                    if (node.name[i] == full_pkg_name[i]) {
+                        std.debug.print("equal\n", .{});
+                    } else {
+                        std.debug.print("no? {c}!={c}\n", .{ node.name[i], full_pkg_name[i] });
+                    }
+                }
+                std.debug.print("found: {s} {d} {s}\n", .{ node.name, node.name.len, @TypeOf(node.name) });
+                std.debug.print("name:  {s} {d} {s}\n", .{ full_pkg_name, full_pkg_name.len, @TypeOf(full_pkg_name) });
+            }
+        }
+        return false;
     }
 
     fn downloadPackage(self: *Self, pkg_name: []const u8, pkg: *Package) ![]const u8 {
@@ -350,13 +389,8 @@ pub const Pacman = struct {
 
                 // TODO: Might be worth looking into an ordered Hash Map so this is a non-issue
                 // Loop twice so that the PKGBUILD functions come after all the key=value
-                var fields_iter = pkgbuild.fields.iterator();
-                while (fields_iter.next()) |field| {
-                    if (mem.containsAtLeast(u8, field.key, 1, "()")) continue;
-                    print("  {s}={s}\n", .{ field.key, field.value.value });
-                }
                 try pkgbuild.indentValues(2);
-                fields_iter = pkgbuild.fields.iterator();
+                var fields_iter = pkgbuild.fields.iterator();
                 while (fields_iter.next()) |field| {
                     if (!mem.containsAtLeast(u8, field.key, 1, "()")) continue;
                     print("  {s} {s}\n", .{ field.key, field.value.value });
@@ -392,22 +426,37 @@ pub const Pacman = struct {
         try os.chdir(full_pkg_dir);
 
         const argv = &[_][]const u8{ "makepkg", "-sicC" };
-        const makepkg_runner = try std.ChildProcess.init(argv, self.allocator);
-        defer makepkg_runner.deinit();
+        try self.execCommand(argv);
+
+        // TODO: Clean up older package after N updates?
+        try self.moveBuiltPackages(pkg_name, pkg);
+    }
+
+    fn installExistingPackage(self: *Self, pkg_name: []const u8, pkg: *Package) !void {
+        const pkg_dir = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg.aur_version.? });
+        const full_pkg_dir = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, "pkg" });
+        try os.chdir(full_pkg_dir);
+
+        // TODO: Dynamically get the right arch
+        const full_pkg_name = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg.aur_version.?, "x86_64.pkg.tar.zst" });
+        const argv = &[_][]const u8{ "sudo", "pacman", "-U", full_pkg_name };
+        try self.execCommand(argv);
+    }
+
+    fn execCommand(self: *Self, argv: []const []const u8) !void {
+        const pacman_runner = try std.ChildProcess.init(argv, self.allocator);
+        defer pacman_runner.deinit();
 
         try self.stdinClearByte();
-        makepkg_runner.stdin = std.io.getStdIn();
-        makepkg_runner.stdout = std.io.getStdOut();
-        makepkg_runner.stdin_behavior = std.ChildProcess.StdIo.Inherit;
-        makepkg_runner.stdout_behavior = std.ChildProcess.StdIo.Inherit;
+        pacman_runner.stdin = std.io.getStdIn();
+        pacman_runner.stdout = std.io.getStdOut();
+        pacman_runner.stdin_behavior = std.ChildProcess.StdIo.Inherit;
+        pacman_runner.stdout_behavior = std.ChildProcess.StdIo.Inherit;
 
         // TODO: Ctrl+c from a [sudo] prompt causes some weird output behavior.
         // I probably need signal handling for this to properly work.
         // TODO: We also need some additional cleanup steps if it fails.
-        _ = try makepkg_runner.spawnAndWait();
-
-        // TODO: Clean up older package after N updates?
-        try self.moveBuiltPackages(pkg_name, pkg);
+        _ = try pacman_runner.spawnAndWait();
     }
 
     fn moveBuiltPackages(self: *Self, pkg_name: []const u8, pkg: *Package) !void {
@@ -448,6 +497,9 @@ pub const Pacman = struct {
         var dir_iter = dir.iterate();
         while (try dir_iter.next()) |node| {
             if (mem.eql(u8, node.name, ".SRCINFO")) {
+                continue;
+            }
+            if (mem.eql(u8, node.name, ".gitignore")) {
                 continue;
             }
             if (mem.containsAtLeast(u8, node.name, 1, ".tar.")) {
