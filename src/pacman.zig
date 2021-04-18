@@ -35,6 +35,9 @@ pub const Package = struct {
     }
 };
 
+// TODO
+// - Basic search functionality
+// - Periodic cleanup of ~/.zur and ~/.zur/pkg
 pub const Pacman = struct {
     const Self = @This();
 
@@ -221,8 +224,7 @@ pub const Pacman = struct {
                         color.Reset,
                     });
                 }
-                const snapshot_path = try self.downloadPackage(pkg.key, pkg.value);
-                try self.extractPackage(snapshot_path, pkg.key);
+                try self.downloadAndExtractPackage(pkg.key, pkg.value);
                 try self.compareUpdateAndInstall(pkg.key, pkg.value);
             }
         }
@@ -256,7 +258,7 @@ pub const Pacman = struct {
         return false;
     }
 
-    fn downloadPackage(self: *Self, pkg_name: []const u8, pkg: *Package) ![]const u8 {
+    fn downloadAndExtractPackage(self: *Self, pkg_name: []const u8, pkg: *Package) !void {
         const file_name = try mem.join(self.allocator, ".", &[_][]const u8{ pkg_name, "tar.gz" });
         const dir_name = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg.aur_version.? });
 
@@ -272,6 +274,17 @@ pub const Pacman = struct {
             url = try mem.joinZ(self.allocator, "/", &[_][]const u8{ aur.Snapshot, file_name });
         }
 
+        // This is not perfect (not robust against manual changes), but it's sufficient for it's purpose (short-circuiting)
+        var dir = fs.cwd().openDir(full_dir, .{}) catch |err| switch (err) {
+            error.FileNotFound => null,
+            else => unreachable,
+        };
+        if (dir != null) {
+            dir.?.close();
+            print(" skipping download, {s}{s}{s} already exists...\n", .{ color.Bold, full_dir, color.Reset });
+            return;
+        }
+
         print(" downloading from: {s}{s}{s}\n", .{ color.Bold, url, color.Reset });
         const snapshot = try curl.get(self.allocator, url);
         defer snapshot.deinit();
@@ -282,7 +295,8 @@ pub const Pacman = struct {
         defer snapshot_file.close();
 
         try snapshot_file.writeAll(snapshot.items);
-        return full_dir;
+        try self.extractPackage(full_dir, pkg_name);
+        return;
     }
 
     // TODO: Maybe one day if there's and easy way to extract tar.gz archives in Zig (be it stdlib or 3rd party), we can replace this.
@@ -444,19 +458,19 @@ pub const Pacman = struct {
     }
 
     fn execCommand(self: *Self, argv: []const []const u8) !void {
-        const pacman_runner = try std.ChildProcess.init(argv, self.allocator);
-        defer pacman_runner.deinit();
+        const runner = try std.ChildProcess.init(argv, self.allocator);
+        defer runner.deinit();
 
         try self.stdinClearByte();
-        pacman_runner.stdin = std.io.getStdIn();
-        pacman_runner.stdout = std.io.getStdOut();
-        pacman_runner.stdin_behavior = std.ChildProcess.StdIo.Inherit;
-        pacman_runner.stdout_behavior = std.ChildProcess.StdIo.Inherit;
+        runner.stdin = std.io.getStdIn();
+        runner.stdout = std.io.getStdOut();
+        runner.stdin_behavior = std.ChildProcess.StdIo.Inherit;
+        runner.stdout_behavior = std.ChildProcess.StdIo.Inherit;
 
         // TODO: Ctrl+c from a [sudo] prompt causes some weird output behavior.
         // I probably need signal handling for this to properly work.
         // TODO: We also need some additional cleanup steps if it fails.
-        _ = try pacman_runner.spawnAndWait();
+        _ = try runner.spawnAndWait();
     }
 
     fn moveBuiltPackages(self: *Self, pkg_name: []const u8, pkg: *Package) !void {
