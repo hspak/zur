@@ -239,20 +239,6 @@ pub const Pacman = struct {
         while (try dir_iter.next()) |node| {
             if (mem.eql(u8, node.name, full_pkg_name)) {
                 return true;
-            } else {
-                if (!mem.eql(u8, node.name, "brightnessztl-0.2-1-x86_64.pkg.tar.zst")) {
-                    continue;
-                }
-                var i: u32 = 0;
-                while (i < 38) : (i += 1) {
-                    if (node.name[i] == full_pkg_name[i]) {
-                        std.debug.print("equal\n", .{});
-                    } else {
-                        std.debug.print("no? {c}!={c}\n", .{ node.name[i], full_pkg_name[i] });
-                    }
-                }
-                std.debug.print("found: {s} {d} {s}\n", .{ node.name, node.name.len, @TypeOf(node.name) });
-                std.debug.print("name:  {s} {d} {s}\n", .{ full_pkg_name, full_pkg_name.len, @TypeOf(full_pkg_name) });
             }
         }
         return false;
