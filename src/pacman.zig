@@ -352,6 +352,7 @@ pub const Pacman = struct {
                     if (input != 'y' and input != 'Y') {
                         return;
                     } else {
+                        try self.stdinClearByte();
                         print("\n", .{});
                     }
                 }
@@ -417,6 +418,7 @@ pub const Pacman = struct {
             try self.install(pkg_name, pkg);
         } else {
             print("\n", .{});
+            try self.stdinClearByte();
         }
     }
 
