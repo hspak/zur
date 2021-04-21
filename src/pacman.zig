@@ -317,12 +317,14 @@ pub const Pacman = struct {
         defer new_pkgbuild.deinit();
         try new_pkgbuild.readLines();
 
+        var at_least_one_diff = false;
         try new_pkgbuild.comparePrev(old_pkgbuild);
         try new_pkgbuild.indentValues(2);
         var new_pkgbuild_iter = new_pkgbuild.fields.iterator();
         while (new_pkgbuild_iter.next()) |field| {
             if (field.value.updated) {
-                print("{s}::{s} {s}{s}{s} was updated {s}", .{
+                at_least_one_diff = true;
+                print("{s}::{s} {s}{s}{s} was updated: {s}\n", .{
                     color.BoldForegroundBlue,
                     color.Reset,
                     color.Bold,
@@ -333,35 +335,38 @@ pub const Pacman = struct {
             }
         }
 
-        var at_least_one_diff = false;
         var new_iter = new_files.iterator();
         while (new_iter.next()) |file| {
             if (mem.endsWith(u8, file.key, ".install") or mem.endsWith(u8, file.key, ".sh")) {
                 if (!mem.eql(u8, old_files.get(file.key).?, new_files.get(file.key).?)) {
                     at_least_one_diff = true;
-                    print("{s}{s}{s} was updated:\n{s}\n", .{
+
+                    // TODO: would be cool to show a real diff here
+                    print("{s}::{s} {s}{s}{s} was updated:\n{s}\n", .{
+                        color.BoldForegroundBlue,
+                        color.Reset,
                         color.Bold,
                         file.key,
                         color.Reset,
                         new_files.get(file.key).?,
                     });
-
-                    print("\nContinue? [Y/n]: ", .{});
-                    var stdin = std.io.getStdIn();
-                    const input = try self.stdinReadByte();
-                    if (input != 'y' and input != 'Y') {
-                        return;
-                    } else {
-                        try self.stdinClearByte();
-                        print("\n", .{});
-                    }
                 }
             }
         }
         if (!at_least_one_diff) {
             print("{s}::{s} No meaningful diff's found\n", .{ color.ForegroundBlue, color.Reset });
         }
-        try self.install(pkg_name, pkg);
+
+        print("\nContinue? [Y/n]: ", .{});
+        var stdin = std.io.getStdIn();
+        const input = try self.stdinReadByte();
+        if (input != 'y' and input != 'Y') {
+            return;
+        } else {
+            try self.stdinClearByte();
+            print("\n", .{});
+            try self.install(pkg_name, pkg);
+        }
     }
 
     // TODO: handle recursively installing dependencies from AUR
