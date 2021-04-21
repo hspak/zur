@@ -237,7 +237,7 @@ pub const Pacman = struct {
         var dir = try fs.openDirAbsolute(zur_pkg_dir, .{ .access_sub_paths = false, .iterate = true, .no_follow = true });
         var dir_iter = dir.iterate();
         while (try dir_iter.next()) |node| {
-            if (mem.eql(u8, node.name, full_pkg_name)) {
+            if (mem.eql(u8, node.name, full_pkg_name) and !mem.containsAtLeast(u8, node.name, 1, "-git")) {
                 return true;
             }
         }
