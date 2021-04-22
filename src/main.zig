@@ -16,7 +16,10 @@ pub fn main() !void {
 
     var pkg_list = parseArgs(allocator) catch |err| switch (err) {
         error.NoAction => return,
-        else => unreachable,
+        else => {
+            try printHelp();
+            return;
+        },
     };
     defer pkg_list.deinit();
 
@@ -57,6 +60,9 @@ fn parseArgs(allocator: *std.mem.Allocator) !std.ArrayList([]const u8) {
     while (args_iter.next(allocator)) |arg_or_err| {
         const arg = arg_or_err catch unreachable;
         try pkg_list.append(arg);
+    }
+    if (pkg_list.items.len == 0) {
+        return error.ActionMissingPackages;
     }
     return pkg_list;
 }
