@@ -126,6 +126,8 @@ pub const Pacman = struct {
 
             // Only store Package.base_name if the name doesn't match base name.
             // We use the null state to see if they defer.
+            // TODO: Actually, PKGBUILDs with multiple pkgnames' install multiple packages;
+            // zur currently duplicates these package installs because of this.
             if (!mem.eql(u8, result.Name, result.PackageBase)) {
                 curr_pkg.base_name = result.PackageBase;
             }
@@ -353,20 +355,19 @@ pub const Pacman = struct {
                 }
             }
         }
-        if (!at_least_one_diff) {
-            print("{s}::{s} No meaningful diff's found\n", .{ color.ForegroundBlue, color.Reset });
+        if (at_least_one_diff) {
+            print("\nContinue? [Y/n]: ", .{});
+            var stdin = std.io.getStdIn();
+            const input = try self.stdinReadByte();
+            if (input != 'y' and input != 'Y') {
+                return;
+            } else {
+                try self.stdinClearByte();
+                print("\n", .{});
+            }
         }
-
-        print("\nContinue? [Y/n]: ", .{});
-        var stdin = std.io.getStdIn();
-        const input = try self.stdinReadByte();
-        if (input != 'y' and input != 'Y') {
-            return;
-        } else {
-            try self.stdinClearByte();
-            print("\n", .{});
-            try self.install(pkg_name, pkg);
-        }
+        print("{s}::{s} No meaningful diff's found\n", .{ color.ForegroundBlue, color.Reset });
+        try self.install(pkg_name, pkg);
     }
 
     // TODO: handle recursively installing dependencies from AUR
@@ -520,7 +521,7 @@ pub const Pacman = struct {
             // No one is going to want to read a novel before installing.
             var file_contents = dir.readFileAlloc(self.allocator, node.name, 4096) catch |err| switch (err) {
                 error.FileTooBig => {
-                    print("  {s}-->{s} skipping diff for large file: {s}{s}{s}\n", .{
+                    print("  {s}->{s} skipping diff for large file: {s}{s}{s}\n", .{
                         color.ForegroundBlue,
                         color.Reset,
                         color.Bold,
