@@ -1,7 +1,7 @@
 const std = @import("std");
 const io = std.io;
-const process = std.process;
 
+const Args = @import("argparse.zig").Args;
 const curl = @import("curl.zig");
 const Pacman = @import("pacman.zig").Pacman;
 
@@ -14,15 +14,20 @@ pub fn main() !void {
     defer arena_state.deinit();
     var allocator = &arena_state.allocator;
 
-    var pkg_list = parseArgs(allocator) catch |err| switch (err) {
-        error.NoAction => return,
-        else => {
-            try printHelp();
-            return;
-        },
-    };
-    defer pkg_list.deinit();
+    var args = Args.init(allocator);
+    defer args.deinit();
+    try args.parse();
 
+    switch (args.action) {
+        .PrintHelp => try printHelp(),
+        .PrintVersion => try printVersion(),
+        .Search => {}, // TODO
+        .InstallOrUpgrade => try installOrUpdate(allocator, args.pkgs),
+        .Unset => @panic("Args somehow ended up with 'Unset' state"),
+    }
+}
+
+fn installOrUpdate(allocator: *std.mem.Allocator, pkg_list: std.ArrayList([]const u8)) !void {
     try curl.init();
     defer curl.deinit();
 
@@ -42,37 +47,13 @@ pub fn main() !void {
     try pacman.processOutOfDate();
 }
 
-fn parseArgs(allocator: *std.mem.Allocator) !std.ArrayList([]const u8) {
-    var args_iter = process.args();
-    var exe = try args_iter.next(allocator).?;
-    var action = args_iter.next(allocator) orelse return std.ArrayList([]const u8).init(allocator);
-    if (std.mem.eql(u8, try action, "-h") or std.mem.eql(u8, try action, "--help")) {
-        try printHelp();
-        return error.NoAction;
-    } else if (std.mem.eql(u8, try action, "-v") or std.mem.eql(u8, try action, "--version")) {
-        try printVersion();
-        return error.NoAction;
-    } else if (!std.mem.eql(u8, try action, "-S")) {
-        return error.UnsupportedAction;
-    }
-
-    var pkg_list = std.ArrayList([]const u8).init(allocator);
-    while (args_iter.next(allocator)) |arg_or_err| {
-        const arg = arg_or_err catch unreachable;
-        try pkg_list.append(arg);
-    }
-    if (pkg_list.items.len == 0) {
-        return error.ActionMissingPackages;
-    }
-    return pkg_list;
-}
-
 fn printHelp() !void {
     const msg =
         \\usage: zur [action]
         \\
         \\  actions:
         \\    -S <pkg1> [pkg2]...  install packages
+        \\    -Ss <pkg>            search for packages by name
         \\
         \\  default action: update out-of-date AUR packages
         \\

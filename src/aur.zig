@@ -3,7 +3,7 @@ const std = @import("std");
 const curl = @import("curl.zig");
 const pacman = @import("pacman.zig");
 
-const Host = "https://aur.archlinux.org/rpc/?v=5&type=info";
+const Host = "https://aur.archlinux.org/rpc/?v=5";
 
 pub const Snapshot = "https://aur.archlinux.org/cgit/aur.git/snapshot";
 
@@ -12,6 +12,14 @@ pub const RPCRespV5 = struct {
     type: []const u8,
     resultcount: usize,
     results: []Info,
+};
+
+// TODO: Maybe some opportunity to de-dep this
+pub const RPCSearchRespV5 = struct {
+    version: usize,
+    type: []const u8,
+    resultcount: usize,
+    results: []Search,
 };
 
 pub const Info = struct {
@@ -41,6 +49,23 @@ pub const Info = struct {
     Keywords: ?[][]const u8 = null,
 };
 
+pub const Search = struct {
+    ID: usize,
+    Name: []const u8,
+    PackageBaseID: usize,
+    PackageBase: []const u8,
+    Version: []const u8,
+    Description: []const u8,
+    URL: []const u8,
+    NumVotes: usize,
+    Popularity: f64,
+    OutOfDate: ?i32 = null, // TODO: parse this unixtime
+    Maintainer: ?[]const u8 = null,
+    FirstSubmitted: i32, // TODO: parse this unixtime
+    LastModified: i32, // TODO: parse this unixtime
+    URLPath: []const u8,
+};
+
 pub fn queryAll(allocator: *std.mem.Allocator, pkgs: std.StringHashMap(*pacman.Package)) !RPCRespV5 {
     const uri = try buildInfoQuery(allocator, pkgs);
     defer allocator.destroy(uri);
@@ -55,9 +80,29 @@ pub fn queryAll(allocator: *std.mem.Allocator, pkgs: std.StringHashMap(*pacman.P
     return result;
 }
 
+pub fn search(allocator: *std.mem.Allocator, search_name: []const u8) !RPCSearchRespV5 {
+    const uri = std.ArrayList(u8).init(allocator);
+    try uri.appendSlice(Host);
+    try uri.appendSlice("&type=search&by=name&arg="); // TODO: maybe consider opening this up
+
+    var copyName = try allocator.alloc(u8, search_name.len);
+    std.mem.copy(u8, copyName, search_name);
+    try uri.appendSlice(copyName);
+
+    var resp = try curl.get(allocator, uri.toOwnedSliceSentinel(0));
+    defer resp.deinit();
+
+    @setEvalBranchQuota(100000);
+    var json_resp = std.json.TokenStream.init(resp.items);
+    var result = try std.json.parse(RPCRespV5, &json_resp, std.json.ParseOptions{ .allocator = allocator });
+
+    return result;
+}
+
 fn buildInfoQuery(allocator: *std.mem.Allocator, pkgs: std.StringHashMap(*pacman.Package)) ![*:0]const u8 {
     var uri = std.ArrayList(u8).init(allocator);
     try uri.appendSlice(Host);
+    try uri.appendSlice("&type=info");
 
     var pkgs_iter = pkgs.iterator();
     while (pkgs_iter.next()) |pkg| {
