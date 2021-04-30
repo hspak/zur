@@ -3,6 +3,7 @@ const io = std.io;
 
 const Args = @import("argparse.zig").Args;
 const curl = @import("curl.zig");
+const search = @import("pacman.zig").search;
 const Pacman = @import("pacman.zig").Pacman;
 
 const build_version = @import("build_options").version;
@@ -21,7 +22,7 @@ pub fn main() !void {
     switch (args.action) {
         .PrintHelp => try printHelp(),
         .PrintVersion => try printVersion(),
-        .Search => {}, // TODO
+        .Search => try search(allocator, args.pkgs.items[0]),
         .InstallOrUpgrade => try installOrUpdate(allocator, args.pkgs),
         .Unset => @panic("Args somehow ended up with 'Unset' state"),
     }

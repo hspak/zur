@@ -81,7 +81,7 @@ pub fn queryAll(allocator: *std.mem.Allocator, pkgs: std.StringHashMap(*pacman.P
 }
 
 pub fn search(allocator: *std.mem.Allocator, search_name: []const u8) !RPCSearchRespV5 {
-    const uri = std.ArrayList(u8).init(allocator);
+    var uri = std.ArrayList(u8).init(allocator);
     try uri.appendSlice(Host);
     try uri.appendSlice("&type=search&by=name&arg="); // TODO: maybe consider opening this up
 
@@ -89,12 +89,12 @@ pub fn search(allocator: *std.mem.Allocator, search_name: []const u8) !RPCSearch
     std.mem.copy(u8, copyName, search_name);
     try uri.appendSlice(copyName);
 
-    var resp = try curl.get(allocator, uri.toOwnedSliceSentinel(0));
+    var resp = try curl.get(allocator, try uri.toOwnedSliceSentinel(0));
     defer resp.deinit();
 
     @setEvalBranchQuota(100000);
     var json_resp = std.json.TokenStream.init(resp.items);
-    var result = try std.json.parse(RPCRespV5, &json_resp, std.json.ParseOptions{ .allocator = allocator });
+    var result = try std.json.parse(RPCSearchRespV5, &json_resp, std.json.ParseOptions{ .allocator = allocator });
 
     return result;
 }

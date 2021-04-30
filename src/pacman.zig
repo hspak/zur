@@ -573,6 +573,24 @@ pub const Pacman = struct {
     }
 };
 
+pub fn search(allocator: *std.mem.Allocator, pkg: []const u8) !void {
+    const resp = try aur.search(allocator, pkg);
+    for (resp.results) |result| {
+        print("{s}aur/{s}{s}{s}{s} {s}{s}{s} ({d})\n    {s}\n", .{
+            color.BoldForegroundMagenta,
+            color.Reset,
+            color.Bold,
+            result.Name,
+            color.Reset,
+            color.BoldForegroundGreen,
+            result.Version,
+            color.Reset,
+            result.Popularity,
+            result.Description,
+        });
+    }
+}
+
 fn print(comptime format: []const u8, args: anytype) void {
     var stdout_writer = std.io.getStdOut().writer();
     std.fmt.format(stdout_writer, format, args) catch unreachable;
