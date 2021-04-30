@@ -574,9 +574,15 @@ pub const Pacman = struct {
 };
 
 pub fn search(allocator: *std.mem.Allocator, pkg: []const u8) !void {
+    var pacman = try Pacman.init(allocator);
+    defer pacman.deinit();
+    try pacman.fetchLocalPackages();
+
+    const installed = color.BoldForegroundCyan ++ "[Installed]" ++ color.Reset;
     const resp = try aur.search(allocator, pkg);
     for (resp.results) |result| {
-        print("{s}aur/{s}{s}{s}{s} {s}{s}{s} ({d})\n    {s}\n", .{
+        const installed_text = if (pacman.pkgs.get(result.Name) == null) "" else installed;
+        print("{s}aur/{s}{s}{s}{s} {s}{s}{s} {s} ({d})\n    {s}\n", .{
             color.BoldForegroundMagenta,
             color.Reset,
             color.Bold,
@@ -585,6 +591,7 @@ pub fn search(allocator: *std.mem.Allocator, pkg: []const u8) !void {
             color.BoldForegroundGreen,
             result.Version,
             color.Reset,
+            installed_text,
             result.Popularity,
             result.Description,
         });
