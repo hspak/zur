@@ -11,12 +11,26 @@ const build_version = @import("build_options").version;
 pub const log_level: std.log.Level = .info;
 
 pub fn main() !void {
-    var arena_state = std.heap.ArenaAllocator.init(std.heap.c_allocator);
-    defer arena_state.deinit();
-    var allocator = &arena_state.allocator;
+    // var arena_state = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    // defer arena_state.deinit();
+    // var allocator = &arena_state.allocator;
+
+    // Technically, it makes more sense to use the arena allocator here,
+    // but I want to build some muscle memory with deallocating.
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var allocator = &gpa.allocator;
+    defer {
+        const leaked = gpa.deinit();
+        if (leaked) @panic("memory leak");
+    }
 
     var args = Args.init(allocator);
-    defer args.deinit();
+    defer {
+        for (args.pkgs.items) |pkg| {
+            allocator.free(pkg);
+        }
+        args.deinit();
+    }
     try args.parse();
 
     switch (args.action) {

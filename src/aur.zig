@@ -28,7 +28,7 @@ pub const Info = struct {
     PackageBaseID: usize,
     PackageBase: []const u8,
     Version: []const u8,
-    Description: []const u8,
+    Description: ?[]const u8 = null,
     URL: []const u8,
     NumVotes: usize,
     Popularity: f64,
@@ -55,7 +55,7 @@ pub const Search = struct {
     PackageBaseID: usize,
     PackageBase: []const u8,
     Version: []const u8,
-    Description: []const u8,
+    Description: ?[]const u8 = null,
     URL: []const u8,
     NumVotes: usize,
     Popularity: f64,
@@ -82,14 +82,15 @@ pub fn queryAll(allocator: *std.mem.Allocator, pkgs: std.StringHashMap(*pacman.P
 
 pub fn search(allocator: *std.mem.Allocator, search_name: []const u8) !RPCSearchRespV5 {
     var uri = std.ArrayList(u8).init(allocator);
+    defer uri.deinit();
+
     try uri.appendSlice(Host);
     try uri.appendSlice("&type=search&by=name&arg="); // TODO: maybe consider opening this up
+    try uri.appendSlice(search_name);
 
-    var copyName = try allocator.alloc(u8, search_name.len);
-    std.mem.copy(u8, copyName, search_name);
-    try uri.appendSlice(copyName);
-
-    var resp = try curl.get(allocator, try uri.toOwnedSliceSentinel(0));
+    var uri_for_curl = try uri.toOwnedSliceSentinel(0);
+    defer allocator.free(uri_for_curl);
+    var resp = try curl.get(allocator, uri_for_curl);
     defer resp.deinit();
 
     @setEvalBranchQuota(100000);
@@ -101,6 +102,8 @@ pub fn search(allocator: *std.mem.Allocator, search_name: []const u8) !RPCSearch
 
 fn buildInfoQuery(allocator: *std.mem.Allocator, pkgs: std.StringHashMap(*pacman.Package)) ![*:0]const u8 {
     var uri = std.ArrayList(u8).init(allocator);
+    defer uri.deinit();
+
     try uri.appendSlice(Host);
     try uri.appendSlice("&type=info");
 
@@ -111,6 +114,7 @@ fn buildInfoQuery(allocator: *std.mem.Allocator, pkgs: std.StringHashMap(*pacman
         var copyKey = try allocator.alloc(u8, pkg.key.len);
         std.mem.copy(u8, copyKey, pkg.key);
         try uri.appendSlice(copyKey);
+        defer allocator.free(copyKey);
     }
     return try uri.toOwnedSliceSentinel(0);
 }

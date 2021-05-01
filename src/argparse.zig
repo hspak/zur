@@ -31,8 +31,14 @@ pub const Args = struct {
     pub fn parse(self: *Self) !void {
         var args_iter = std.process.args();
         var exe = try args_iter.next(self.allocator).?;
+        defer self.allocator.free(exe);
         var action_or_err = args_iter.next(self.allocator) orelse "";
         var action = try action_or_err;
+        defer {
+            if (!std.mem.eql(u8, action, "")) {
+                self.allocator.free(action);
+            }
+        }
         if (mem.eql(u8, action, "-h") or mem.eql(u8, action, "--help")) {
             self.action = .PrintHelp;
             return;
@@ -41,8 +47,12 @@ pub const Args = struct {
             return;
         } else if (mem.eql(u8, action, "-Ss")) {
             self.action = .Search;
-            const search_name = try args_iter.next(self.allocator).?;
-            try self.pkgs.append(search_name);
+            const search_name = args_iter.next(self.allocator);
+            if (search_name == null) {
+                self.action = .PrintHelp;
+                return;
+            }
+            try self.pkgs.append(try search_name.?);
         } else if (mem.eql(u8, action, "-S")) {
             self.action = .InstallOrUpgrade;
             while (args_iter.next(self.allocator)) |arg_or_err| {
