@@ -24,21 +24,11 @@ pub const Args = struct {
         };
     }
 
-    pub fn deinit(self: *Self) void {
-        self.pkgs.deinit();
-    }
-
     pub fn parse(self: *Self) !void {
         var args_iter = std.process.args();
         var exe = try args_iter.next(self.allocator).?;
-        defer self.allocator.free(exe);
         var action_or_err = args_iter.next(self.allocator) orelse "";
         var action = try action_or_err;
-        defer {
-            if (!std.mem.eql(u8, action, "")) {
-                self.allocator.free(action);
-            }
-        }
         if (mem.eql(u8, action, "-h") or mem.eql(u8, action, "--help")) {
             self.action = .PrintHelp;
             return;

@@ -68,10 +68,8 @@ pub const Search = struct {
 
 pub fn queryAll(allocator: *std.mem.Allocator, pkgs: std.StringHashMap(*pacman.Package)) !RPCRespV5 {
     const uri = try buildInfoQuery(allocator, pkgs);
-    defer allocator.destroy(uri);
 
     var resp = try curl.get(allocator, uri);
-    defer resp.deinit();
 
     @setEvalBranchQuota(100000);
     var json_resp = std.json.TokenStream.init(resp.items);
@@ -82,16 +80,13 @@ pub fn queryAll(allocator: *std.mem.Allocator, pkgs: std.StringHashMap(*pacman.P
 
 pub fn search(allocator: *std.mem.Allocator, search_name: []const u8) !RPCSearchRespV5 {
     var uri = std.ArrayList(u8).init(allocator);
-    defer uri.deinit();
 
     try uri.appendSlice(Host);
     try uri.appendSlice("&type=search&by=name&arg="); // TODO: maybe consider opening this up
     try uri.appendSlice(search_name);
 
     var uri_for_curl = try uri.toOwnedSliceSentinel(0);
-    defer allocator.free(uri_for_curl);
     var resp = try curl.get(allocator, uri_for_curl);
-    defer resp.deinit();
 
     @setEvalBranchQuota(100000);
     var json_resp = std.json.TokenStream.init(resp.items);
@@ -102,7 +97,6 @@ pub fn search(allocator: *std.mem.Allocator, search_name: []const u8) !RPCSearch
 
 fn buildInfoQuery(allocator: *std.mem.Allocator, pkgs: std.StringHashMap(*pacman.Package)) ![*:0]const u8 {
     var uri = std.ArrayList(u8).init(allocator);
-    defer uri.deinit();
 
     try uri.appendSlice(Host);
     try uri.appendSlice("&type=info");

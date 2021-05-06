@@ -27,10 +27,6 @@ pub const Package = struct {
         new_pkg.requires_update = false;
         return new_pkg;
     }
-
-    pub fn deinit(self: *Self, allocator: *mem.Allocator) void {
-        allocator.destroy(self);
-    }
 };
 
 // TODO
@@ -62,21 +58,6 @@ pub const Pacman = struct {
         };
     }
 
-    pub fn deinit(self: *Self) void {
-        var pkgs_iter = self.pkgs.iterator();
-        while (pkgs_iter.next()) |pkg| {
-            pkg.value.deinit(self.allocator);
-        }
-        self.pkgs.deinit();
-        self.allocator.free(self.zur_path);
-        if (self.aur_resp != null) {
-            std.json.parseFree(aur.RPCRespV5, self.aur_resp.?, std.json.ParseOptions{ .allocator = self.allocator });
-        }
-        if (self.pacman_output != null) {
-            self.allocator.free(self.pacman_output.?);
-        }
-    }
-
     // TODO: use libalpm once this issue is fixed:
     // https://github.com/ziglang/zig/issues/1499
     pub fn fetchLocalPackages(self: *Self) !void {
@@ -89,8 +70,6 @@ pub const Pacman = struct {
             .argv = &[_][]const u8{ "pacman", "-Qm" },
         });
         self.pacman_output = result.stdout;
-        // defer self.allocator.free(result.stdout);
-        defer self.allocator.free(result.stderr);
 
         var lines = mem.split(result.stdout, "\n");
         while (lines.next()) |line| {
@@ -104,7 +83,6 @@ pub const Pacman = struct {
             const version = line_iter.next() orelse return error.UnknownPacmanQmOutputFormat;
 
             var new_pkg = try Package.init(self.allocator, version);
-            // deinit happens at Pacman.deinit()
 
             try self.pkgs.putNoClobber(name, new_pkg);
         }
@@ -119,7 +97,6 @@ pub const Pacman = struct {
             // This is the hack:
             // We're setting an impossible version to initialize the packages to install.
             var new_pkg = try Package.init(self.allocator, "0-0");
-            // deinit happens at Pacman.deinit()
 
             try self.pkgs.putNoClobber(pkg_name, new_pkg);
         }
@@ -244,9 +221,7 @@ pub const Pacman = struct {
 
     fn localPackageExists(self: *Self, pkg_name: []const u8, new_ver: []const u8) !bool {
         const full_pkg_name = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, new_ver, "x86_64.pkg.tar.zst" });
-        defer self.allocator.free(full_pkg_name);
         const zur_pkg_dir = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, "pkg" });
-        defer self.allocator.free(zur_pkg_dir);
 
         // TODO: maybe we want to be like yay and also find some VCS info to do this correctly.
         // For -git packages, we need to force zur to always install because we don't know if there's been an update or not.
@@ -262,14 +237,10 @@ pub const Pacman = struct {
 
     fn downloadAndExtractPackage(self: *Self, pkg_name: []const u8, pkg: *Package) !void {
         const file_name = try mem.join(self.allocator, ".", &[_][]const u8{ pkg_name, "tar.gz" });
-        defer self.allocator.free(file_name);
         const dir_name = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg.aur_version.? });
-        defer self.allocator.free(dir_name);
 
         const full_dir = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, dir_name });
-        defer self.allocator.free(full_dir);
         const full_file_path = try fs.path.join(self.allocator, &[_][]const u8{ full_dir, file_name });
-        defer self.allocator.free(full_file_path);
 
         // TODO: There must be a more idiomatic way of doing this
         var url: [:0]const u8 = undefined;
@@ -279,7 +250,6 @@ pub const Pacman = struct {
         } else {
             url = try mem.joinZ(self.allocator, "/", &[_][]const u8{ aur.Snapshot, file_name });
         }
-        defer self.allocator.free(url);
 
         // This is not perfect (not robust against manual changes), but it's sufficient for it's purpose (short-circuiting)
         var dir = fs.cwd().openDir(full_dir, .{}) catch |err| switch (err) {
@@ -294,7 +264,6 @@ pub const Pacman = struct {
 
         print(" downloading from: {s}{s}{s}\n", .{ color.Bold, url, color.Reset });
         const snapshot = try curl.get(self.allocator, url);
-        defer snapshot.deinit();
         print(" downloaded to: {s}{s}{s}\n", .{ color.Bold, full_file_path, color.Reset });
 
         try fs.cwd().makePath(full_dir);
@@ -309,9 +278,7 @@ pub const Pacman = struct {
     // TODO: Maybe one day if there's and easy way to extract tar.gz archives in Zig (be it stdlib or 3rd party), we can replace this.
     fn extractPackage(self: *Self, snapshot_path: []const u8, pkg_name: []const u8) !void {
         const file_name = try mem.join(self.allocator, ".", &[_][]const u8{ pkg_name, "tar.gz" });
-        defer self.allocator.free(file_name);
         const file_path = try fs.path.join(self.allocator, &[_][]const u8{ snapshot_path, file_name });
-        defer self.allocator.free(file_path);
         const result = try std.ChildProcess.exec(.{
             .allocator = self.allocator,
             .argv = &[_][]const u8{ "tar", "-xf", file_path, "-C", snapshot_path, "--strip-components=1" },
@@ -327,31 +294,13 @@ pub const Pacman = struct {
             return self.bareInstall(pkg_name, pkg);
         }
         var old_files = old_files_maybe.?;
-        defer {
-            var old_files_iter = old_files.iterator();
-            while (old_files_iter.next()) |file| {
-                self.allocator.free(file.key);
-                self.allocator.free(file.value);
-            }
-            old_files.deinit();
-        }
 
         var new_files_maybe = try self.snapshotFiles(pkg_name, pkg.aur_version.?);
         var new_files = new_files_maybe.?;
-        defer {
-            var new_files_iter = new_files.iterator();
-            while (new_files_iter.next()) |file| {
-                self.allocator.free(file.key);
-                self.allocator.free(file.value);
-            }
-            new_files.deinit();
-        }
 
         var old_pkgbuild = Pkgbuild.init(self.allocator, old_files.get("PKGBUILD").?);
-        defer old_pkgbuild.deinit();
         try old_pkgbuild.readLines();
         var new_pkgbuild = Pkgbuild.init(self.allocator, new_files.get("PKGBUILD").?);
-        defer new_pkgbuild.deinit();
         try new_pkgbuild.readLines();
 
         var at_least_one_diff = false;
@@ -414,19 +363,10 @@ pub const Pacman = struct {
     fn bareInstall(self: *Self, pkg_name: []const u8, pkg: *Package) !void {
         // TODO: Rethink the optional here.
         var pkg_files = try self.snapshotFiles(pkg_name, pkg.aur_version.?);
-        defer {
-            var pkg_files_iter = pkg_files.?.iterator();
-            while (pkg_files_iter.next()) |pkg_file| {
-                self.allocator.free(pkg_file.key);
-                self.allocator.free(pkg_file.value);
-            }
-            pkg_files.?.deinit();
-        }
         var pkg_files_iter = pkg_files.?.iterator();
         while (pkg_files_iter.next()) |pkg_file| {
             if (mem.eql(u8, pkg_file.key, "PKGBUILD")) {
                 var pkgbuild = Pkgbuild.init(self.allocator, pkg_file.value);
-                defer pkgbuild.deinit();
                 try pkgbuild.readLines();
                 const format = "\n{s}::{s} File: {s}PKGBUILD{s} {s}===================={s}\n";
                 print(format, .{
@@ -472,9 +412,7 @@ pub const Pacman = struct {
 
     fn install(self: *Self, pkg_name: []const u8, pkg: *Package) !void {
         const pkg_dir = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg.aur_version.? });
-        defer self.allocator.free(pkg_dir);
         const full_pkg_dir = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, pkg_dir });
-        defer self.allocator.free(full_pkg_dir);
         try os.chdir(full_pkg_dir);
 
         const argv = &[_][]const u8{ "makepkg", "-sicC" };
@@ -486,22 +424,17 @@ pub const Pacman = struct {
 
     fn installExistingPackage(self: *Self, pkg_name: []const u8, pkg: *Package) !void {
         const pkg_dir = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg.aur_version.? });
-        defer self.allocator.free(pkg_dir);
         const full_pkg_dir = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, "pkg" });
-        defer self.allocator.free(full_pkg_dir);
         try os.chdir(full_pkg_dir);
 
         // TODO: Dynamically get the right arch
         const full_pkg_name = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg.aur_version.?, "x86_64.pkg.tar.zst" });
-        defer self.allocator.free(full_pkg_name);
-
         const argv = &[_][]const u8{ "sudo", "pacman", "-U", full_pkg_name };
         try self.execCommand(argv);
     }
 
     fn execCommand(self: *Self, argv: []const []const u8) !void {
         const runner = try std.ChildProcess.init(argv, self.allocator);
-        defer runner.deinit();
 
         try self.stdinClearByte();
         runner.stdin = std.io.getStdIn();
@@ -517,13 +450,10 @@ pub const Pacman = struct {
 
     fn moveBuiltPackages(self: *Self, pkg_name: []const u8, pkg: *Package) !void {
         const pkg_dir = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg.aur_version.? });
-        defer self.allocator.free(pkg_dir);
         const full_pkg_dir = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, pkg_dir });
-        defer self.allocator.free(full_pkg_dir);
 
         try os.chdir(self.zur_path);
         const archive_dir = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, "pkg" });
-        defer self.allocator.free(archive_dir);
         try fs.cwd().makePath(archive_dir);
 
         var dir = fs.openDirAbsolute(full_pkg_dir, .{ .access_sub_paths = false, .iterate = true, .no_follow = true }) catch |err| switch (err) {
@@ -536,18 +466,14 @@ pub const Pacman = struct {
                 continue;
             }
             const full_old_name = try fs.path.join(self.allocator, &[_][]const u8{ full_pkg_dir, node.name });
-            defer self.allocator.free(full_old_name);
             const full_new_name = try fs.path.join(self.allocator, &[_][]const u8{ archive_dir, node.name });
-            defer self.allocator.free(full_new_name);
             try fs.cwd().rename(full_old_name, full_new_name);
         }
     }
 
     fn snapshotFiles(self: *Self, pkg_name: []const u8, pkg_version: []const u8) !?std.StringHashMap([]u8) {
         const dir_name = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg_version });
-        defer self.allocator.free(dir_name);
         const path = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, dir_name });
-        defer self.allocator.free(path);
 
         var dir = fs.openDirAbsolute(path, .{ .access_sub_paths = false, .iterate = true, .no_follow = true }) catch |err| switch (err) {
             error.FileNotFound => return null,
@@ -630,12 +556,10 @@ pub const Pacman = struct {
 
 pub fn search(allocator: *std.mem.Allocator, pkg: []const u8) !void {
     var pacman = try Pacman.init(allocator);
-    defer pacman.deinit();
     try pacman.fetchLocalPackages();
 
     const installed = color.BoldForegroundCyan ++ "[Installed]" ++ color.Reset;
     const resp = try aur.search(allocator, pkg);
-    defer std.json.parseFree(aur.RPCSearchRespV5, resp, std.json.ParseOptions{ .allocator = allocator });
     for (resp.results) |result| {
         const installed_text = if (pacman.pkgs.get(result.Name) == null) "" else installed;
         print("{s}aur/{s}{s}{s}{s} {s}{s}{s} {s} ({d})\n    {s}\n", .{
