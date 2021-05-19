@@ -349,8 +349,9 @@ pub const Pacman = struct {
                 try self.stdinClearByte();
                 print("\n", .{});
             }
+        } else {
+            print("{s}::{s} No meaningful diff's found\n", .{ color.ForegroundBlue, color.Reset });
         }
-        print("{s}::{s} No meaningful diff's found\n", .{ color.ForegroundBlue, color.Reset });
         try self.install(pkg_name, pkg);
     }
 
