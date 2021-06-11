@@ -126,22 +126,22 @@ pub const Pacman = struct {
     pub fn compareVersions(self: *Self) !void {
         var pkgs_iter = self.pkgs.iterator();
         while (pkgs_iter.next()) |pkg| {
-            const local_version = try Version.init(pkg.value.version);
+            const local_version = try Version.init(pkg.value_ptr.*.version);
 
-            if (pkg.value.aur_version == null) {
+            if (pkg.value_ptr.*.aur_version == null) {
                 print("{s}warning:{s} {s}{s}{s} was orphaned or non-existant in AUR, skipping\n", .{
                     color.BoldForegroundYellow,
                     color.Reset,
                     color.Bold,
-                    pkg.key,
+                    pkg.key_ptr.*,
                     color.Reset,
                 });
                 continue;
             }
 
-            const remote_version = try Version.init(pkg.value.aur_version.?);
+            const remote_version = try Version.init(pkg.value_ptr.*.aur_version.?);
             if (local_version.olderThan(remote_version)) {
-                pkg.value.requires_update = true;
+                pkg.value_ptr.*.requires_update = true;
                 self.updates += 1;
             }
         }
@@ -152,8 +152,8 @@ pub const Pacman = struct {
         pkgs_iter = self.pkgs.iterator();
         print("{s}::{s} Packages to be installed or updated:\n", .{ color.BoldForegroundBlue, color.Reset });
         while (pkgs_iter.next()) |pkg| {
-            if (pkg.value.requires_update) {
-                print(" {s}\n", .{pkg.key});
+            if (pkg.value_ptr.*.requires_update) {
+                print(" {s}\n", .{pkg.key_ptr.*});
             }
         }
     }
@@ -172,33 +172,33 @@ pub const Pacman = struct {
 
         var pkgs_iter = self.pkgs.iterator();
         while (pkgs_iter.next()) |pkg| {
-            if (pkg.value.requires_update) {
-                if (try self.localPackageExists(pkg.key, pkg.value.aur_version.?)) {
+            if (pkg.value_ptr.*.requires_update) {
+                if (try self.localPackageExists(pkg.key_ptr.*, pkg.value_ptr.*.aur_version.?)) {
                     print("{s}warning:{s} Found existing up-to-date package: {s}{s}-{s}{s}, deferring to pacman -U...\n", .{
                         color.BoldForegroundYellow,
                         color.Reset,
                         color.Bold,
-                        pkg.key,
-                        pkg.value.aur_version.?,
+                        pkg.key_ptr.*,
+                        pkg.value_ptr.*.aur_version.?,
                         color.Reset,
                     });
-                    try self.installExistingPackage(pkg.key, pkg.value);
+                    try self.installExistingPackage(pkg.key_ptr.*, pkg.value_ptr.*);
                     return;
                 }
 
                 // The install hack is bleeding into here.
-                if (!mem.eql(u8, pkg.value.version, "0-0")) {
+                if (!mem.eql(u8, pkg.value_ptr.*.version, "0-0")) {
                     print("{s}::{s} Updating {s}{s}{s}: {s}{s}{s} -> {s}{s}{s}\n", .{
                         color.BoldForegroundBlue,
                         color.Reset,
                         color.Bold,
-                        pkg.key,
+                        pkg.key_ptr.*,
                         color.Reset,
                         color.ForegroundRed,
-                        pkg.value.version,
+                        pkg.value_ptr.*.version,
                         color.Reset,
                         color.ForegroundGreen,
-                        pkg.value.aur_version.?,
+                        pkg.value_ptr.*.aur_version.?,
                         color.Reset,
                     });
                 } else {
@@ -206,15 +206,15 @@ pub const Pacman = struct {
                         color.BoldForegroundBlue,
                         color.Reset,
                         color.Bold,
-                        pkg.key,
+                        pkg.key_ptr.*,
                         color.Reset,
                         color.ForegroundGreen,
-                        pkg.value.aur_version.?,
+                        pkg.value_ptr.*.aur_version.?,
                         color.Reset,
                     });
                 }
-                try self.downloadAndExtractPackage(pkg.key, pkg.value);
-                try self.compareUpdateAndInstall(pkg.key, pkg.value);
+                try self.downloadAndExtractPackage(pkg.key_ptr.*, pkg.value_ptr.*);
+                try self.compareUpdateAndInstall(pkg.key_ptr.*, pkg.value_ptr.*);
             }
         }
     }
@@ -308,23 +308,25 @@ pub const Pacman = struct {
         try new_pkgbuild.indentValues(2);
         var new_pkgbuild_iter = new_pkgbuild.fields.iterator();
         while (new_pkgbuild_iter.next()) |field| {
-            if (field.value.updated) {
+            if (field.value_ptr.*.updated) {
                 at_least_one_diff = true;
                 print("{s}::{s} {s}{s}{s} was updated: {s}\n", .{
                     color.BoldForegroundBlue,
                     color.Reset,
                     color.Bold,
-                    field.key,
+                    field.key_ptr.*,
                     color.Reset,
-                    field.value.value,
+                    field.value_ptr.*.value,
                 });
             }
         }
 
         var new_iter = new_files.iterator();
         while (new_iter.next()) |file| {
-            if (mem.endsWith(u8, file.key, ".install") or mem.endsWith(u8, file.key, ".sh")) {
-                if (!mem.eql(u8, old_files.get(file.key).?, new_files.get(file.key).?)) {
+            if (mem.endsWith(u8, file.key_ptr.*, ".install") or mem.endsWith(u8, file.key_ptr.*, ".sh")) {
+                const old_content = old_files.get(file.key_ptr.*).?;
+                const new_content = new_files.get(file.key_ptr.*).?;
+                if (!mem.eql(u8, old_content, new_content)) {
                     at_least_one_diff = true;
 
                     // TODO: would be cool to show a real diff here
@@ -332,9 +334,10 @@ pub const Pacman = struct {
                         color.BoldForegroundBlue,
                         color.Reset,
                         color.Bold,
-                        file.key,
+                        file.key_ptr.*,
                         color.Reset,
-                        new_files.get(file.key).?,
+                        // new_files.get(file.key).?,
+                        self.printDiff(old_content, new_content),
                     });
                 }
             }
@@ -355,6 +358,24 @@ pub const Pacman = struct {
         try self.install(pkg_name, pkg);
     }
 
+    fn printDiff(self: *Self, old: []const u8, new: []const u8) !void {
+        var old_stream = std.io.fixedBufferStream(old).reader();
+        var new_stream = std.io.fixedBufferStream(new).reader();
+
+        while (true) {
+            const old_line_maybe = try old_stream.readUntilDelimiterOrEofAlloc(self.allocator, '\n', 4096);
+            const old_line = if (old_line_maybe == null) break else old_line_maybe.?;
+            if (old_line.len == 0) break;
+
+            const new_line_maybe = try new_stream.readUntilDelimiterOrEofAlloc(self.allocator, '\n', 4096);
+            const new_line = if (new_line_maybe == null) break else new_line_maybe.?;
+            if (new_line.len == 0) break;
+            // if (!mem.eql(u8, old_line, new_line)) {
+            std.debug.print("line: {s}              {s}\n", .{ old_line, new_line });
+            // }
+        }
+    }
+
     // TODO: handle recursively installing dependencies from AUR
     // 0. Parse the dep list from .SRCINFO
     // 1. We need a strategy to split official/AUR deps
@@ -366,8 +387,8 @@ pub const Pacman = struct {
         var pkg_files = try self.snapshotFiles(pkg_name, pkg.aur_version.?);
         var pkg_files_iter = pkg_files.?.iterator();
         while (pkg_files_iter.next()) |pkg_file| {
-            if (mem.eql(u8, pkg_file.key, "PKGBUILD")) {
-                var pkgbuild = Pkgbuild.init(self.allocator, pkg_file.value);
+            if (mem.eql(u8, pkg_file.key_ptr.*, "PKGBUILD")) {
+                var pkgbuild = Pkgbuild.init(self.allocator, pkg_file.value_ptr.*);
                 try pkgbuild.readLines();
                 const format = "\n{s}::{s} File: {s}PKGBUILD{s} {s}===================={s}\n";
                 print(format, .{
@@ -382,8 +403,8 @@ pub const Pacman = struct {
                 try pkgbuild.indentValues(2);
                 var fields_iter = pkgbuild.fields.iterator();
                 while (fields_iter.next()) |field| {
-                    if (!mem.containsAtLeast(u8, field.key, 1, "()")) continue;
-                    print("  {s} {s}\n", .{ field.key, field.value.value });
+                    if (!mem.containsAtLeast(u8, field.key_ptr.*, 1, "()")) continue;
+                    print("  {s} {s}\n", .{ field.key_ptr.*, field.value_ptr.*.value });
                 }
             } else {
                 const format = "\n{s}::{s} File: {s}{s}{s} {s}===================={s}\n{s}";
@@ -391,11 +412,11 @@ pub const Pacman = struct {
                     color.BoldForegroundBlue,
                     color.Reset,
                     color.Bold,
-                    pkg_file.key,
+                    pkg_file.key_ptr.*,
                     color.Reset,
                     color.BoldForegroundBlue,
                     color.Reset,
-                    pkg_file.value,
+                    pkg_file.value_ptr.*,
                 });
             }
         }

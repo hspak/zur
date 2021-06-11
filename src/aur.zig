@@ -105,8 +105,8 @@ fn buildInfoQuery(allocator: *std.mem.Allocator, pkgs: std.StringHashMap(*pacman
     while (pkgs_iter.next()) |pkg| {
         try uri.appendSlice("&arg[]=");
 
-        var copyKey = try allocator.alloc(u8, pkg.key.len);
-        std.mem.copy(u8, copyKey, pkg.key);
+        var copyKey = try allocator.alloc(u8, pkg.key_ptr.*.len);
+        std.mem.copy(u8, copyKey, pkg.key_ptr.*);
         try uri.appendSlice(copyKey);
         defer allocator.free(copyKey);
     }

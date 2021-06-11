@@ -49,7 +49,7 @@ pub const Pkgbuild = struct {
         defer self.fields.deinit();
         var iter = self.fields.iterator();
         while (iter.next()) |entry| {
-            self.allocator.free(entry.key);
+            self.allocator.free(entry.key_ptr.*);
             entry.value.deinit(self.allocator);
         }
     }
@@ -156,10 +156,10 @@ pub const Pkgbuild = struct {
         var buf = std.ArrayList(u8).init(self.allocator);
         var fields_iter = self.fields.iterator();
         while (fields_iter.next()) |field| {
-            if (!std.mem.containsAtLeast(u8, field.key, 1, "()")) {
+            if (!std.mem.containsAtLeast(u8, field.key_ptr.*, 1, "()")) {
                 continue;
             }
-            var lines_iter = std.mem.split(field.value.value, "\n");
+            var lines_iter = std.mem.split(field.value_ptr.*.value, "\n");
             while (lines_iter.next()) |line| {
                 var count: usize = 0;
                 while (count < spaces_count) {
@@ -169,8 +169,8 @@ pub const Pkgbuild = struct {
                 try buf.appendSlice(line);
                 try buf.append('\n');
             }
-            self.allocator.free(field.value.value);
-            field.value.value = buf.toOwnedSlice();
+            self.allocator.free(field.value_ptr.*.value);
+            field.value_ptr.*.value = buf.toOwnedSlice();
         }
     }
 };
