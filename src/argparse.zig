@@ -26,7 +26,7 @@ pub const Args = struct {
 
     pub fn parse(self: *Self) !void {
         var args_iter = std.process.args();
-        var exe = try args_iter.next(self.allocator).?;
+        _ = try args_iter.next(self.allocator).?; // exe
         var action_or_err = args_iter.next(self.allocator) orelse "";
         var action = try action_or_err;
         if (mem.eql(u8, action, "-h") or mem.eql(u8, action, "--help")) {

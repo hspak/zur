@@ -279,7 +279,7 @@ pub const Pacman = struct {
     fn extractPackage(self: *Self, snapshot_path: []const u8, pkg_name: []const u8) !void {
         const file_name = try mem.join(self.allocator, ".", &[_][]const u8{ pkg_name, "tar.gz" });
         const file_path = try fs.path.join(self.allocator, &[_][]const u8{ snapshot_path, file_name });
-        const result = try std.ChildProcess.exec(.{
+        _ = try std.ChildProcess.exec(.{
             .allocator = self.allocator,
             .argv = &[_][]const u8{ "tar", "-xf", file_path, "-C", snapshot_path, "--strip-components=1" },
         });
@@ -344,7 +344,6 @@ pub const Pacman = struct {
         }
         if (at_least_one_diff) {
             print("\nContinue? [Y/n]: ", .{});
-            var stdin = std.io.getStdIn();
             const input = try self.stdinReadByte();
             if (input != 'y' and input != 'Y') {
                 return;
@@ -422,7 +421,6 @@ pub const Pacman = struct {
         }
 
         print("Install? [Y/n]: ", .{});
-        var stdin = std.io.getStdIn();
         const input = try self.stdinReadByte();
         if (input == 'y' or input == 'Y') {
             try self.install(pkg_name, pkg);
@@ -445,7 +443,6 @@ pub const Pacman = struct {
     }
 
     fn installExistingPackage(self: *Self, pkg_name: []const u8, pkg: *Package) !void {
-        const pkg_dir = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg.aur_version.? });
         const full_pkg_dir = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, "pkg" });
         try os.chdir(full_pkg_dir);
 

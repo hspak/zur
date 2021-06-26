@@ -113,7 +113,7 @@ pub const Version = struct {
 
     // Hacky wrapper aruond std.fmt.parseInt to add a retry after stripping all non-number chars
     fn parseInt(str: []const u8) !usize {
-        const num = std.fmt.parseUnsigned(usize, str, 10) catch |err| {
+        const num = std.fmt.parseUnsigned(usize, str, 10) catch {
             const buf_size = 16;
             var new_str: [buf_size]u8 = undefined;
             var new_str_i: u8 = 0;

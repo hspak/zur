@@ -58,7 +58,7 @@ fn printHelp() !void {
         \\
     ;
     var stderr = &io.getStdErr().writer();
-    const btyes_written = try stderr.write(msg);
+    _ = try stderr.write(msg);
 }
 
 fn printVersion() !void {

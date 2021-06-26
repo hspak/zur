@@ -6,7 +6,7 @@ usingnamespace @cImport(@cInclude("curl/curl.h"));
 
 pub fn init() !void {
     // global curl init, or fail
-    if (curl_global_init(CURL_GLOBAL_ALL) != .CURLE_OK) {
+    if (curl_global_init(CURL_GLOBAL_ALL) != CURLE_OK) {
         return error.CURLGlobalInitFailed;
     }
 }
@@ -21,10 +21,10 @@ pub fn get(allocator: *std.mem.Allocator, uri: [*:0]const u8) !std.ArrayList(u8)
 
     var resp_buffer = std.ArrayList(u8).init(allocator);
 
-    try wrap(curl_easy_setopt(handle, .CURLOPT_URL, uri));
-    try wrap(curl_easy_setopt(handle, .CURLOPT_ACCEPT_ENCODING, ""));
-    try wrap(curl_easy_setopt(handle, .CURLOPT_WRITEFUNCTION, writeRespCallback));
-    try wrap(curl_easy_setopt(handle, .CURLOPT_WRITEDATA, &resp_buffer));
+    try wrap(curl_easy_setopt(handle, CURLOPT_URL, uri));
+    try wrap(curl_easy_setopt(handle, CURLOPT_ACCEPT_ENCODING, ""));
+    try wrap(curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, writeRespCallback));
+    try wrap(curl_easy_setopt(handle, CURLOPT_WRITEDATA, &resp_buffer));
     try wrap(curl_easy_perform(handle));
 
     return resp_buffer;
@@ -42,10 +42,10 @@ fn writeRespCallback(data: *c_void, size: c_uint, count: c_uint, user_data: *c_v
 }
 
 fn wrap(result: anytype) !void {
-    switch (@enumToInt(result)) {
+    switch (result) {
         CURLE_OK => return,
         else => {
-            std.debug.print("curl error: {d}\n", .{@enumToInt(result)});
+            std.debug.print("curl error: {d}\n", .{result});
             // TODO: some real error handling
             @panic("curl did not respond with CURLE_OK");
         },
