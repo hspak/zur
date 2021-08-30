@@ -40,6 +40,7 @@ pub const Pacman = struct {
     aur_resp: ?aur.RPCRespV5,
     pacman_output: ?[]u8,
     zur_path: []const u8,
+    zur_pkg_dir: []const u8,
     updates: usize = 0,
     stdin_has_input: bool = false,
 
@@ -47,10 +48,15 @@ pub const Pacman = struct {
         const home = os.getenv("HOME") orelse return error.NoHomeEnvVarFound;
         const zur_dir = ".zur";
 
+        const zur_path = try fs.path.join(allocator, &[_][]const u8{ home, zur_dir });
+        const pkg_dir = try fs.path.join(allocator, &[_][]const u8{ zur_path, ".pkg" });
+        try fs.cwd().makePath(pkg_dir);
+
         return Self{
             .allocator = allocator,
             .pkgs = std.StringHashMap(*Package).init(allocator),
-            .zur_path = try fs.path.join(allocator, &[_][]const u8{ home, zur_dir }),
+            .zur_path = zur_path,
+            .zur_pkg_dir = pkg_dir,
             .aur_resp = null,
             .pacman_output = null,
             .updates = 0,
@@ -221,11 +227,10 @@ pub const Pacman = struct {
 
     fn localPackageExists(self: *Self, pkg_name: []const u8, new_ver: []const u8) !bool {
         const full_pkg_name = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, new_ver, "x86_64.pkg.tar.zst" });
-        const zur_pkg_dir = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, "pkg" });
 
         // TODO: maybe we want to be like yay and also find some VCS info to do this correctly.
         // For -git packages, we need to force zur to always install because we don't know if there's been an update or not.
-        var dir = try fs.openDirAbsolute(zur_pkg_dir, .{ .access_sub_paths = false, .iterate = true, .no_follow = true });
+        var dir = try fs.openDirAbsolute(self.zur_pkg_dir, .{ .access_sub_paths = false, .iterate = true, .no_follow = true });
         var dir_iter = dir.iterate();
         while (try dir_iter.next()) |node| {
             if (mem.eql(u8, node.name, full_pkg_name) and !mem.containsAtLeast(u8, node.name, 1, "-git")) {
@@ -438,13 +443,12 @@ pub const Pacman = struct {
         const argv = &[_][]const u8{ "makepkg", "-sicC" };
         try self.execCommand(argv);
 
-        // TODO: Clean up older package after N updates?
+        try self.removeStaleBuilds(pkg_name, pkg);
         try self.moveBuiltPackages(pkg_name, pkg);
     }
 
     fn installExistingPackage(self: *Self, pkg_name: []const u8, pkg: *Package) !void {
-        const full_pkg_dir = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, "pkg" });
-        try os.chdir(full_pkg_dir);
+        try os.chdir(self.zur_pkg_dir);
 
         // TODO: Dynamically get the right arch
         const full_pkg_name = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg.aur_version.?, "x86_64.pkg.tar.zst" });
@@ -472,22 +476,26 @@ pub const Pacman = struct {
         const full_pkg_dir = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, pkg_dir });
 
         try os.chdir(self.zur_path);
-        const archive_dir = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, "pkg" });
-        try fs.cwd().makePath(archive_dir);
 
         var dir = fs.openDirAbsolute(full_pkg_dir, .{ .access_sub_paths = false, .iterate = true, .no_follow = true }) catch |err| switch (err) {
             error.FileNotFound => return,
             else => unreachable,
         };
+        defer dir.close();
+
         var dir_iter = dir.iterate();
         while (try dir_iter.next()) |node| {
             if (!mem.containsAtLeast(u8, node.name, 1, ".pkg.tar.zst")) {
                 continue;
             }
             const full_old_name = try fs.path.join(self.allocator, &[_][]const u8{ full_pkg_dir, node.name });
-            const full_new_name = try fs.path.join(self.allocator, &[_][]const u8{ archive_dir, node.name });
+            const full_new_name = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_pkg_dir, node.name });
             try fs.cwd().rename(full_old_name, full_new_name);
         }
+
+        // Clean up the build dir afterwards.
+        // I don't see a reason to keep these around.
+        try dir.deleteTree(full_pkg_dir);
     }
 
     fn snapshotFiles(self: *Self, pkg_name: []const u8, pkg_version: []const u8) !?std.StringHashMap([]u8) {
@@ -517,7 +525,7 @@ pub const Pacman = struct {
                 continue;
             }
 
-            // The arbitrary 4096 byte file size limit is _probably_ fine here.
+            // TODO: The arbitrary 4096 byte file size limit is _probably_ fine here.
             // No one is going to want to read a novel before installing.
             var file_contents = dir.readFileAlloc(self.allocator, node.name, 4096) catch |err| switch (err) {
                 error.FileTooBig => {
@@ -562,7 +570,7 @@ pub const Pacman = struct {
     }
 
     // We want to "eat" a character so that it doesn't get exposed to the child process.
-    // There's likely a more correct way to handle this.
+    // TODO: There's likely a more correct way to handle this.
     fn stdinClearByte(self: *Self) !void {
         if (!self.stdin_has_input) {
             return;
