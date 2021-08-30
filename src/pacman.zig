@@ -29,9 +29,7 @@ pub const Package = struct {
     }
 };
 
-// TODO
-// - Periodic cleanup of ~/.zur and ~/.zur/pkg
-// - <pkg>-git packages
+// TODO: maybe handle <pkg>-git packages like yay
 pub const Pacman = struct {
     const Self = @This();
 
@@ -226,6 +224,7 @@ pub const Pacman = struct {
     }
 
     fn localPackageExists(self: *Self, pkg_name: []const u8, new_ver: []const u8) !bool {
+        // TODO: Handle "any" arch package names.
         const full_pkg_name = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, new_ver, "x86_64.pkg.tar.zst" });
 
         // TODO: maybe we want to be like yay and also find some VCS info to do this correctly.
@@ -496,6 +495,47 @@ pub const Pacman = struct {
         // Clean up the build dir afterwards.
         // I don't see a reason to keep these around.
         try dir.deleteTree(full_pkg_dir);
+    }
+
+    fn removeStaleBuilds(self: *Self, pkg_name: []const u8, _: *Package) !void {
+        var dir = fs.openDirAbsolute(self.zur_pkg_dir, .{ .access_sub_paths = false, .iterate = true, .no_follow = true }) catch |err| switch (err) {
+            error.FileNotFound => return,
+            else => unreachable,
+        };
+        defer dir.close();
+
+        // TODO: Implement better method to sorting these files by mtime.
+        var list = std.ArrayList(i128).init(self.allocator);
+        var map = std.AutoHashMap(i128, []const u8).init(self.allocator);
+        var dir_iter = dir.iterate();
+        while (try dir_iter.next()) |node| {
+            if (!mem.containsAtLeast(u8, node.name, 1, pkg_name)) {
+                continue;
+            }
+            const path = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_pkg_dir, node.name });
+            var f = try fs.openFileAbsolute(path, .{});
+            defer f.close();
+            const stat = try f.stat();
+            try map.putNoClobber(stat.mtime, path);
+            try list.append(stat.mtime);
+        }
+
+        // Keep the last 3 installed versions of the package.
+        if (list.items.len > 3) {
+            const asc_i128 = comptime std.sort.asc(i128);
+            std.sort.sort(i128, list.items, {}, asc_i128);
+
+            const marked_for_removal = list.items[0 .. list.items.len - 3];
+            for (marked_for_removal) |mtime| {
+                const file_name = map.get(mtime).?;
+                try fs.deleteFileAbsolute(file_name);
+                print("  {s}->{s} deleting old pkg file: {s}\n", .{
+                    color.ForegroundBlue,
+                    color.Reset,
+                    file_name,
+                });
+            }
+        }
     }
 
     fn snapshotFiles(self: *Self, pkg_name: []const u8, pkg_version: []const u8) !?std.StringHashMap([]u8) {
