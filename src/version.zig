@@ -21,19 +21,19 @@ pub const Version = struct {
 
     pub fn init(version: []const u8) !Self {
         // Epoch parsing, epoch is optional
-        var epoch_iter = mem.split(version, ":");
+        var epoch_iter = mem.split(u8, version, ":");
         const epoch_first_half = epoch_iter.next().?;
         const epoch_second_half = epoch_iter.next();
         const epochless_base = if (epoch_second_half == null) epoch_first_half else epoch_second_half;
         const epoch = if (epoch_second_half == null) null else epoch_first_half;
 
         // Release parsing, not optional
-        var release_iter = mem.split(epochless_base.?, "-");
+        var release_iter = mem.split(u8, epochless_base.?, "-");
         const releaseless_base = release_iter.next().?;
         const release = release_iter.next().?;
 
         // VCS version thingy
-        var vcs_iter = mem.split(releaseless_base, "+");
+        var vcs_iter = mem.split(u8, releaseless_base, "+");
         const vcsless_base = vcs_iter.next().?;
         var vcs_rev: ?usize = null;
         while (vcs_iter.next()) |vcs| {
@@ -47,7 +47,7 @@ pub const Version = struct {
         }
 
         // Semver-ish-thing, anything goes here really
-        var semver_iter = mem.split(vcsless_base, ".");
+        var semver_iter = mem.split(u8, vcsless_base, ".");
         const major = semver_iter.next().?;
         const minor = semver_iter.next();
         const patch = if (minor != null) semver_iter.next() else null;

@@ -14,7 +14,11 @@ pub fn build(b: *Builder) void {
     exe.setTarget(target);
 
     const version = b.option([]const u8, "version", "Set the build version") orelse "unset";
-    exe.addBuildOption([]const u8, "version", version);
+    const exe_options = b.addOptions();
+
+    exe_options.addOption([]const u8, "version", version);
+
+    exe.addOptions("build_options", exe_options);
     exe.install();
 
     const run_cmd = exe.run();

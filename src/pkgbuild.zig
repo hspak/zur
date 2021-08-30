@@ -159,7 +159,7 @@ pub const Pkgbuild = struct {
             if (!std.mem.containsAtLeast(u8, field.key_ptr.*, 1, "()")) {
                 continue;
             }
-            var lines_iter = std.mem.split(field.value_ptr.*.value, "\n");
+            var lines_iter = std.mem.split(u8, field.value_ptr.*.value, "\n");
             while (lines_iter.next()) |line| {
                 var count: usize = 0;
                 while (count < spaces_count) {

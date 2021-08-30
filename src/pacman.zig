@@ -71,14 +71,14 @@ pub const Pacman = struct {
         });
         self.pacman_output = result.stdout;
 
-        var lines = mem.split(result.stdout, "\n");
+        var lines = mem.split(u8, result.stdout, "\n");
         while (lines.next()) |line| {
             // ignore empty lines if they exist
             if (line.len <= 1) {
                 continue;
             }
 
-            var line_iter = mem.split(line, " ");
+            var line_iter = mem.split(u8, line, " ");
             const name = line_iter.next() orelse return error.UnknownPacmanQmOutputFormat;
             const version = line_iter.next() orelse return error.UnknownPacmanQmOutputFormat;
 
@@ -536,7 +536,7 @@ pub const Pacman = struct {
             // PKGBUILD's have their own indent logic
             if (!mem.eql(u8, node.name, "PKGBUILD")) {
                 var buf = std.ArrayList(u8).init(self.allocator);
-                var lines_iter = mem.split(file_contents, "\n");
+                var lines_iter = mem.split(u8, file_contents, "\n");
                 while (lines_iter.next()) |line| {
                     try buf.appendSlice("  ");
                     try buf.appendSlice(line);
