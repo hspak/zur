@@ -50,7 +50,7 @@ pub const Pkgbuild = struct {
         var iter = self.fields.iterator();
         while (iter.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
-            entry.value.deinit(self.allocator);
+            entry.value_ptr.*.deinit(self.allocator);
         }
     }
 
@@ -297,9 +297,9 @@ test "Pkgbuild - readLines - google-chrome-dev" {
     defer pkgbuild.deinit();
     try pkgbuild.readLines();
 
-    testing.expectEqualStrings(expectedMap.get("install").?.value, pkgbuild.fields.get("install").?.value);
-    testing.expectEqualStrings(expectedMap.get("source").?.value, pkgbuild.fields.get("source").?.value);
-    testing.expectEqualStrings(expectedMap.get("package()").?.value, pkgbuild.fields.get("package()").?.value);
+    try testing.expectEqualStrings(expectedMap.get("install").?.value, pkgbuild.fields.get("install").?.value);
+    try testing.expectEqualStrings(expectedMap.get("source").?.value, pkgbuild.fields.get("source").?.value);
+    try testing.expectEqualStrings(expectedMap.get("package()").?.value, pkgbuild.fields.get("package()").?.value);
 }
 
 test "Pkgbuild - compare" {
@@ -371,8 +371,8 @@ test "Pkgbuild - compare" {
     try pkgbuild_new.readLines();
 
     try pkgbuild_new.comparePrev(pkgbuild_old);
-    testing.expect(pkgbuild_new.fields.get("install").?.updated);
-    testing.expect(pkgbuild_new.fields.get("pkgver()").?.updated);
+    try testing.expect(pkgbuild_new.fields.get("install").?.updated);
+    try testing.expect(pkgbuild_new.fields.get("pkgver()").?.updated);
 }
 
 test "Pkgbuild - indentValue - google-chrome-dev" {
@@ -483,5 +483,5 @@ test "Pkgbuild - indentValue - google-chrome-dev" {
     try pkgbuild.readLines();
     try pkgbuild.indentValues(2);
 
-    testing.expectEqualStrings(expectedMap.get("package()").?.value, pkgbuild.fields.get("package()").?.value);
+    try testing.expectEqualStrings(expectedMap.get("package()").?.value, pkgbuild.fields.get("package()").?.value);
 }
