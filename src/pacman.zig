@@ -492,9 +492,7 @@ pub const Pacman = struct {
             try fs.cwd().rename(full_old_name, full_new_name);
         }
 
-        // Clean up the build dir afterwards.
-        // I don't see a reason to keep these around.
-        try dir.deleteTree(full_pkg_dir);
+        // TODO: Cleanup stale pkg dirs - we need at least one to be able to diff...
     }
 
     fn removeStaleBuilds(self: *Self, pkg_name: []const u8, _: *Package) !void {
