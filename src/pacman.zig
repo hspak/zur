@@ -505,6 +505,7 @@ pub const Pacman = struct {
         var map = std.AutoHashMap(i128, []const u8).init(self.allocator);
         var dir_iter = dir.iterate();
         while (try dir_iter.next()) |node| {
+            // TODO: This is broken if the package name is a substring of another.
             if (!mem.containsAtLeast(u8, node.name, 1, pkg_name)) {
                 continue;
             }
