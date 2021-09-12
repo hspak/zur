@@ -56,7 +56,7 @@ pub const Search = struct {
     PackageBase: []const u8,
     Version: []const u8,
     Description: ?[]const u8 = null,
-    URL: []const u8,
+    URL: ?[]const u8 = null,
     NumVotes: usize,
     Popularity: f64,
     OutOfDate: ?i32 = null, // TODO: parse this unixtime
