@@ -442,7 +442,7 @@ pub const Pacman = struct {
         const argv = &[_][]const u8{ "makepkg", "-sicC" };
         try self.execCommand(argv);
 
-        try self.removeStaleBuilds(pkg_name, pkg);
+        try self.removeStaleArtifacts(pkg_name, self.zur_pkg_dir);
         try self.moveBuiltPackages(pkg_name, pkg);
     }
 
@@ -490,11 +490,11 @@ pub const Pacman = struct {
             try fs.cwd().rename(full_old_name, full_new_name);
         }
 
-        // TODO: Cleanup stale pkg dirs - we need at least one to be able to diff...
+        try self.removeStaleArtifacts(pkg_name, self.zur_path);
     }
 
-    fn removeStaleBuilds(self: *Self, pkg_name: []const u8, _: *Package) !void {
-        var dir = fs.openDirAbsolute(self.zur_pkg_dir, .{ .access_sub_paths = false, .iterate = true, .no_follow = true }) catch |err| switch (err) {
+    fn removeStaleArtifacts(self: *Self, pkg_name: []const u8, dir_path: []const u8) !void {
+        var dir = fs.openDirAbsolute(dir_path, .{ .access_sub_paths = false, .iterate = true, .no_follow = true }) catch |err| switch (err) {
             error.FileNotFound => return,
             else => unreachable,
         };
@@ -508,7 +508,7 @@ pub const Pacman = struct {
             if (!mem.containsAtLeast(u8, node.name, 1, pkg_name)) {
                 continue;
             }
-            const path = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_pkg_dir, node.name });
+            const path = try fs.path.join(self.allocator, &[_][]const u8{ dir_path, node.name });
             var f = try fs.openFileAbsolute(path, .{});
             defer f.close();
             const stat = try f.stat();
@@ -524,8 +524,8 @@ pub const Pacman = struct {
             const marked_for_removal = list.items[0 .. list.items.len - 3];
             for (marked_for_removal) |mtime| {
                 const file_name = map.get(mtime).?;
-                try fs.deleteFileAbsolute(file_name);
-                print("  {s}->{s} deleting old pkg file: {s}\n", .{
+                try fs.deleteTreeAbsolute(file_name);
+                print("  {s}->{s} deleting stale file or dir: {s}\n", .{
                     color.ForegroundBlue,
                     color.Reset,
                     file_name,
