@@ -1,0 +1,13 @@
+name: CI
+on: [push]
+jobs:
+  zig-test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+      - run: curl -o /tmp/zig.tar.xz $(curl https://ziglang.org/download/index.json 2>/dev/null | jq -r '.master | .["x86_64-linux"] | .tarball') 
+      - run: tar xf /tmp/zig.tar.xz -C /tmp --strip-components=1
+      - name: Check out repository code
+        uses: actions/checkout@v2
+      - run: /tmp/zig test src/tests.zig 
+      - run: /tmp/zig build
