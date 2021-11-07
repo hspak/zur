@@ -152,9 +152,7 @@ pub const Pkgbuild = struct {
                 curr.?.updated = true;
             } else if (prev == null and curr == null) {
                 continue;
-            }
-
-            if (!std.mem.eql(u8, prev.?.value, curr.?.value)) {
+            } else if (prev != null and curr != null and !std.mem.eql(u8, prev.?.value, curr.?.value)) {
                 curr.?.updated = true;
             }
         }

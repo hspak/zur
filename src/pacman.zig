@@ -328,8 +328,15 @@ pub const Pacman = struct {
         var new_iter = new_files.iterator();
         while (new_iter.next()) |file| {
             if (mem.endsWith(u8, file.key_ptr.*, ".install") or mem.endsWith(u8, file.key_ptr.*, ".sh")) {
-                const old_content = old_files.get(file.key_ptr.*).?;
-                const new_content = new_files.get(file.key_ptr.*).?;
+                const old_content_maybe = old_files.get(file.key_ptr.*);
+                const new_content_maybe = new_files.get(file.key_ptr.*);
+                if (old_content_maybe == null or new_content_maybe == null) {
+                    // TODO: print something!
+                    continue;
+                }
+
+                const old_content = old_content_maybe.?;
+                const new_content = new_content_maybe.?;
                 if (!mem.eql(u8, old_content, new_content)) {
                     at_least_one_diff = true;
 
