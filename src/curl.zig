@@ -14,7 +14,7 @@ pub fn deinit() void {
     curl.curl_global_cleanup();
 }
 
-pub fn get(allocator: *std.mem.Allocator, uri: [*:0]const u8) !std.ArrayList(u8) {
+pub fn get(allocator: std.mem.Allocator, uri: [*:0]const u8) !std.ArrayList(u8) {
     const handle = curl.curl_easy_init() orelse return error.CURLHandleInitFailed;
     defer curl.curl_easy_cleanup(handle);
 

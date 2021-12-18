@@ -17,14 +17,14 @@ const Content = struct {
     updated: bool = false,
 
     // allocator.create does not respect default values so safeguard via an init() call
-    pub fn init(allocator: *std.mem.Allocator, value: []const u8) !*Self {
+    pub fn init(allocator: std.mem.Allocator, value: []const u8) !*Self {
         var new = try allocator.create(Self);
         new.value = value;
         new.updated = false;
         return new;
     }
 
-    pub fn deinit(self: *Self, allocator: *std.mem.Allocator) void {
+    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
         allocator.free(self.value);
         allocator.destroy(self);
     }
@@ -33,11 +33,11 @@ const Content = struct {
 pub const Pkgbuild = struct {
     const Self = @This();
 
-    allocator: *std.mem.Allocator,
+    allocator: std.mem.Allocator,
     file_contents: []const u8,
     fields: std.StringHashMap(*Content),
 
-    pub fn init(allocator: *std.mem.Allocator, file_contents: []const u8) Self {
+    pub fn init(allocator: std.mem.Allocator, file_contents: []const u8) Self {
         return Self{
             .allocator = allocator,
             .file_contents = file_contents,

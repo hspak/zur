@@ -13,7 +13,7 @@ pub const log_level: std.log.Level = .info;
 pub fn main() !void {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.c_allocator);
     defer arena_state.deinit();
-    var allocator = &arena_state.allocator;
+    var allocator = arena_state.allocator();
 
     var args = Args.init(allocator);
     try args.parse();
@@ -27,7 +27,7 @@ pub fn main() !void {
     }
 }
 
-fn installOrUpdate(allocator: *std.mem.Allocator, pkg_list: std.ArrayList([]const u8)) !void {
+fn installOrUpdate(allocator: std.mem.Allocator, pkg_list: std.ArrayList([]const u8)) !void {
     try curl.init();
     defer curl.deinit();
 

@@ -12,11 +12,11 @@ pub const Action = enum {
 pub const Args = struct {
     const Self = @This();
 
-    allocator: *mem.Allocator,
+    allocator: mem.Allocator,
     pkgs: std.ArrayList([]const u8),
     action: Action,
 
-    pub fn init(allocator: *mem.Allocator) Self {
+    pub fn init(allocator: mem.Allocator) Self {
         return Self{
             .allocator = allocator,
             .pkgs = std.ArrayList([]const u8).init(allocator),

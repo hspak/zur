@@ -66,7 +66,7 @@ pub const Search = struct {
     URLPath: []const u8,
 };
 
-pub fn queryAll(allocator: *std.mem.Allocator, pkgs: std.StringHashMap(*pacman.Package)) !RPCRespV5 {
+pub fn queryAll(allocator: std.mem.Allocator, pkgs: std.StringHashMap(*pacman.Package)) !RPCRespV5 {
     const uri = try buildInfoQuery(allocator, pkgs);
 
     var resp = try curl.get(allocator, uri);
@@ -78,7 +78,7 @@ pub fn queryAll(allocator: *std.mem.Allocator, pkgs: std.StringHashMap(*pacman.P
     return result;
 }
 
-pub fn search(allocator: *std.mem.Allocator, search_name: []const u8) !RPCSearchRespV5 {
+pub fn search(allocator: std.mem.Allocator, search_name: []const u8) !RPCSearchRespV5 {
     var uri = std.ArrayList(u8).init(allocator);
 
     try uri.appendSlice(Host);
@@ -95,7 +95,7 @@ pub fn search(allocator: *std.mem.Allocator, search_name: []const u8) !RPCSearch
     return result;
 }
 
-fn buildInfoQuery(allocator: *std.mem.Allocator, pkgs: std.StringHashMap(*pacman.Package)) ![*:0]const u8 {
+fn buildInfoQuery(allocator: std.mem.Allocator, pkgs: std.StringHashMap(*pacman.Package)) ![*:0]const u8 {
     var uri = std.ArrayList(u8).init(allocator);
 
     try uri.appendSlice(Host);

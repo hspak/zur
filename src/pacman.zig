@@ -19,7 +19,7 @@ pub const Package = struct {
     requires_update: bool = false,
 
     // allocator.create does not respect default values so safeguard via an init() call
-    pub fn init(allocator: *mem.Allocator, version: []const u8) !*Self {
+    pub fn init(allocator: mem.Allocator, version: []const u8) !*Self {
         var new_pkg = try allocator.create(Self);
         new_pkg.base_name = null;
         new_pkg.version = version;
@@ -33,7 +33,7 @@ pub const Package = struct {
 pub const Pacman = struct {
     const Self = @This();
 
-    allocator: *mem.Allocator,
+    allocator: mem.Allocator,
     pkgs: std.StringHashMap(*Package),
     aur_resp: ?aur.RPCRespV5,
     pacman_output: ?[]u8,
@@ -42,7 +42,7 @@ pub const Pacman = struct {
     updates: usize = 0,
     stdin_has_input: bool = false,
 
-    pub fn init(allocator: *mem.Allocator) !Self {
+    pub fn init(allocator: mem.Allocator) !Self {
         const home = os.getenv("HOME") orelse return error.NoHomeEnvVarFound;
         const zur_dir = ".zur";
 
@@ -625,7 +625,7 @@ pub const Pacman = struct {
     }
 };
 
-pub fn search(allocator: *std.mem.Allocator, pkg: []const u8) !void {
+pub fn search(allocator: std.mem.Allocator, pkg: []const u8) !void {
     var pacman = try Pacman.init(allocator);
     try pacman.fetchLocalPackages();
 
