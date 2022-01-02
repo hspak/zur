@@ -26,9 +26,8 @@ pub const Args = struct {
 
     pub fn parse(self: *Self) !void {
         var args_iter = std.process.args();
-        _ = try args_iter.next(self.allocator).?; // exe
-        var action_or_err = args_iter.next(self.allocator) orelse "";
-        var action = try action_or_err;
+        _ = (try args_iter.next(self.allocator)).?; // exe
+        var action = (try args_iter.next(self.allocator)).?;
         if (mem.eql(u8, action, "-h") or mem.eql(u8, action, "--help")) {
             self.action = .PrintHelp;
             return;
@@ -37,16 +36,15 @@ pub const Args = struct {
             return;
         } else if (mem.eql(u8, action, "-Ss")) {
             self.action = .Search;
-            const search_name = args_iter.next(self.allocator);
+            const search_name = try args_iter.next(self.allocator);
             if (search_name == null) {
                 self.action = .PrintHelp;
                 return;
             }
-            try self.pkgs.append(try search_name.?);
+            try self.pkgs.append(search_name.?);
         } else if (mem.eql(u8, action, "-S")) {
             self.action = .InstallOrUpgrade;
-            while (args_iter.next(self.allocator)) |arg_or_err| {
-                const arg = arg_or_err catch unreachable;
+            while (try args_iter.next(self.allocator)) |arg| {
                 try self.pkgs.append(arg);
             }
         } else if (action.len == 0) {

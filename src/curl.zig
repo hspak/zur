@@ -29,7 +29,7 @@ pub fn get(allocator: std.mem.Allocator, uri: [*:0]const u8) !std.ArrayList(u8) 
     return resp_buffer;
 }
 
-fn writeRespCallback(data: *c_void, size: c_uint, count: c_uint, user_data: *c_void) callconv(.C) c_uint {
+fn writeRespCallback(data: *anyopaque, size: c_uint, count: c_uint, user_data: *anyopaque) callconv(.C) c_uint {
     var buff = @intToPtr(*std.ArrayList(u8), @ptrToInt(user_data));
     var typed_data = @intToPtr([*]u8, @ptrToInt(data));
     buff.appendSlice(typed_data[0 .. count * size]) catch {
