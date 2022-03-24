@@ -2,3 +2,4 @@ ctest
 zig-cache
 zig-out
 test
+.vscode
