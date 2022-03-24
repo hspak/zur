@@ -4,18 +4,18 @@ const ascii = std.ascii;
 const testing = std.testing;
 
 pub const Version = struct {
-    epoch: usize,
-    major: usize,
-    minor: usize,
-    patch: usize,
+    epoch: isize,
+    major: isize,
+    minor: isize,
+    patch: isize,
 
     // Some packages have MAJOR.MINOR.PATCH.EXTRA - just going to assume it stops there
-    extra: usize,
+    extra: isize,
 
     // I'm not even sure if this is a reliable pattern.
     // Most packages seem to have a <revision>-<short-sha1> format
-    vcs_rev: usize,
-    release: usize,
+    vcs_rev: isize,
+    release: isize,
 
     const Self = @This();
 
@@ -35,7 +35,7 @@ pub const Version = struct {
         // VCS version thingy
         var vcs_iter = mem.split(u8, releaseless_base, "+");
         const vcsless_base = vcs_iter.next().?;
-        var vcs_rev: ?usize = null;
+        var vcs_rev: ?isize = null;
         while (vcs_iter.next()) |vcs| {
             // Go through each "+" segment and use the first valid number that we see
             vcs_rev = parseInt(vcs) catch {
@@ -52,6 +52,7 @@ pub const Version = struct {
         const minor = semver_iter.next();
         const patch = if (minor != null) semver_iter.next() else null;
         const extra = if (patch != null) semver_iter.next() else null;
+
 
         return Version{
             .epoch = if (epoch != null) try parseInt(epoch.?) else 0,
@@ -112,8 +113,8 @@ pub const Version = struct {
     }
 
     // Hacky wrapper aruond std.fmt.parseInt to add a retry after stripping all non-number chars
-    fn parseInt(str: []const u8) !usize {
-        const num = std.fmt.parseUnsigned(usize, str, 10) catch {
+    fn parseInt(str: []const u8) !isize {
+        const num = std.fmt.parseUnsigned(isize, str, 10) catch {
             const buf_size = 16;
             var new_str: [buf_size]u8 = undefined;
             var new_str_i: u8 = 0;
@@ -131,12 +132,18 @@ pub const Version = struct {
                     break;
                 }
             }
+            if (mem.eql(u8 , str, "alpha")) {
+                return -2;
+            } else if (mem.eql(u8 , str, "beta")) {
+                return -1;
+            }
+
             if (new_str_i == 0) {
                 return error.NotANumber;
             }
 
             const buf: []u8 = new_str[0..new_str_i];
-            const p = try std.fmt.parseUnsigned(usize, buf, 10);
+            const p = try std.fmt.parseUnsigned(isize, buf, 10);
             return p;
         };
         return num;
