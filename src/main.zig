@@ -10,6 +10,11 @@ const build_version = @import("build_options").version;
 
 pub const log_level: std.log.Level = .info;
 
+const mainerror = error{
+    ZeroResultsFromAurQuery,
+    CouldntResolveHost,
+};
+
 pub fn main() !void {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.c_allocator);
     defer arena_state.deinit();
@@ -21,8 +26,22 @@ pub fn main() !void {
     switch (args.action) {
         .PrintHelp => try printHelp(),
         .PrintVersion => try printVersion(),
-        .Search => try search(allocator, args.pkgs.items[0]),
-        .InstallOrUpgrade => try installOrUpdate(allocator, args.pkgs),
+        .Search => search(allocator, args.pkgs.items[0]) catch |err| {
+            if (err == mainerror.CouldntResolveHost) {
+                try io.getStdOut().writer().print("Please check your connection\n", .{});
+            } else {
+                try io.getStdErr().writer().print("Found error {any}\n", .{err});
+            }
+        },
+        .InstallOrUpgrade => installOrUpdate(allocator, args.pkgs) catch |err| {
+            if (err == mainerror.ZeroResultsFromAurQuery) {
+                try io.getStdOut().writer().print("No aur packages found\n", .{});
+            } else if (err == mainerror.CouldntResolveHost) {
+                try io.getStdOut().writer().print("Please check your connection\n", .{});
+            } else {
+                try io.getStdErr().writer().print("Found error {any}\n", .{err});
+            }
+        },
         .Unset => @panic("Args somehow ended up with 'Unset' state"),
     }
 }

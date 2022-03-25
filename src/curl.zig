@@ -43,6 +43,7 @@ fn writeRespCallback(data: *anyopaque, size: c_uint, count: c_uint, user_data: *
 fn wrap(result: anytype) !void {
     switch (result) {
         curl.CURLE_OK => return,
+        curl.CURLE_COULDNT_RESOLVE_HOST => return error.CouldntResolveHost,
         else => {
             std.debug.print("curl error: {d}\n", .{result});
             // TODO: some real error handling
