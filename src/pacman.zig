@@ -463,7 +463,7 @@ pub const Pacman = struct {
     }
 
     fn execCommand(self: *Self, argv: []const []const u8) !void {
-        const runner = try std.ChildProcess.init(argv, self.allocator);
+        var runner = std.ChildProcess.init(argv, self.allocator);
 
         try self.stdinClearByte();
         runner.stdin = std.io.getStdIn();
