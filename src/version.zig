@@ -136,6 +136,8 @@ pub const Version = struct {
                 return -2;
             } else if (mem.eql(u8 , str, "beta")) {
                 return -1;
+            } else {
+                return -3;
             }
 
             if (new_str_i == 0) {

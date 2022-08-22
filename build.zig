@@ -10,6 +10,7 @@ pub fn build(b: *Builder) void {
     // Maybe one day
     // exe.linkSystemLibrary("alpm");
 
+    exe.use_stage1 = true;
     exe.setBuildMode(mode);
     exe.setTarget(target);
 
