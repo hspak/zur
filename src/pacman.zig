@@ -398,7 +398,7 @@ pub const Pacman = struct {
         var tmp_diff: [:0]u8 = undefined;
         var diff: [:0]u8 = undefined;
         var old_diff: [:0]u8 = "";
-        var buf: [100]u8 = undefined;
+        var buf: [400]u8 = undefined;
 
         while (true) {
             const old_line_maybe = try old_stream.readUntilDelimiterOrEofAlloc(self.allocator, '\n', 4096);
@@ -412,7 +412,7 @@ pub const Pacman = struct {
             
             tmp_diff = try std.fmt.bufPrintZ(&buf, "line: {s}              {s}\n", .{ old_line, new_line });
 
-            diff = try std.fmt.bufPrintZ(&buf, "{s}{s}", .{ tmp_diff, old_diff });
+            diff = try std.fmt.bufPrintZ(&buf, "{s}{s}", .{ old_diff, tmp_diff });
             old_diff = diff;
 
             // }
