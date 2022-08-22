@@ -229,7 +229,7 @@ pub const Pacman = struct {
 
         // TODO: maybe we want to be like yay and also find some VCS info to do this correctly.
         // For -git packages, we need to force zur to always install because we don't know if there's been an update or not.
-        var dir = try fs.openDirAbsolute(self.zur_pkg_dir, .{ .access_sub_paths = false, .iterate = true, .no_follow = true });
+        var dir = try fs.openIterableDirAbsolute(self.zur_pkg_dir, .{ .access_sub_paths = false, .no_follow = true });
         var dir_iter = dir.iterate();
         while (try dir_iter.next()) |node| {
             if (mem.eql(u8, node.name, full_pkg_name) and !mem.containsAtLeast(u8, node.name, 1, "-git")) {
@@ -255,11 +255,13 @@ pub const Pacman = struct {
             url = try mem.joinZ(self.allocator, "/", &[_][]const u8{ aur.Snapshot, file_name });
         }
 
-        // This is not perfect (not robust against manual changes), but it's sufficient for it's purpose (short-circuiting)
+        //This is not perfect (not robust against manual changes), but it's sufficient for it's purpose (short-circuiting)
         var dir = fs.cwd().openDir(full_dir, .{}) catch |err| switch (err) {
             error.FileNotFound => null,
             else => unreachable,
         };
+        //var dir = fs.cwd().openDir(full_dir, .{}); //catch null;       
+        
         if (dir != null) {
             dir.?.close();
             print(" skipping download, {s}{s}{s} already exists...\n", .{ color.Bold, full_dir, color.Reset });
@@ -348,7 +350,7 @@ pub const Pacman = struct {
                         file.key_ptr.*,
                         color.Reset,
                         // new_files.get(file.key).?,
-                        self.printDiff(old_content, new_content),
+                        try self.returnDiff(old_content, new_content),
                     });
                 }
             }
@@ -369,8 +371,10 @@ pub const Pacman = struct {
     }
 
     fn printDiff(self: *Self, old: []const u8, new: []const u8) !void {
-        var old_stream = std.io.fixedBufferStream(old).reader();
-        var new_stream = std.io.fixedBufferStream(new).reader();
+        var old_fixedBufferStream =std.io.fixedBufferStream(old);
+        var new_fixedBufferStream = std.io.fixedBufferStream(new);
+        var old_stream = old_fixedBufferStream.reader();
+        var new_stream = new_fixedBufferStream.reader();
 
         while (true) {
             const old_line_maybe = try old_stream.readUntilDelimiterOrEofAlloc(self.allocator, '\n', 4096);
@@ -384,6 +388,36 @@ pub const Pacman = struct {
             std.debug.print("line: {s}              {s}\n", .{ old_line, new_line });
             // }
         }
+    }
+
+    fn returnDiff(self: *Self, old: []const u8, new: []const u8) ![]const u8 {
+        var old_fixedBufferStream =std.io.fixedBufferStream(old);
+        var new_fixedBufferStream = std.io.fixedBufferStream(new);
+        var old_stream = old_fixedBufferStream.reader();
+        var new_stream = new_fixedBufferStream.reader();
+        var tmp_diff: [:0]u8 = undefined;
+        var diff: [:0]u8 = undefined;
+        var old_diff: [:0]u8 = "";
+        var buf: [100]u8 = undefined;
+
+        while (true) {
+            const old_line_maybe = try old_stream.readUntilDelimiterOrEofAlloc(self.allocator, '\n', 4096);
+            const old_line = if (old_line_maybe == null) break else old_line_maybe.?;
+            if (old_line.len == 0) break;
+
+            const new_line_maybe = try new_stream.readUntilDelimiterOrEofAlloc(self.allocator, '\n', 4096);
+            const new_line = if (new_line_maybe == null) break else new_line_maybe.?;
+            if (new_line.len == 0) break;
+            // if (!mem.eql(u8, old_line, new_line)) {
+            
+            tmp_diff = try std.fmt.bufPrintZ(&buf, "line: {s}              {s}\n", .{ old_line, new_line });
+
+            diff = try std.fmt.bufPrintZ(&buf, "{s}{s}", .{ tmp_diff, old_diff });
+            old_diff = diff;
+
+            // }
+        }
+        return diff;
     }
 
     // TODO: handle recursively installing dependencies from AUR
@@ -481,7 +515,7 @@ pub const Pacman = struct {
         const pkg_dir = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg.aur_version.? });
         const full_pkg_dir = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, pkg_dir });
 
-        var dir = fs.openDirAbsolute(full_pkg_dir, .{ .access_sub_paths = false, .iterate = true, .no_follow = true }) catch |err| switch (err) {
+        var dir = fs.openIterableDirAbsolute(full_pkg_dir, .{ .access_sub_paths = false, .no_follow = true }) catch |err| switch (err) {
             error.FileNotFound => return,
             else => unreachable,
         };
@@ -501,7 +535,7 @@ pub const Pacman = struct {
     }
 
     fn removeStaleArtifacts(self: *Self, pkg_name: []const u8, dir_path: []const u8) !void {
-        var dir = fs.openDirAbsolute(dir_path, .{ .access_sub_paths = false, .iterate = true, .no_follow = true }) catch |err| switch (err) {
+        var dir = fs.openIterableDirAbsolute(dir_path, .{ .access_sub_paths = false, .no_follow = true }) catch |err| switch (err) {
             error.FileNotFound => return,
             else => unreachable,
         };
@@ -546,7 +580,7 @@ pub const Pacman = struct {
         const dir_name = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg_version });
         const path = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, dir_name });
 
-        var dir = fs.openDirAbsolute(path, .{ .access_sub_paths = false, .iterate = true, .no_follow = true }) catch |err| switch (err) {
+        var dir = fs.openIterableDirAbsolute(path, .{ .access_sub_paths = false, .no_follow = true }) catch |err| switch (err) {
             error.FileNotFound => return null,
             else => unreachable,
         };
@@ -571,7 +605,7 @@ pub const Pacman = struct {
 
             // TODO: The arbitrary 4096 byte file size limit is _probably_ fine here.
             // No one is going to want to read a novel before installing.
-            var file_contents = dir.readFileAlloc(self.allocator, node.name, 4096) catch |err| switch (err) {
+            var file_contents = dir.dir.readFileAlloc(self.allocator, node.name, 4096) catch |err| switch (err) {
                 error.FileTooBig => {
                     print("  {s}->{s} skipping diff for large file: {s}{s}{s}\n", .{
                         color.ForegroundBlue,
@@ -644,12 +678,14 @@ pub fn search(allocator: std.mem.Allocator, pkg: []const u8) !void {
             color.Reset,
             installed_text,
             result.Popularity,
-            result.Description,
+            result.Description.?,
         });
     }
 }
 
 fn print(comptime format: []const u8, args: anytype) void {
-    var stdout_writer = std.io.getStdOut().writer();
+    var stdout = std.io.getStdOut();
+    var stdout_writer = stdout.writer();
+
     std.fmt.format(stdout_writer, format, args) catch unreachable;
 }

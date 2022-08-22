@@ -55,7 +55,8 @@ pub const Pkgbuild = struct {
     }
 
     pub fn readLines(self: *Self) !void {
-        var stream = std.io.fixedBufferStream(self.file_contents).reader();
+        var fixedbufferstream = std.io.fixedBufferStream(self.file_contents);
+        var stream = fixedbufferstream.reader();
         var buf = std.ArrayList(u8).init(self.allocator);
         defer buf.deinit();
         while (true) {
