@@ -48,11 +48,9 @@ pub fn main() !void {
 
 fn installOrUpdate(allocator: std.mem.Allocator, pkg_list: std.ArrayList([]const u8)) !void {
     try curl.init();
-    std.debug.print("1", .{});
     defer curl.deinit();
 
     var pacman = try Pacman.init(allocator);
-    std.debug.print("2", .{});
 
     // default to updating all AUR packages
     if (pkg_list.items.len == 0) {
@@ -62,11 +60,8 @@ fn installOrUpdate(allocator: std.mem.Allocator, pkg_list: std.ArrayList([]const
         // the same code path as the update process.
         try pacman.setInstallPackages(pkg_list);
     }
-    std.debug.print("3", .{});
     try pacman.fetchRemoteAurVersions();
-    std.debug.print("4", .{});
     try pacman.compareVersions();
-    std.debug.print("5", .{});
     try pacman.processOutOfDate();
 }
 
