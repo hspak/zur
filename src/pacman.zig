@@ -107,7 +107,6 @@ pub const Pacman = struct {
     }
 
     pub fn fetchRemoteAurVersions(self: *Self) !void {
-    	std.debug.print("{s}\n", .{self.pkgs});
         self.aur_resp = try aur.queryAll(self.allocator, self.pkgs);
         if (self.aur_resp.?.resultcount == 0) {
             return error.ZeroResultsFromAurQuery;
