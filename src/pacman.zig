@@ -107,6 +107,7 @@ pub const Pacman = struct {
     }
 
     pub fn fetchRemoteAurVersions(self: *Self) !void {
+    	std.debug.print("{s}\n", .{self.pkgs});
         self.aur_resp = try aur.queryAll(self.allocator, self.pkgs);
         if (self.aur_resp.?.resultcount == 0) {
             return error.ZeroResultsFromAurQuery;
@@ -256,11 +257,11 @@ pub const Pacman = struct {
         }
 
         //This is not perfect (not robust against manual changes), but it's sufficient for it's purpose (short-circuiting)
-        var dir = fs.cwd().openDir(full_dir, .{}) catch |err| switch (err) {
-            error.FileNotFound => null,
-            else => unreachable,
-        };
-        //var dir = fs.cwd().openDir(full_dir, .{}); //catch null;       
+        //var dir = fs.cwd().openDir(full_dir, .{}) //catch |err| switch (err) {
+            //error.FileNotFound => null,
+            //else => unreachable,
+        //};
+        var dir = fs.cwd().openDir(full_dir, .{}) catch null;       
         
         if (dir != null) {
             dir.?.close();
@@ -397,7 +398,7 @@ pub const Pacman = struct {
         var new_stream = new_fixedBufferStream.reader();
         var tmp_diff: [:0]u8 = undefined;
         var diff: [:0]u8 = undefined;
-        var old_diff: [:0]u8 = "";
+        var old_diff: [:0]u8 = undefined;
         var buf: [400]u8 = undefined;
 
         while (true) {
@@ -561,7 +562,7 @@ pub const Pacman = struct {
         // Keep the last 3 installed versions of the package.
         if (list.items.len > 3) {
             const asc_i128 = comptime std.sort.asc(i128);
-            std.sort.sort(i128, list.items, {}, asc_i128);
+            std.mem.sort(i128, list.items, {}, asc_i128);
 
             const marked_for_removal = list.items[0 .. list.items.len - 3];
             for (marked_for_removal) |mtime| {
@@ -599,7 +600,7 @@ pub const Pacman = struct {
             if (mem.containsAtLeast(u8, node.name, 1, ".tar.")) {
                 continue;
             }
-            if (node.kind != fs.File.Kind.File) {
+            if (node.kind != fs.File.Kind.file) {
                 continue;
             }
 
@@ -630,7 +631,7 @@ pub const Pacman = struct {
                 }
                 var copyName = try self.allocator.alloc(u8, node.name.len);
                 mem.copy(u8, copyName, node.name);
-                try files_map.putNoClobber(copyName, buf.toOwnedSlice());
+                try files_map.putNoClobber(copyName, try buf.toOwnedSlice());
             } else {
                 var copyName = try self.allocator.alloc(u8, node.name.len);
                 mem.copy(u8, copyName, node.name);

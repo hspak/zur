@@ -93,10 +93,10 @@ pub const Pkgbuild = struct {
                                 }
                             }
                         } else if (lookahead == '\n') {
-                            var content = try Content.init(self.allocator, buf.toOwnedSlice());
+                            var content = try Content.init(self.allocator, try buf.toOwnedSlice());
                             // Content.deinit() happens in Pkgbuild.deinit()
 
-                            try self.fields.putNoClobber(key, content);
+                            try self.fields.putNoClobber(try key, content);
                             break;
                         } else {
                             try buf.append(lookahead);
@@ -110,7 +110,7 @@ pub const Pkgbuild = struct {
                     // 'pkgver' can both be a function and a key=value
                     try buf.appendSlice("()");
 
-                    var key = buf.toOwnedSlice();
+                    var key = try buf.toOwnedSlice();
                     const close_paren = try stream.readByte();
                     if (close_paren != ')') {
                         return error.MalformedPkgbuildFunction;
@@ -125,7 +125,7 @@ pub const Pkgbuild = struct {
                         try buf.append(lookahead);
                         // TODO: Is it a valid assumption that the function closing paren is always on a new line?
                         if (lookahead == '}' and prev == '\n') {
-                            var content = try Content.init(self.allocator, buf.toOwnedSlice());
+                            var content = try Content.init(self.allocator, try buf.toOwnedSlice());
                             // Content.deinit() happens in Pkgbuild.deinit()
 
                             try self.fields.putNoClobber(key, content);
@@ -177,7 +177,7 @@ pub const Pkgbuild = struct {
                 try buf.append('\n');
             }
             self.allocator.free(field.value_ptr.*.value);
-            field.value_ptr.*.value = buf.toOwnedSlice();
+            field.value_ptr.*.value = try buf.toOwnedSlice();
         }
     }
 };

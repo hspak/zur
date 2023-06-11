@@ -8,6 +8,7 @@ const Host = "https://aur.archlinux.org/rpc/?v=5";
 pub const Snapshot = "https://aur.archlinux.org/cgit/aur.git/snapshot";
 
 pub const RPCRespV5 = struct {
+	'error' : ?[]const u8,
     version: usize,
     type: []const u8,
     resultcount: usize,
@@ -72,9 +73,13 @@ pub fn queryAll(allocator: std.mem.Allocator, pkgs: std.StringHashMap(*pacman.Pa
     var resp = try curl.get(allocator, uri);
 
     @setEvalBranchQuota(100000);
-    var json_resp = std.json.TokenStream.init(resp.items);
-    var result = try std.json.parse(RPCRespV5, &json_resp, std.json.ParseOptions{ .allocator = allocator });
-
+    var json_resp = std.json.Scanner.initCompleteInput(allocator, resp.items);
+    defer json_resp.deinit();
+    std.debug.print("{s}", .{json_resp});
+    var result = std.json.parseFromTokenSource(RPCRespV5, allocator, &json_resp, .{});
+    //var json_resp = std.json.TokenStream.init(resp.items);
+    //var result = try std.json.parse(RPCRespV5, &json_resp, std.json.ParseOptions{ .allocator = allocator });
+    std.debug.print("{any}", .{result});
     return result;
 }
 
@@ -89,8 +94,11 @@ pub fn search(allocator: std.mem.Allocator, search_name: []const u8) !RPCSearchR
     var resp = try curl.get(allocator, uri_for_curl);
 
     @setEvalBranchQuota(100000);
-    var json_resp = std.json.TokenStream.init(resp.items);
-    var result = try std.json.parse(RPCSearchRespV5, &json_resp, std.json.ParseOptions{ .allocator = allocator });
+   // var json_resp = std.json.TokenStream.init(resp.items);
+    var json_resp = std.json.Scanner.initCompleteInput(allocator, resp.items);
+    var result = std.json.parseFromTokenSource(RPCSearchRespV5, allocator, &json_resp, std.json.ParseOptions{});
+
+    //var result = try std.json.parse(RPCSearchRespV5, &json_resp, std.json.ParseOptions{ .allocator = allocator });
 
     return result;
 }
