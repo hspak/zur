@@ -8,7 +8,7 @@ const Host = "https://aur.archlinux.org/rpc/?v=5";
 pub const Snapshot = "https://aur.archlinux.org/cgit/aur.git/snapshot";
 
 pub const RPCRespV5 = struct {
-	'error' : ?[]const u8,
+	//@error : ?[]const u8,
     version: usize,
     type: []const u8,
     resultcount: usize,
@@ -48,6 +48,7 @@ pub const Info = struct {
     Groups: ?[][]const u8 = null,
     License: ?[][]const u8 = null,
     Keywords: ?[][]const u8 = null,
+    Submitter: ?[]const u8 = null,
 };
 
 pub const Search = struct {
