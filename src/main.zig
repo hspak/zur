@@ -2,7 +2,6 @@ const std = @import("std");
 const io = std.io;
 
 const Args = @import("argparse.zig").Args;
-const curl = @import("curl.zig");
 const search = @import("pacman.zig").search;
 const Pacman = @import("pacman.zig").Pacman;
 
@@ -18,7 +17,7 @@ const mainerror = error{
 pub fn main() !void {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.c_allocator);
     defer arena_state.deinit();
-    var allocator = arena_state.allocator();
+    const allocator = arena_state.allocator();
 
     var args = Args.init(allocator);
     try args.parse();
@@ -47,9 +46,6 @@ pub fn main() !void {
 }
 
 fn installOrUpdate(allocator: std.mem.Allocator, pkg_list: std.ArrayList([]const u8)) !void {
-    try curl.init();
-    defer curl.deinit();
-
     var pacman = try Pacman.init(allocator);
 
     // default to updating all AUR packages

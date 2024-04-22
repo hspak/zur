@@ -53,7 +53,6 @@ pub const Version = struct {
         const patch = if (minor != null) semver_iter.next() else null;
         const extra = if (patch != null) semver_iter.next() else null;
 
-
         return Version{
             .epoch = if (epoch != null) try parseInt(epoch.?) else 0,
             .major = try parseInt(major),
@@ -132,9 +131,9 @@ pub const Version = struct {
                     break;
                 }
             }
-            if (mem.eql(u8 , str, "alpha")) {
+            if (mem.eql(u8, str, "alpha")) {
                 return -2;
-            } else if (mem.eql(u8 , str, "beta")) {
+            } else if (mem.eql(u8, str, "beta")) {
                 return -1;
             } else {
                 return -3;

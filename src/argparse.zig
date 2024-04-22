@@ -30,7 +30,7 @@ pub const Args = struct {
         defer args_iter.deinit();
         //_ = (try args_iter.next()).?; // exe
         _ = args_iter.next().?;
-        var action = args_iter.next() orelse "";
+        const action = args_iter.next() orelse "";
         if (mem.eql(u8, action, "-h") or mem.eql(u8, action, "--help")) {
             self.action = .PrintHelp;
             return;

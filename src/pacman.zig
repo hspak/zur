@@ -2,11 +2,13 @@ const std = @import("std");
 const fs = std.fs;
 const mem = std.mem;
 const os = std.os;
+const posix = std.posix;
 const testing = std.testing;
+
+const curl = @import("curl");
 
 const aur = @import("aur.zig");
 const color = @import("color.zig");
-const curl = @import("curl.zig");
 const Pkgbuild = @import("pkgbuild.zig").Pkgbuild;
 const Version = @import("version.zig").Version;
 
@@ -43,7 +45,7 @@ pub const Pacman = struct {
     stdin_has_input: bool = false,
 
     pub fn init(allocator: mem.Allocator) !Self {
-        const home = os.getenv("HOME") orelse return error.NoHomeEnvVarFound;
+        const home = posix.getenv("HOME") orelse return error.NoHomeEnvVarFound;
         const zur_dir = ".zur";
 
         const zur_path = try fs.path.join(allocator, &[_][]const u8{ home, zur_dir });
@@ -69,7 +71,7 @@ pub const Pacman = struct {
             return error.BadInitialPkgsState;
         }
 
-        const result = try std.ChildProcess.exec(.{
+        const result = try std.ChildProcess.run(.{
             .allocator = self.allocator,
             .argv = &[_][]const u8{ "pacman", "-Qm" },
         });
@@ -86,7 +88,7 @@ pub const Pacman = struct {
             const name = line_iter.next() orelse return error.UnknownPacmanQmOutputFormat;
             const version = line_iter.next() orelse return error.UnknownPacmanQmOutputFormat;
 
-            var new_pkg = try Package.init(self.allocator, version);
+            const new_pkg = try Package.init(self.allocator, version);
 
             try self.pkgs.putNoClobber(name, new_pkg);
         }
@@ -100,7 +102,7 @@ pub const Pacman = struct {
         for (pkg_list.items) |pkg_name| {
             // This is the hack:
             // We're setting an impossible version to initialize the packages to install.
-            var new_pkg = try Package.init(self.allocator, "0-0");
+            const new_pkg = try Package.init(self.allocator, "0-0");
 
             try self.pkgs.putNoClobber(pkg_name, new_pkg);
         }
@@ -229,7 +231,7 @@ pub const Pacman = struct {
 
         // TODO: maybe we want to be like yay and also find some VCS info to do this correctly.
         // For -git packages, we need to force zur to always install because we don't know if there's been an update or not.
-        var dir = try fs.openIterableDirAbsolute(self.zur_pkg_dir, .{ .access_sub_paths = false, .no_follow = true });
+        var dir = try fs.openDirAbsolute(self.zur_pkg_dir, .{ .iterate = true, .access_sub_paths = false, .no_follow = true });
         var dir_iter = dir.iterate();
         while (try dir_iter.next()) |node| {
             if (mem.eql(u8, node.name, full_pkg_name) and !mem.containsAtLeast(u8, node.name, 1, "-git")) {
@@ -260,8 +262,8 @@ pub const Pacman = struct {
             error.FileNotFound => null,
             else => unreachable,
         };
-        //var dir = fs.cwd().openDir(full_dir, .{}); //catch null;       
-        
+        //var dir = fs.cwd().openDir(full_dir, .{}); //catch null;
+
         if (dir != null) {
             dir.?.close();
             print(" skipping download, {s}{s}{s} already exists...\n", .{ color.Bold, full_dir, color.Reset });
@@ -269,14 +271,16 @@ pub const Pacman = struct {
         }
 
         print(" downloading from: {s}{s}{s}\n", .{ color.Bold, url, color.Reset });
-        const snapshot = try curl.get(self.allocator, url);
+        const easy = try curl.Easy.init(self.allocator, .{});
+        defer easy.deinit();
+        const snapshot = try easy.get(url);
         print(" downloaded to: {s}{s}{s}\n", .{ color.Bold, full_file_path, color.Reset });
 
         try fs.cwd().makePath(full_dir);
         const snapshot_file = try fs.cwd().createFile(full_file_path, .{});
         defer snapshot_file.close();
 
-        try snapshot_file.writeAll(snapshot.items);
+        try snapshot_file.writeAll(snapshot.body.?.items);
         try self.extractPackage(full_dir, pkg_name);
         return;
     }
@@ -285,7 +289,7 @@ pub const Pacman = struct {
     fn extractPackage(self: *Self, snapshot_path: []const u8, pkg_name: []const u8) !void {
         const file_name = try mem.join(self.allocator, ".", &[_][]const u8{ pkg_name, "tar.gz" });
         const file_path = try fs.path.join(self.allocator, &[_][]const u8{ snapshot_path, file_name });
-        _ = try std.ChildProcess.exec(.{
+        _ = try std.ChildProcess.run(.{
             .allocator = self.allocator,
             .argv = &[_][]const u8{ "tar", "-xf", file_path, "-C", snapshot_path, "--strip-components=1" },
         });
@@ -293,7 +297,7 @@ pub const Pacman = struct {
     }
 
     fn compareUpdateAndInstall(self: *Self, pkg_name: []const u8, pkg: *Package) !void {
-        var old_files_maybe = try self.snapshotFiles(pkg_name, pkg.version);
+        const old_files_maybe = try self.snapshotFiles(pkg_name, pkg.version);
         if (old_files_maybe == null) {
             // We have no older version in stored in the filesystem.
             // Fallback to just installing
@@ -301,7 +305,7 @@ pub const Pacman = struct {
         }
         var old_files = old_files_maybe.?;
 
-        var new_files_maybe = try self.snapshotFiles(pkg_name, pkg.aur_version.?);
+        const new_files_maybe = try self.snapshotFiles(pkg_name, pkg.aur_version.?);
         var new_files = new_files_maybe.?;
 
         var old_pkgbuild = Pkgbuild.init(self.allocator, old_files.get("PKGBUILD").?);
@@ -371,7 +375,7 @@ pub const Pacman = struct {
     }
 
     fn printDiff(self: *Self, old: []const u8, new: []const u8) !void {
-        var old_fixedBufferStream =std.io.fixedBufferStream(old);
+        var old_fixedBufferStream = std.io.fixedBufferStream(old);
         var new_fixedBufferStream = std.io.fixedBufferStream(new);
         var old_stream = old_fixedBufferStream.reader();
         var new_stream = new_fixedBufferStream.reader();
@@ -391,13 +395,13 @@ pub const Pacman = struct {
     }
 
     fn returnDiff(self: *Self, old: []const u8, new: []const u8) ![]const u8 {
-        var old_fixedBufferStream =std.io.fixedBufferStream(old);
+        var old_fixedBufferStream = std.io.fixedBufferStream(old);
         var new_fixedBufferStream = std.io.fixedBufferStream(new);
         var old_stream = old_fixedBufferStream.reader();
         var new_stream = new_fixedBufferStream.reader();
         var tmp_diff: [:0]u8 = undefined;
         var diff: [:0]u8 = undefined;
-        var old_diff: [:0]u8 = "";
+        var old_diff: [*:0]const u8 = @as([*:0]const u8, "");
         var buf: [400]u8 = undefined;
 
         while (true) {
@@ -409,7 +413,7 @@ pub const Pacman = struct {
             const new_line = if (new_line_maybe == null) break else new_line_maybe.?;
             if (new_line.len == 0) break;
             // if (!mem.eql(u8, old_line, new_line)) {
-            
+
             tmp_diff = try std.fmt.bufPrintZ(&buf, "line: {s}              {s}\n", .{ old_line, new_line });
 
             diff = try std.fmt.bufPrintZ(&buf, "{s}{s}", .{ old_diff, tmp_diff });
@@ -478,7 +482,7 @@ pub const Pacman = struct {
     fn install(self: *Self, pkg_name: []const u8, pkg: *Package) !void {
         const pkg_dir = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg.aur_version.? });
         const full_pkg_dir = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, pkg_dir });
-        try os.chdir(full_pkg_dir);
+        try posix.chdir(full_pkg_dir);
 
         const argv = &[_][]const u8{ "makepkg", "-sicC" };
         try self.execCommand(argv);
@@ -488,7 +492,7 @@ pub const Pacman = struct {
     }
 
     fn installExistingPackage(self: *Self, pkg_name: []const u8, pkg: *Package) !void {
-        try os.chdir(self.zur_pkg_dir);
+        try posix.chdir(self.zur_pkg_dir);
 
         // TODO: Dynamically get the right arch
         const full_pkg_name = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg.aur_version.?, "x86_64.pkg.tar.zst" });
@@ -515,7 +519,7 @@ pub const Pacman = struct {
         const pkg_dir = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg.aur_version.? });
         const full_pkg_dir = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, pkg_dir });
 
-        var dir = fs.openIterableDirAbsolute(full_pkg_dir, .{ .access_sub_paths = false, .no_follow = true }) catch |err| switch (err) {
+        var dir = fs.openDirAbsolute(full_pkg_dir, .{ .iterate = true, .access_sub_paths = false, .no_follow = true }) catch |err| switch (err) {
             error.FileNotFound => return,
             else => unreachable,
         };
@@ -535,7 +539,7 @@ pub const Pacman = struct {
     }
 
     fn removeStaleArtifacts(self: *Self, pkg_name: []const u8, dir_path: []const u8) !void {
-        var dir = fs.openIterableDirAbsolute(dir_path, .{ .access_sub_paths = false, .no_follow = true }) catch |err| switch (err) {
+        var dir = fs.openDirAbsolute(dir_path, .{ .iterate = true, .access_sub_paths = false, .no_follow = true }) catch |err| switch (err) {
             error.FileNotFound => return,
             else => unreachable,
         };
@@ -561,7 +565,7 @@ pub const Pacman = struct {
         // Keep the last 3 installed versions of the package.
         if (list.items.len > 3) {
             const asc_i128 = comptime std.sort.asc(i128);
-            std.sort.sort(i128, list.items, {}, asc_i128);
+            std.sort.insertion(i128, list.items, {}, asc_i128);
 
             const marked_for_removal = list.items[0 .. list.items.len - 3];
             for (marked_for_removal) |mtime| {
@@ -580,7 +584,7 @@ pub const Pacman = struct {
         const dir_name = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg_version });
         const path = try fs.path.join(self.allocator, &[_][]const u8{ self.zur_path, dir_name });
 
-        var dir = fs.openIterableDirAbsolute(path, .{ .access_sub_paths = false, .no_follow = true }) catch |err| switch (err) {
+        var dir = fs.openDirAbsolute(path, .{ .iterate = true, .access_sub_paths = false, .no_follow = true }) catch |err| switch (err) {
             error.FileNotFound => return null,
             else => unreachable,
         };
@@ -599,13 +603,13 @@ pub const Pacman = struct {
             if (mem.containsAtLeast(u8, node.name, 1, ".tar.")) {
                 continue;
             }
-            if (node.kind != fs.File.Kind.File) {
+            if (node.kind != fs.File.Kind.file) {
                 continue;
             }
 
             // TODO: The arbitrary 4096 byte file size limit is _probably_ fine here.
             // No one is going to want to read a novel before installing.
-            var file_contents = dir.dir.readFileAlloc(self.allocator, node.name, 4096) catch |err| switch (err) {
+            const file_contents = dir.readFileAlloc(self.allocator, node.name, 4096) catch |err| switch (err) {
                 error.FileTooBig => {
                     print("  {s}->{s} skipping diff for large file: {s}{s}{s}\n", .{
                         color.ForegroundBlue,
@@ -628,12 +632,12 @@ pub const Pacman = struct {
                     try buf.appendSlice(line);
                     try buf.append('\n');
                 }
-                var copyName = try self.allocator.alloc(u8, node.name.len);
-                mem.copy(u8, copyName, node.name);
-                try files_map.putNoClobber(copyName, buf.toOwnedSlice());
+                const copyName = try self.allocator.alloc(u8, node.name.len);
+                mem.copyForwards(u8, copyName, node.name);
+                try files_map.putNoClobber(copyName, try buf.toOwnedSlice());
             } else {
-                var copyName = try self.allocator.alloc(u8, node.name.len);
-                mem.copy(u8, copyName, node.name);
+                const copyName = try self.allocator.alloc(u8, node.name.len);
+                mem.copyForwards(u8, copyName, node.name);
                 try files_map.putNoClobber(copyName, file_contents);
             }
         }
@@ -685,7 +689,7 @@ pub fn search(allocator: std.mem.Allocator, pkg: []const u8) !void {
 
 fn print(comptime format: []const u8, args: anytype) void {
     var stdout = std.io.getStdOut();
-    var stdout_writer = stdout.writer();
+    const stdout_writer = stdout.writer();
 
     std.fmt.format(stdout_writer, format, args) catch unreachable;
 }

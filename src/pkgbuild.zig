@@ -76,7 +76,7 @@ pub const Pkgbuild = struct {
                 },
                 // PKGBUILD key=value
                 '=' => {
-                    var key = buf.toOwnedSlice();
+                    const key = try buf.toOwnedSlice();
                     var in_quotes = false;
                     while (true) {
                         const lookahead = try stream.readByte();
@@ -93,7 +93,7 @@ pub const Pkgbuild = struct {
                                 }
                             }
                         } else if (lookahead == '\n') {
-                            var content = try Content.init(self.allocator, buf.toOwnedSlice());
+                            const content = try Content.init(self.allocator, try buf.toOwnedSlice());
                             // Content.deinit() happens in Pkgbuild.deinit()
 
                             try self.fields.putNoClobber(key, content);
@@ -110,7 +110,7 @@ pub const Pkgbuild = struct {
                     // 'pkgver' can both be a function and a key=value
                     try buf.appendSlice("()");
 
-                    var key = buf.toOwnedSlice();
+                    const key = try buf.toOwnedSlice();
                     const close_paren = try stream.readByte();
                     if (close_paren != ')') {
                         return error.MalformedPkgbuildFunction;
@@ -125,7 +125,7 @@ pub const Pkgbuild = struct {
                         try buf.append(lookahead);
                         // TODO: Is it a valid assumption that the function closing paren is always on a new line?
                         if (lookahead == '}' and prev == '\n') {
-                            var content = try Content.init(self.allocator, buf.toOwnedSlice());
+                            const content = try Content.init(self.allocator, try buf.toOwnedSlice());
                             // Content.deinit() happens in Pkgbuild.deinit()
 
                             try self.fields.putNoClobber(key, content);
@@ -177,13 +177,13 @@ pub const Pkgbuild = struct {
                 try buf.append('\n');
             }
             self.allocator.free(field.value_ptr.*.value);
-            field.value_ptr.*.value = buf.toOwnedSlice();
+            field.value_ptr.*.value = try buf.toOwnedSlice();
         }
     }
 };
 
 test "Pkgbuild - readLines - neovim-git" {
-    var file_contents =
+    const file_contents =
         \\# Maintainer: Florian Walch <florian+aur@fwalch.com>
         \\# Contributor: Florian Hahn <flo@fhahn.com>
         \\# Contributor: Sven-Hendrik Haase <svenstaro@gmail.com>
@@ -291,7 +291,7 @@ test "Pkgbuild - readLines - neovim-git" {
 }
 
 test "Pkgbuild - readLines - google-chrome-dev" {
-    var file_contents =
+    const file_contents =
         \\# Maintainer: Knut Ahlers <knut at ahlers dot me>
         \\# Contributor: Det <nimetonmaili g-mail>
         \\# Contributors: t3ddy, Lex Rivera aka x-demon, ruario
@@ -418,7 +418,7 @@ test "Pkgbuild - readLines - google-chrome-dev" {
 }
 
 test "Pkgbuild - compare" {
-    var old =
+    const old =
         \\pkgname=google-chrome-dev
         \\pkgver=91.0.4464.5
         \\pkgrel=1
@@ -447,7 +447,7 @@ test "Pkgbuild - compare" {
         \\    install function
         \\}
     ;
-    var new =
+    const new =
         \\pkgname=google-chrome-dev
         \\pkgver=9001
         \\pkgrel=1
@@ -491,7 +491,7 @@ test "Pkgbuild - compare" {
 }
 
 test "Pkgbuild - indentValue - google-chrome-dev" {
-    var file_contents =
+    const file_contents =
         \\# Maintainer: Knut Ahlers <knut at ahlers dot me>
         \\# Contributor: Det <nimetonmaili g-mail>
         \\# Contributors: t3ddy, Lex Rivera aka x-demon, ruario
@@ -589,7 +589,7 @@ test "Pkgbuild - indentValue - google-chrome-dev" {
         \\  }
         \\
     );
-    var package_content = try Content.init(testing.allocator, package_val.toOwnedSlice());
+    var package_content = try Content.init(testing.allocator, try package_val.toOwnedSlice());
     defer package_content.deinit(testing.allocator);
     try expectedMap.putNoClobber("package()", package_content);
 
