@@ -254,7 +254,7 @@ test "Pkgbuild - readLines - neovim-git" {
 
     var install_val = std.ArrayList(u8).init(testing.allocator);
     try install_val.appendSlice("neovim-git.install");
-    var install_content = try Content.init(testing.allocator, install_val.toOwnedSlice());
+    var install_content = try Content.init(testing.allocator, try install_val.toOwnedSlice());
     defer install_content.deinit(testing.allocator);
     try expectedMap.putNoClobber("install", install_content);
 
@@ -278,7 +278,7 @@ test "Pkgbuild - readLines - neovim-git" {
         \\  echo "set runtimepath+=/usr/share/vim/vimfiles" > "${pkgdir}"/usr/share/nvim/archlinux.vim
         \\}
     );
-    var package_content = try Content.init(testing.allocator, package_val.toOwnedSlice());
+    var package_content = try Content.init(testing.allocator, try package_val.toOwnedSlice());
     defer package_content.deinit(testing.allocator);
     try expectedMap.putNoClobber("package()", package_content);
 
@@ -360,7 +360,7 @@ test "Pkgbuild - readLines - google-chrome-dev" {
 
     var install_val = std.ArrayList(u8).init(testing.allocator);
     try install_val.appendSlice("$pkgname.install");
-    var install_content = try Content.init(testing.allocator, install_val.toOwnedSlice());
+    var install_content = try Content.init(testing.allocator, try install_val.toOwnedSlice());
     defer install_content.deinit(testing.allocator);
     try expectedMap.putNoClobber("install", install_content);
 
@@ -370,7 +370,7 @@ test "Pkgbuild - readLines - google-chrome-dev" {
         \\'eula_text.html'
         \\"google-chrome-$_channel.sh"
     );
-    var source_content = try Content.init(testing.allocator, source_val.toOwnedSlice());
+    var source_content = try Content.init(testing.allocator, try source_val.toOwnedSlice());
     defer source_content.deinit(testing.allocator);
     try expectedMap.putNoClobber("source", source_content);
 
@@ -404,7 +404,7 @@ test "Pkgbuild - readLines - google-chrome-dev" {
         \\	rm "$pkgdir"/opt/google/chrome-$_channel/product_logo_*.png
         \\}
     );
-    var package_content = try Content.init(testing.allocator, package_val.toOwnedSlice());
+    var package_content = try Content.init(testing.allocator, try package_val.toOwnedSlice());
     defer package_content.deinit(testing.allocator);
     try expectedMap.putNoClobber("package()", package_content);
 
