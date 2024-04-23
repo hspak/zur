@@ -5,11 +5,10 @@ const os = std.os;
 const posix = std.posix;
 const testing = std.testing;
 
-const curl = @import("curl");
-
 const aur = @import("aur.zig");
 const color = @import("color.zig");
 const Pkgbuild = @import("pkgbuild.zig").Pkgbuild;
+const Request = @import("req.zig").Request;
 const Version = @import("version.zig").Version;
 
 pub const Package = struct {
@@ -249,12 +248,12 @@ pub const Pacman = struct {
         const full_file_path = try fs.path.join(self.allocator, &[_][]const u8{ full_dir, file_name });
 
         // TODO: There must be a more idiomatic way of doing this
-        var url: [:0]const u8 = undefined;
+        var url: []const u8 = undefined;
         if (pkg.base_name) |base_name| {
             const name = try mem.join(self.allocator, ".", &[_][]const u8{ base_name, "tar.gz" });
-            url = try mem.joinZ(self.allocator, "/", &[_][]const u8{ aur.Snapshot, name });
+            url = try mem.join(self.allocator, "/", &[_][]const u8{ aur.Snapshot, name });
         } else {
-            url = try mem.joinZ(self.allocator, "/", &[_][]const u8{ aur.Snapshot, file_name });
+            url = try mem.join(self.allocator, "/", &[_][]const u8{ aur.Snapshot, file_name });
         }
 
         //This is not perfect (not robust against manual changes), but it's sufficient for it's purpose (short-circuiting)
@@ -271,16 +270,17 @@ pub const Pacman = struct {
         }
 
         print(" downloading from: {s}{s}{s}\n", .{ color.Bold, url, color.Reset });
-        const easy = try curl.Easy.init(self.allocator, .{});
-        defer easy.deinit();
-        const snapshot = try easy.get(url);
+        const http = try Request.init(self.allocator);
+        defer http.deinit();
+        const uri = try std.Uri.parse(url);
+        const snapshot = try http.request(.GET, uri);
         print(" downloaded to: {s}{s}{s}\n", .{ color.Bold, full_file_path, color.Reset });
 
         try fs.cwd().makePath(full_dir);
         const snapshot_file = try fs.cwd().createFile(full_file_path, .{});
         defer snapshot_file.close();
 
-        try snapshot_file.writeAll(snapshot.body.?.items);
+        try snapshot_file.writeAll(snapshot);
         try self.extractPackage(full_dir, pkg_name);
         return;
     }

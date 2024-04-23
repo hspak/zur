@@ -15,7 +15,9 @@ const mainerror = error{
 };
 
 pub fn main() !void {
-    var arena_state = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
+    const gpa = general_purpose_allocator.allocator();
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
     const allocator = arena_state.allocator();
 

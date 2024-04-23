@@ -9,11 +9,6 @@ pub fn build(b: *std.Build) void {
         .optimize = b.standardOptimizeOption(.{}),
     });
 
-    const dep_curl = b.dependency("curl", .{ .link_vendor = false });
-    exe.root_module.addImport("curl", dep_curl.module("curl"));
-    exe.linkLibC();
-    exe.linkSystemLibrary("curl");
-
     const version = b.option([]const u8, "version", "Set the build version") orelse "unset";
     const exe_options = b.addOptions();
 

@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const curl = @import("curl");
+const Request = @import("req.zig").Request;
 const pacman = @import("pacman.zig");
 
 const Host = "https://aur.archlinux.org/rpc/?v=5";
@@ -68,12 +68,13 @@ pub const Search = struct {
 
 pub fn queryAll(allocator: std.mem.Allocator, pkgs: std.StringHashMap(*pacman.Package)) !RPCRespV5 {
     const uri = try buildInfoQuery(allocator, pkgs);
+    const url = try std.Uri.parse(uri);
 
-    const easy = try curl.Easy.init(allocator, .{});
-    defer easy.deinit();
-    const resp = try easy.get(uri);
+    const http = try Request.init(allocator);
+    defer http.deinit();
+    const body = try http.request(.GET, url);
 
-    const result = try std.json.parseFromSlice(RPCRespV5, allocator, resp.body.?.items, .{ .ignore_unknown_fields = true });
+    const result = try std.json.parseFromSlice(RPCRespV5, allocator, body, .{ .ignore_unknown_fields = true });
 
     return result.value;
 }
@@ -85,18 +86,18 @@ pub fn search(allocator: std.mem.Allocator, search_name: []const u8) !RPCSearchR
     try uri.appendSlice("&type=search&by=name&arg="); // TODO: maybe consider opening this up
     try uri.appendSlice(search_name);
 
-    const easy = try curl.Easy.init(allocator, .{});
-    defer easy.deinit();
-    const uri_for_curl = try uri.toOwnedSliceSentinel(0);
-    const resp = try easy.get(uri_for_curl);
+    const http = try Request.init(allocator);
+    defer http.deinit();
 
-    // @setEvalBranchQuota(100000);
-    const result = try std.json.parseFromSlice(RPCSearchRespV5, allocator, resp.body.?.items, .{ .ignore_unknown_fields = true });
+    const url = try std.Uri.parse(try uri.toOwnedSlice());
+    const body = try http.request(.GET, url);
+
+    const result = try std.json.parseFromSlice(RPCSearchRespV5, allocator, body, .{ .ignore_unknown_fields = true });
 
     return result.value;
 }
 
-fn buildInfoQuery(allocator: std.mem.Allocator, pkgs: std.StringHashMap(*pacman.Package)) ![:0]const u8 {
+fn buildInfoQuery(allocator: std.mem.Allocator, pkgs: std.StringHashMap(*pacman.Package)) ![]const u8 {
     var uri = std.ArrayList(u8).init(allocator);
 
     try uri.appendSlice(Host);
@@ -111,5 +112,5 @@ fn buildInfoQuery(allocator: std.mem.Allocator, pkgs: std.StringHashMap(*pacman.
         try uri.appendSlice(copyKey);
         defer allocator.free(copyKey);
     }
-    return try uri.toOwnedSliceSentinel(0);
+    return try uri.toOwnedSlice();
 }
