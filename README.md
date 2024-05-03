@@ -11,5 +11,4 @@
 ## Build
 **Dependencies**
 - Arch Linux (pacman)
-- Curl
 - Zig (master)

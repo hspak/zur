@@ -11,41 +11,37 @@ const RelevantFields = &[_][]const u8{
 };
 
 const Content = struct {
-    const Self = @This();
-
     value: []const u8,
     updated: bool = false,
 
     // allocator.create does not respect default values so safeguard via an init() call
-    pub fn init(allocator: std.mem.Allocator, value: []const u8) !*Self {
-        var new = try allocator.create(Self);
+    pub fn init(allocator: std.mem.Allocator, value: []const u8) !*Content {
+        var new = try allocator.create(Content);
         new.value = value;
         new.updated = false;
         return new;
     }
 
-    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *Content, allocator: std.mem.Allocator) void {
         allocator.free(self.value);
         allocator.destroy(self);
     }
 };
 
 pub const Pkgbuild = struct {
-    const Self = @This();
-
     allocator: std.mem.Allocator,
     file_contents: []const u8,
     fields: std.StringHashMap(*Content),
 
-    pub fn init(allocator: std.mem.Allocator, file_contents: []const u8) Self {
-        return Self{
+    pub fn init(allocator: std.mem.Allocator, file_contents: []const u8) Pkgbuild {
+        return Pkgbuild{
             .allocator = allocator,
             .file_contents = file_contents,
             .fields = std.StringHashMap(*Content).init(allocator),
         };
     }
 
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: *Pkgbuild) void {
         defer self.fields.deinit();
         var iter = self.fields.iterator();
         while (iter.next()) |entry| {
@@ -54,7 +50,7 @@ pub const Pkgbuild = struct {
         }
     }
 
-    pub fn readLines(self: *Self) !void {
+    pub fn readLines(self: *Pkgbuild) !void {
         var fixedbufferstream = std.io.fixedBufferStream(self.file_contents);
         var stream = fixedbufferstream.reader();
         var buf = std.ArrayList(u8).init(self.allocator);
@@ -142,7 +138,7 @@ pub const Pkgbuild = struct {
         }
     }
 
-    pub fn comparePrev(self: *Self, prev_pkgbuild: Pkgbuild) !void {
+    pub fn comparePrev(self: *Pkgbuild, prev_pkgbuild: Pkgbuild) !void {
         for (RelevantFields) |field| {
             const prev = prev_pkgbuild.fields.get(field);
             const curr = self.fields.get(field);
@@ -159,7 +155,7 @@ pub const Pkgbuild = struct {
         }
     }
 
-    pub fn indentValues(self: *Self, spaces_count: usize) !void {
+    pub fn indentValues(self: *Pkgbuild, spaces_count: usize) !void {
         var buf = std.ArrayList(u8).init(self.allocator);
         var fields_iter = self.fields.iterator();
         while (fields_iter.next()) |field| {

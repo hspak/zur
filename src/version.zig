@@ -17,9 +17,7 @@ pub const Version = struct {
     vcs_rev: isize,
     release: isize,
 
-    const Self = @This();
-
-    pub fn init(version: []const u8) !Self {
+    pub fn init(version: []const u8) !Version {
         // Epoch parsing, epoch is optional
         var epoch_iter = mem.split(u8, version, ":");
         const epoch_first_half = epoch_iter.next().?;
@@ -64,7 +62,7 @@ pub const Version = struct {
         };
     }
 
-    pub fn olderThan(self: Self, new_version: Version) bool {
+    pub fn olderThan(self: Version, new_version: Version) bool {
         if (self.epoch < new_version.epoch) {
             return true;
         } else if (self.epoch > new_version.epoch) {

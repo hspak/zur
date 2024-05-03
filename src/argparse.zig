@@ -10,21 +10,19 @@ pub const Action = enum {
 };
 
 pub const Args = struct {
-    const Self = @This();
-
     allocator: mem.Allocator,
     pkgs: std.ArrayList([]const u8),
     action: Action,
 
-    pub fn init(allocator: mem.Allocator) Self {
-        return Self{
+    pub fn init(allocator: mem.Allocator) Args {
+        return Args{
             .allocator = allocator,
             .pkgs = std.ArrayList([]const u8).init(allocator),
             .action = .Unset,
         };
     }
 
-    pub fn parse(self: *Self) !void {
+    pub fn parse(self: *Args) !void {
         //var args_iter = std.process.args();
         var args_iter = try std.process.argsWithAllocator(self.allocator);
         defer args_iter.deinit();
