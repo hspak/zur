@@ -10,23 +10,23 @@ pub const Action = enum {
 };
 
 pub const Args = struct {
-    allocator: mem.Allocator,
     pkgs: std.ArrayList([]const u8),
     action: Action,
 
     pub fn init(allocator: mem.Allocator) Args {
         return Args{
-            .allocator = allocator,
             .pkgs = std.ArrayList([]const u8).init(allocator),
             .action = .Unset,
         };
     }
 
+    pub fn deinit(self: *Args) void {
+        self.pkgs.deinit();
+    }
+
     pub fn parse(self: *Args) !void {
-        //var args_iter = std.process.args();
-        var args_iter = try std.process.argsWithAllocator(self.allocator);
+        var args_iter = std.process.args();
         defer args_iter.deinit();
-        //_ = (try args_iter.next()).?; // exe
         _ = args_iter.next().?;
         const action = args_iter.next() orelse "";
         if (mem.eql(u8, action, "-h") or mem.eql(u8, action, "--help")) {

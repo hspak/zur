@@ -22,6 +22,7 @@ pub fn main() !void {
     const allocator = arena_state.allocator();
 
     var args = Args.init(allocator);
+    defer args.deinit();
     try args.parse();
 
     switch (args.action) {
