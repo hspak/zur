@@ -9,6 +9,9 @@ pub fn build(b: *std.Build) void {
         .optimize = b.standardOptimizeOption(.{}),
     });
 
+    exe.linkLibC();
+    exe.linkSystemLibrary("alpm");
+
     const version = b.option([]const u8, "version", "Set the build version") orelse "unset";
     const exe_options = b.addOptions();
 

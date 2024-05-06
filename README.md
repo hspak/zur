@@ -11,4 +11,4 @@
 ## Build
 **Dependencies**
 - Arch Linux (pacman)
-- Zig (master)
+- Zig (0.12)

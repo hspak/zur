@@ -5,6 +5,7 @@ const os = std.os;
 const posix = std.posix;
 const testing = std.testing;
 
+const alpm = @import("alpm.zig");
 const aur = @import("aur.zig");
 const color = @import("color.zig");
 const Pkgbuild = @import("pkgbuild.zig").Pkgbuild;
@@ -122,12 +123,10 @@ pub const Pacman = struct {
         }
     }
 
-    // TODO: maybe use libalpm once this issue is fixed:
-    // https://github.com/ziglang/zig/issues/1499
     pub fn compareVersions(self: *Pacman) !void {
         var pkgs_iter = self.pkgs.iterator();
         while (pkgs_iter.next()) |pkg| {
-            const local_version = try Version.init(pkg.value_ptr.*.version);
+            const local_version = pkg.value_ptr.*.version;
 
             if (pkg.value_ptr.*.aur_version == null) {
                 print("{s}warning:{s} {s}{s}{s} was orphaned or non-existant in AUR, skipping\n", .{
@@ -140,8 +139,8 @@ pub const Pacman = struct {
                 continue;
             }
 
-            const remote_version = try Version.init(pkg.value_ptr.*.aur_version.?);
-            if (local_version.olderThan(remote_version)) {
+            const remote_version = pkg.value_ptr.*.aur_version.?;
+            if (try alpm.is_newer_than(remote_version, local_version)) {
                 pkg.value_ptr.*.requires_update = true;
                 self.updates += 1;
             }
