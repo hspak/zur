@@ -10,7 +10,6 @@ const aur = @import("aur.zig");
 const color = @import("color.zig");
 const Pkgbuild = @import("pkgbuild.zig").Pkgbuild;
 const Request = @import("req.zig").Request;
-const Version = @import("version.zig").Version;
 
 pub const Package = struct {
     base_name: ?[]const u8 = null,
