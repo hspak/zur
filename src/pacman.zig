@@ -665,6 +665,7 @@ pub fn search(allocator: std.mem.Allocator, pkg: []const u8) !void {
     const resp = try aur.search(allocator, pkg);
     for (resp.results) |result| {
         const installed_text = if (pacman.pkgs.get(result.Name) == null) "" else installed;
+        const desc = result.Description orelse "(missing)";
         print("{s}aur/{s}{s}{s}{s} {s}{s}{s} {s} ({d})\n    {s}\n", .{
             color.BoldForegroundMagenta,
             color.Reset,
@@ -676,7 +677,7 @@ pub fn search(allocator: std.mem.Allocator, pkg: []const u8) !void {
             color.Reset,
             installed_text,
             result.Popularity,
-            result.Description.?,
+            desc,
         });
     }
 }
