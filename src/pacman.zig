@@ -139,7 +139,7 @@ pub const Pacman = struct {
             }
 
             const remote_version = pkg.value_ptr.*.aur_version.?;
-            if (try alpm.is_newer_than(remote_version, local_version)) {
+            if (try alpm.is_newer_than(self.allocator, remote_version, local_version)) {
                 pkg.value_ptr.*.requires_update = true;
                 self.updates += 1;
             }
@@ -347,8 +347,7 @@ pub const Pacman = struct {
                         color.Bold,
                         file.key_ptr.*,
                         color.Reset,
-                        // new_files.get(file.key).?,
-                        try self.returnDiff(old_content, new_content),
+                        new_files.get(file.key_ptr.*).?,
                     });
                 }
             }
@@ -366,56 +365,6 @@ pub const Pacman = struct {
             print("{s}::{s} No meaningful diff's found\n", .{ color.ForegroundBlue, color.Reset });
         }
         try self.install(pkg_name, pkg);
-    }
-
-    fn printDiff(self: *Pacman, old: []const u8, new: []const u8) !void {
-        var old_fixedBufferStream = std.io.fixedBufferStream(old);
-        var new_fixedBufferStream = std.io.fixedBufferStream(new);
-        var old_stream = old_fixedBufferStream.reader();
-        var new_stream = new_fixedBufferStream.reader();
-
-        while (true) {
-            const old_line_maybe = try old_stream.readUntilDelimiterOrEofAlloc(self.allocator, '\n', 4096);
-            const old_line = if (old_line_maybe == null) break else old_line_maybe.?;
-            if (old_line.len == 0) break;
-
-            const new_line_maybe = try new_stream.readUntilDelimiterOrEofAlloc(self.allocator, '\n', 4096);
-            const new_line = if (new_line_maybe == null) break else new_line_maybe.?;
-            if (new_line.len == 0) break;
-            // if (!mem.eql(u8, old_line, new_line)) {
-            std.debug.print("line: {s}              {s}\n", .{ old_line, new_line });
-            // }
-        }
-    }
-
-    fn returnDiff(self: *Pacman, old: []const u8, new: []const u8) ![]const u8 {
-        var old_fixedBufferStream = std.io.fixedBufferStream(old);
-        var new_fixedBufferStream = std.io.fixedBufferStream(new);
-        var old_stream = old_fixedBufferStream.reader();
-        var new_stream = new_fixedBufferStream.reader();
-        var tmp_diff: [:0]u8 = undefined;
-        var diff: [:0]u8 = undefined;
-        var old_diff: [*:0]const u8 = @as([*:0]const u8, "");
-        var buf: [400]u8 = undefined;
-
-        while (true) {
-            const old_line_maybe = try old_stream.readUntilDelimiterOrEofAlloc(self.allocator, '\n', 4096);
-            const old_line = if (old_line_maybe == null) break else old_line_maybe.?;
-            if (old_line.len == 0) break;
-
-            const new_line_maybe = try new_stream.readUntilDelimiterOrEofAlloc(self.allocator, '\n', 4096);
-            const new_line = if (new_line_maybe == null) break else new_line_maybe.?;
-            if (new_line.len == 0) break;
-            // if (!mem.eql(u8, old_line, new_line)) {
-
-            tmp_diff = try std.fmt.bufPrintZ(&buf, "line: {s}              {s}\n", .{ old_line, new_line });
-
-            diff = try std.fmt.bufPrintZ(&buf, "{s}{s}", .{ old_diff, tmp_diff });
-            old_diff = diff;
-
-            // }
-        }
-        return diff;
     }
 
     // TODO: handle recursively installing dependencies from AUR
