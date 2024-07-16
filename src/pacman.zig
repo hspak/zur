@@ -66,7 +66,7 @@ pub const Pacman = struct {
             return error.BadInitialPkgsState;
         }
 
-        const result = try std.ChildProcess.run(.{
+        const result = try std.process.Child.run(.{
             .allocator = self.allocator,
             .argv = &[_][]const u8{ "pacman", "-Qm" },
         });
@@ -283,7 +283,7 @@ pub const Pacman = struct {
     fn extractPackage(self: *Pacman, snapshot_path: []const u8, pkg_name: []const u8) !void {
         const file_name = try mem.join(self.allocator, ".", &[_][]const u8{ pkg_name, "tar.gz" });
         const file_path = try fs.path.join(self.allocator, &[_][]const u8{ snapshot_path, file_name });
-        _ = try std.ChildProcess.run(.{
+        _ = try std.process.Child.run(.{
             .allocator = self.allocator,
             .argv = &[_][]const u8{ "tar", "-xf", file_path, "-C", snapshot_path, "--strip-components=1" },
         });
@@ -445,13 +445,13 @@ pub const Pacman = struct {
     }
 
     fn execCommand(self: *Pacman, argv: []const []const u8) !void {
-        var runner = std.ChildProcess.init(argv, self.allocator);
+        var runner = std.process.Child.init(argv, self.allocator);
 
         try self.stdinClearByte();
         runner.stdin = std.io.getStdIn();
         runner.stdout = std.io.getStdOut();
-        runner.stdin_behavior = std.ChildProcess.StdIo.Inherit;
-        runner.stdout_behavior = std.ChildProcess.StdIo.Inherit;
+        runner.stdin_behavior = std.process.Child.StdIo.Inherit;
+        runner.stdout_behavior = std.process.Child.StdIo.Inherit;
 
         // TODO: Ctrl+c from a [sudo] prompt causes some weird output behavior.
         // I probably need signal handling for this to properly work.

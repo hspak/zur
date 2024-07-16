@@ -1,5 +1,5 @@
 ctest
-zig-cache
+.zig-cache
 zig-out
 test
 .vscode
