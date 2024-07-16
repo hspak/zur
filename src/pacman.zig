@@ -302,7 +302,8 @@ pub const Pacman = struct {
         const new_files_maybe = try self.snapshotFiles(pkg_name, pkg.aur_version.?);
         var new_files = new_files_maybe.?;
 
-        var old_pkgbuild = Pkgbuild.init(self.allocator, old_files.get("PKGBUILD").?);
+        const old_pkgbuild_content = old_files.get("PKGBUILD") orelse return;
+        var old_pkgbuild = Pkgbuild.init(self.allocator, old_pkgbuild_content);
         try old_pkgbuild.readLines();
         var new_pkgbuild = Pkgbuild.init(self.allocator, new_files.get("PKGBUILD").?);
         try new_pkgbuild.readLines();
