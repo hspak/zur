@@ -139,7 +139,14 @@ pub const Pacman = struct {
             }
 
             const remote_version = pkg.value_ptr.*.aur_version.?;
-            if (try alpm.is_newer_than(self.allocator, remote_version, local_version)) {
+            const git_package_stale = blk: {
+                const is_git_package = std.mem.endsWith(u8, pkg.key_ptr.*, "-git");
+                if (!is_git_package) {
+                    break :blk false;
+                }
+                break :blk std.mem.eql(u8, remote_version, local_version);
+            };
+            if (git_package_stale or try alpm.is_newer_than(self.allocator, remote_version, local_version)) {
                 pkg.value_ptr.*.requires_update = true;
                 self.updates += 1;
             }
