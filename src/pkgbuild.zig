@@ -1,15 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
 
-const RelevantFields = &[_][]const u8{
-    "install",
-    "source",
-    "pkgver()",
-    "check()",
-    "package()",
-    "install()",
-};
-
 const Content = struct {
     value: []const u8,
     updated: bool = false,
@@ -55,55 +46,158 @@ pub const Pkgbuild = struct {
         var stream = fixedbufferstream.reader();
         var buf = std.ArrayList(u8).init(self.allocator);
         defer buf.deinit();
+
+        var in_function: bool = false;
+        var function_depth: usize = 0;
+        var key_buf = std.ArrayList(u8).init(self.allocator);
+        defer key_buf.deinit();
+
         while (true) {
             const byte = stream.readByte() catch |err| switch (err) {
                 error.EndOfStream => break,
             };
+
             switch (byte) {
-                // PKGBUILD comments
                 '#' => {
+                    // Handle comments
                     while (true) {
-                        // footer comments cause this to return EndOfStream error
                         const lookahead = stream.readByte() catch |err| switch (err) {
                             error.EndOfStream => break,
                         };
                         if (lookahead == '\n') break;
                     }
                 },
-                // PKGBUILD key=value
                 '=' => {
-                    const key = try buf.toOwnedSlice();
-                    var in_quotes = false;
-                    while (true) {
-                        const lookahead = try stream.readByte();
-                        if (lookahead == '(') {
-                            while (true) {
-                                const moreahead = try stream.readByte();
-
-                                // This naive parsing goofs when there are parens in quotes
-                                if (moreahead == '\'') in_quotes = !in_quotes;
-
-                                if (moreahead == ')' and !in_quotes) break;
-                                if (moreahead != ' ' and moreahead != '\t') {
-                                    try buf.append(moreahead);
-                                }
-                            }
-                        } else if (lookahead == '\n') {
+                    // Save the key and prepare to parse the value
+                    const key = try key_buf.toOwnedSlice();
+                    try self.parseValue(key, &stream, &buf);
+                },
+                '{' => {
+                    if (in_function) {
+                        function_depth += 1;
+                        try buf.append(byte);
+                    }
+                },
+                '}' => {
+                    if (in_function) {
+                        if (function_depth == 0) {
+                            // End of function
+                            try buf.append(byte);
+                            const key = try key_buf.toOwnedSlice();
                             const content = try Content.init(self.allocator, try buf.toOwnedSlice());
-                            // Content.deinit() happens in Pkgbuild.deinit()
-
                             try self.fields.putNoClobber(key, content);
-                            break;
+                            buf.clearRetainingCapacity();
+                            in_function = false;
                         } else {
-                            try buf.append(lookahead);
+                            function_depth -= 1;
+                            try buf.append(byte);
                         }
                     }
                 },
-                // PKGBUILD functions() {}
-                // TODO: looks like PKGBUILDS shared across multiple packages can do something like package_PKGNAME()
                 '(' => {
-                    // functions get a () in their keys because
-                    // 'pkgver' can both be a function and a key=value
+                    if (key_buf.items.len > 0 and std.mem.endsWith(u8, key_buf.items, "()")) {
+                        // Start of function
+                        in_function = true;
+                        function_depth = 0;
+                        try buf.append(byte);
+                    } else {
+                        // Start of array
+                        const key = try key_buf.toOwnedSlice();
+                        try self.parseArray(key, &stream, &buf);
+                    }
+                },
+                '\n' => {
+                    if (!in_function) {
+                        key_buf.clearRetainingCapacity();
+                    }
+                },
+                else => {
+                    if (!in_function) {
+                        try key_buf.append(byte);
+                    } else {
+                        try buf.append(byte);
+                    }
+                },
+            }
+        }
+    }
+
+    fn parseValue(self: *Pkgbuild, key: []const u8, stream: *std.io.FixedBufferStream([]const u8).Reader, buf: *std.ArrayList(u8)) !void {
+        var in_quotes = false;
+        var quote_char: u8 = 0;
+
+        while (true) {
+            const byte = try stream.readByte();
+            
+            switch (byte) {
+                '"', '\'' => {
+                    if (!in_quotes) {
+                        in_quotes = true;
+                        quote_char = byte;
+                    } else if (byte == quote_char) {
+                        in_quotes = false;
+                    }
+                    try buf.append(byte);
+                },
+                '\n' => {
+                    if (!in_quotes) {
+                        const content = try Content.init(self.allocator, try buf.toOwnedSlice());
+                        try self.fields.putNoClobber(key, content);
+                        buf.clearRetainingCapacity();
+                        break;
+                    } else {
+                        try buf.append(byte);
+                    }
+                },
+                else => {
+                    try buf.append(byte);
+                },
+            }
+        }
+    }
+
+    fn parseArray(self: *Pkgbuild, key: []const u8, stream: *std.io.FixedBufferStream([]const u8).Reader, buf: *std.ArrayList(u8)) !void {
+        var in_quotes = false;
+        var quote_char: u8 = 0;
+        var paren_depth: usize = 1;
+
+        try buf.append('(');
+
+        while (true) {
+            const byte = try stream.readByte();
+            
+            switch (byte) {
+                '"', '\'' => {
+                    if (!in_quotes) {
+                        in_quotes = true;
+                        quote_char = byte;
+                    } else if (byte == quote_char) {
+                        in_quotes = false;
+                    }
+                    try buf.append(byte);
+                },
+                '(' => {
+                    if (!in_quotes) paren_depth += 1;
+                    try buf.append(byte);
+                },
+                ')' => {
+                    if (!in_quotes) {
+                        paren_depth -= 1;
+                        if (paren_depth == 0) {
+                            try buf.append(byte);
+                            const content = try Content.init(self.allocator, try buf.toOwnedSlice());
+                            try self.fields.putNoClobber(key, content);
+                            buf.clearRetainingCapacity();
+                            break;
+                        }
+                    }
+                    try buf.append(byte);
+                },
+                else => {
+                    try buf.append(byte);
+                },
+            }
+        }
                     try buf.appendSlice("()");
 
                     const key = try buf.toOwnedSlice();

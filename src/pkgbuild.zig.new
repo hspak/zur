@@ -1,0 +1,335 @@
+const std = @import("std");
+const testing = std.testing;
+
+const Content = struct {
+    value: []const u8,
+    updated: bool = false,
+
+    // allocator.create does not respect default values so safeguard via an init() call
+    pub fn init(allocator: std.mem.Allocator, value: []const u8) !*Content {
+        var new = try allocator.create(Content);
+        new.value = value;
+        new.updated = false;
+        return new;
+    }
+
+    pub fn deinit(self: *Content, allocator: std.mem.Allocator) void {
+        allocator.free(self.value);
+        allocator.destroy(self);
+    }
+};
+
+pub const Pkgbuild = struct {
+    allocator: std.mem.Allocator,
+    file_contents: []const u8,
+    fields: std.StringHashMap(*Content),
+
+    pub fn init(allocator: std.mem.Allocator, file_contents: []const u8) Pkgbuild {
+        return Pkgbuild{
+            .allocator = allocator,
+            .file_contents = file_contents,
+            .fields = std.StringHashMap(*Content).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *Pkgbuild) void {
+        defer self.fields.deinit();
+        var iter = self.fields.iterator();
+        while (iter.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            entry.value_ptr.*.deinit(self.allocator);
+        }
+    }
+
+    pub fn readLines(self: *Pkgbuild) !void {
+        var fixedbufferstream = std.io.fixedBufferStream(self.file_contents);
+        var stream = fixedbufferstream.reader();
+        var buf = std.ArrayList(u8).init(self.allocator);
+        defer buf.deinit();
+
+        var in_function: bool = false;
+        var function_depth: usize = 0;
+        var key_buf = std.ArrayList(u8).init(self.allocator);
+        defer key_buf.deinit();
+
+        while (true) {
+            const byte = stream.readByte() catch |err| switch (err) {
+                error.EndOfStream => break,
+            };
+
+            switch (byte) {
+                '#' => {
+                    // Handle comments
+                    while (true) {
+                        const lookahead = stream.readByte() catch |err| switch (err) {
+                            error.EndOfStream => break,
+                        };
+                        if (lookahead == '\n') break;
+                    }
+                },
+                '=' => {
+                    // Save the key and prepare to parse the value
+                    const key = try key_buf.toOwnedSlice();
+                    try self.parseValue(key, &stream, &buf);
+                },
+                '{' => {
+                    if (in_function) {
+                        function_depth += 1;
+                        try buf.append(byte);
+                    }
+                },
+                '}' => {
+                    if (in_function) {
+                        if (function_depth == 0) {
+                            // End of function
+                            try buf.append(byte);
+                            const key = try key_buf.toOwnedSlice();
+                            const content = try Content.init(self.allocator, try buf.toOwnedSlice());
+                            try self.fields.putNoClobber(key, content);
+                            buf.clearRetainingCapacity();
+                            in_function = false;
+                        } else {
+                            function_depth -= 1;
+                            try buf.append(byte);
+                        }
+                    }
+                },
+                '(' => {
+                    if (key_buf.items.len > 0 and std.mem.endsWith(u8, key_buf.items, "()")) {
+                        // Start of function
+                        in_function = true;
+                        function_depth = 0;
+                        try buf.append(byte);
+                    } else {
+                        // Start of array
+                        const key = try key_buf.toOwnedSlice();
+                        try self.parseArray(key, &stream, &buf);
+                    }
+                },
+                '\n' => {
+                    if (!in_function) {
+                        key_buf.clearRetainingCapacity();
+                    }
+                },
+                else => {
+                    if (!in_function) {
+                        try key_buf.append(byte);
+                    } else {
+                        try buf.append(byte);
+                    }
+                },
+            }
+        }
+    }
+
+    fn parseValue(self: *Pkgbuild, key: []const u8, stream: *std.io.FixedBufferStream([]const u8).Reader, buf: *std.ArrayList(u8)) !void {
+        var in_quotes = false;
+        var quote_char: u8 = 0;
+
+        while (true) {
+            const byte = try stream.readByte();
+            
+            switch (byte) {
+                '"', '\'' => {
+                    if (!in_quotes) {
+                        in_quotes = true;
+                        quote_char = byte;
+                    } else if (byte == quote_char) {
+                        in_quotes = false;
+                    }
+                    try buf.append(byte);
+                },
+                '\n' => {
+                    if (!in_quotes) {
+                        const content = try Content.init(self.allocator, try buf.toOwnedSlice());
+                        try self.fields.putNoClobber(key, content);
+                        buf.clearRetainingCapacity();
+                        break;
+                    } else {
+                        try buf.append(byte);
+                    }
+                },
+                else => {
+                    try buf.append(byte);
+                },
+            }
+        }
+    }
+
+    fn parseArray(self: *Pkgbuild, key: []const u8, stream: *std.io.FixedBufferStream([]const u8).Reader, buf: *std.ArrayList(u8)) !void {
+        var in_quotes = false;
+        var quote_char: u8 = 0;
+        var paren_depth: usize = 1;
+
+        try buf.append('(');
+
+        while (true) {
+            const byte = try stream.readByte();
+            
+            switch (byte) {
+                '"', '\'' => {
+                    if (!in_quotes) {
+                        in_quotes = true;
+                        quote_char = byte;
+                    } else if (byte == quote_char) {
+                        in_quotes = false;
+                    }
+                    try buf.append(byte);
+                },
+                '(' => {
+                    if (!in_quotes) paren_depth += 1;
+                    try buf.append(byte);
+                },
+                ')' => {
+                    if (!in_quotes) {
+                        paren_depth -= 1;
+                        if (paren_depth == 0) {
+                            try buf.append(byte);
+                            const content = try Content.init(self.allocator, try buf.toOwnedSlice());
+                            try self.fields.putNoClobber(key, content);
+                            buf.clearRetainingCapacity();
+                            break;
+                        }
+                    }
+                    try buf.append(byte);
+                },
+                else => {
+                    try buf.append(byte);
+                },
+            }
+        }
+    }
+
+    pub fn compare(self: *Pkgbuild, other: *Pkgbuild) !void {
+        var iter = self.fields.iterator();
+        while (iter.next()) |entry| {
+            const prev = entry.value_ptr.*;
+            const curr = other.fields.get(entry.key_ptr.*);
+            if (prev != null and curr == null) {
+                prev.?.value = "(removed)";
+                prev.?.updated = true;
+            } else if (prev == null and curr == null) {
+                continue;
+            } else if (prev != null and curr != null and !std.mem.eql(u8, prev.?.value, curr.?.value)) {
+                curr.?.updated = true;
+            }
+        }
+    }
+
+    pub fn indentValues(self: *Pkgbuild, spaces_count: usize) !void {
+        var buf = std.ArrayList(u8).init(self.allocator);
+        var fields_iter = self.fields.iterator();
+        while (fields_iter.next()) |field| {
+            if (!std.mem.containsAtLeast(u8, field.key_ptr.*, 1, "()")) {
+                continue;
+            }
+            var lines_iter = std.mem.split(u8, field.value_ptr.*.value, "\n");
+            while (lines_iter.next()) |line| {
+                var count: usize = 0;
+                while (count < spaces_count) {
+                    try buf.append(' ');
+                    count += 1;
+                }
+                try buf.appendSlice(line);
+                try buf.append('\n');
+            }
+            self.allocator.free(field.value_ptr.*.value);
+            field.value_ptr.*.value = try buf.toOwnedSlice();
+        }
+    }
+};
+
+test "Pkgbuild - readLines - neovim-git" {
+    const file_contents =
+        \\# Maintainer: Florian Walch <florian+aur@fwalch.com>
+        \\# Contributor: Florian Hahn <flo@fhahn.com>
+        \\# Contributor: Sven-Hendrik Haase <svenstaro@gmail.com>
+        \\
+        \\pkgname=neovim-git
+        \\pkgver=0.4.0.r2972.g3fbff98cf
+        \\pkgrel=1
+        \\pkgdesc='Fork of Vim aiming to improve user experience, plugins, and GUIs.'
+        \\arch=('i686' 'x86_64' 'armv7h' 'armv6h' 'aarch64')
+        \\url='https://neovim.io'
+        \\backup=('etc/xdg/nvim/sysinit.vim')
+        \\license=('custom:neovim')
+        \\depends=('libluv' 'libtermkey' 'libutf8proc' 'libuv' 'libvterm>=0.1.git5' 'luajit' 'msgpack-c' 'unibilium' 'tree-sitter')
+        \\makedepends=('cmake' 'git' 'gperf' 'lua51-mpack' 'lua51-lpeg')
+        \\optdepends=('python2-neovim: for Python 2 plugin support (see :help provider-python)'
+        \\            'python-neovim: for Python 3 plugin support (see :help provider-python)'
+        \\            'ruby-neovim: for Ruby plugin support (see :help provider-ruby)'
+        \\            'xclip: for clipboard support (or xsel) (see :help provider-clipboard)'
+        \\            'xsel: for clipboard support (or xclip) (see :help provider-clipboard)'
+        \\            'wl-clipboard: for clipboard support on wayland (see :help clipboard)')
+        \\source=("${pkgname}::git+https://github.com/neovim/neovim.git")
+        \\sha256sums=('SKIP')
+        \\provides=("neovim=${pkgver}" 'vim-plugin-runtime')
+        \\conflicts=('neovim')
+        \\install=neovim-git.install
+        \\options=(!strip)
+        \\
+        \\pkgver() {
+        \\  cd "${pkgname}"
+        \\  git describe --long | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g'
+        \\}
+        \\
+        \\build() {
+        \\  cmake -S"${pkgname}" -Bbuild \
+        \\        -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+        \\        -DCMAKE_INSTALL_PREFIX=/usr
+        \\  cmake --build build
+        \\}
+        \\
+        \\check() {
+        \\  cd "${srcdir}/build"
+        \\  ./bin/nvim --version
+        \\  ./bin/nvim --headless -u NONE -i NONE -c ':quit'
+        \\}
+        \\
+        \\package() {
+        \\  cd "${srcdir}/build"
+        \\  DESTDIR="${pkgdir}" cmake --build . --target install
+        \\
+        \\  cd "${srcdir}/${pkgname}"
+        \\  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+        \\  install -Dm644 runtime/nvim.desktop "${pkgdir}/usr/share/applications/nvim.desktop"
+        \\  install -Dm644 runtime/nvim.png "${pkgdir}/usr/share/pixmaps/nvim.png"
+        \\
+        \\  # Make Arch vim packages work
+        \\  mkdir -p "${pkgdir}"/etc/xdg/nvim
+        \\  echo "\" This line makes pacman-installed global Arch Linux vim packages work." > "${pkgdir}"/etc/xdg/nvim/sysinit.vim
+        \\  echo "source /usr/share/nvim/archlinux.vim" >> "${pkgdir}"/etc/xdg/nvim/sysinit.vim
+        \\
+        \\  mkdir -p "${pkgdir}"/usr/share/vim
+        \\  echo "set runtimepath+=/usr/share/vim/vimfiles" > "${pkgdir}"/usr/share/nvim/archlinux.vim
+        \\}
+    ;
+    var expectedMap = std.StringHashMap(*Content).init(testing.allocator);
+    defer expectedMap.deinit();
+
+    var install_val = std.ArrayList(u8).init(testing.allocator);
+    try install_val.appendSlice("neovim-git.install");
+    var install_content = try Content.init(testing.allocator, try install_val.toOwnedSlice());
+    defer install_content.deinit(testing.allocator);
+    try expectedMap.putNoClobber("install", install_content);
+
+    var source_val = std.ArrayList(u8).init(testing.allocator);
+    try source_val.appendSlice("\"${pkgname}::git+https://github.com/neovim/neovim.git\"");
+    var source_content = try Content.init(testing.allocator, try source_val.toOwnedSlice());
+    defer source_content.deinit(testing.allocator);
+    try expectedMap.putNoClobber("source", source_content);
+
+    var package_val = std.ArrayList(u8).init(testing.allocator);
+    try package_val.appendSlice(
+        \\{
+        \\  cd "${srcdir}/build"
+        \\  DESTDIR="${pkgdir}" cmake --build . --target install
+        \\
+        \\  cd "${srcdir}/${pkgname}"
+        \\  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+        \\  install -Dm644 runtime/nvim.desktop "${pkgdir}/usr/share/applications/nvim.desktop"
+        \\  install -Dm644 runtime/nvim.png "${pkgdir}/usr/share/pixmaps/nvim.png"
+        \\
+        \\  # Make Arch vim packages work
+        \\  mkdir -p "${pkgdir}"/etc/xdg/nvim
+        \\  echo "\" This line makes pacman-installed global Arch Linux vim packages work." > "${pkgdir}"/etc/xdg/nvim/sy
