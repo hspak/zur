@@ -72,14 +72,14 @@ pub const Pacman = struct {
         });
         self.pacman_output = result.stdout;
 
-        var lines = mem.split(u8, result.stdout, "\n");
+        var lines = mem.splitScalar(u8, result.stdout, '\n');
         while (lines.next()) |line| {
             // ignore empty lines if they exist
             if (line.len <= 1) {
                 continue;
             }
 
-            var line_iter = mem.split(u8, line, " ");
+            var line_iter = mem.splitScalar(u8, line, ' ');
             const name = line_iter.next() orelse return error.UnknownPacmanQmOutputFormat;
             const version = line_iter.next() orelse return error.UnknownPacmanQmOutputFormat;
 
@@ -97,7 +97,7 @@ pub const Pacman = struct {
         for (pkg_list.items) |pkg_name| {
             // This is the hack:
             // We're setting an impossible version to initialize the packages to install.
-            const new_pkg = try Package.init(self.allocator, "0-0");
+            const new_pkg = try Package.init(self.allocator, "0");
 
             try self.pkgs.putNoClobber(pkg_name, new_pkg);
         }
@@ -115,6 +115,7 @@ pub const Pacman = struct {
             // Only store Package.base_name if the name doesn't match base name.
             // We use the null state to see if they defer.
             // TODO: Actually, PKGBUILDs with multiple pkgnames' install multiple packages;
+            // std.debug.print("pkg: {}", .{curr})e
             // zur currently duplicates these package installs because of this.
             if (!mem.eql(u8, result.Name, result.PackageBase)) {
                 curr_pkg.base_name = result.PackageBase;
@@ -146,7 +147,7 @@ pub const Pacman = struct {
                 }
                 break :blk std.mem.eql(u8, remote_version, local_version);
             };
-            if (git_package_stale or try alpm.is_newer_than(self.allocator, remote_version, local_version)) {
+            if (git_package_stale or std.mem.eql(u8, local_version, "0") or try alpm.is_newer_than(self.allocator, remote_version, local_version)) {
                 pkg.value_ptr.*.requires_update = true;
                 self.updates += 1;
             }
@@ -193,7 +194,7 @@ pub const Pacman = struct {
                 }
 
                 // The install hack is bleeding into here.
-                if (!mem.eql(u8, pkg.value_ptr.*.version, "0-0")) {
+                if (!mem.eql(u8, pkg.value_ptr.*.version, "0")) {
                     print("{s}::{s} Updating {s}{s}{s}: {s}{s}{s} -> {s}{s}{s}\n", .{
                         color.BoldForegroundBlue,
                         color.Reset,
@@ -577,7 +578,7 @@ pub const Pacman = struct {
             // PKGBUILD's have their own indent logic
             if (!mem.eql(u8, node.name, "PKGBUILD")) {
                 var buf = std.ArrayList(u8).init(self.allocator);
-                var lines_iter = mem.split(u8, file_contents, "\n");
+                var lines_iter = mem.splitScalar(u8, file_contents, '\n');
                 while (lines_iter.next()) |line| {
                     try buf.appendSlice("  ");
                     try buf.appendSlice(line);
