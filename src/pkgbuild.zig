@@ -524,31 +524,31 @@ test "Pkgbuild - indentValue - google-chrome-dev" {
         \\            '349fc419796bdea83ebcda2c33b262984ce4d37f2a0a13ef7e1c87a9f619fd05eb8ff1d41687f51b907b43b9a2c3b4a33b9b7c3a3b28c12cf9527ffdbd1ddf2e')
         \\
         \\package() {
-        \\      msg2 "Extracting the data.tar.xz..."
-        \\      bsdtar -xf data.tar.xz -C "$pkgdir/"
+        \\    msg2 "Extracting the data.tar.xz..."
+        \\    bsdtar -xf data.tar.xz -C "$pkgdir/"
         \\
-        \\      msg2 "Moving stuff in place..."
-        \\      # Launcher
-        \\      install -m755 google-chrome-$_channel.sh "$pkgdir"/usr/bin/google-chrome-$_channel
+        \\    msg2 "Moving stuff in place..."
+        \\    # Launcher
+        \\    install -m755 google-chrome-$_channel.sh "$pkgdir"/usr/bin/google-chrome-$_channel
         \\
-        \\      # Icons
-        \\      for i in 16x16 24x24 32x32 48x48 64x64 128x128 256x256; do
-        \\              install -Dm644 "$pkgdir"/opt/google/chrome-$_channel/product_logo_${i/x*/}_${pkgname/*-/}.png \
-        \\                      "$pkgdir"/usr/share/icons/hicolor/$i/apps/google-chrome-$_channel.png
-        \\      done
+        \\    # Icons
+        \\    for i in 16x16 24x24 32x32 48x48 64x64 128x128 256x256; do
+        \\            install -Dm644 "$pkgdir"/opt/google/chrome-$_channel/product_logo_${i/x*/}_${pkgname/*-/}.png \
+        \\                    "$pkgdir"/usr/share/icons/hicolor/$i/apps/google-chrome-$_channel.png
+        \\    done
         \\
-        \\      # License
-        \\      install -Dm644 eula_text.html "$pkgdir"/usr/share/licenses/google-chrome-$_channel/eula_text.html
+        \\    # License
+        \\    install -Dm644 eula_text.html "$pkgdir"/usr/share/licenses/google-chrome-$_channel/eula_text.html
         \\
-        \\      msg2 "Fixing Chrome icon resolution..."
-        \\      sed -i \
-        \\              -e "/Exec=/i\StartupWMClass=Google-chrome-$_channel" \
-        \\              -e "s/x-scheme-handler\/ftp;\?//g" \
-        \\              "$pkgdir"/usr/share/applications/google-chrome-$_channel.desktop
+        \\    msg2 "Fixing Chrome icon resolution..."
+        \\    sed -i \
+        \\            -e "/Exec=/i\StartupWMClass=Google-chrome-$_channel" \
+        \\            -e "s/x-scheme-handler\/ftp;\?//g" \
+        \\            "$pkgdir"/usr/share/applications/google-chrome-$_channel.desktop
         \\
-        \\      msg2 "Removing Debian Cron job and duplicate product logos..."
-        \\      rm -r "$pkgdir"/etc/cron.daily/ "$pkgdir"/opt/google/chrome-$_channel/cron/
-        \\      rm "$pkgdir"/opt/google/chrome-$_channel/product_logo_*.png
+        \\    msg2 "Removing Debian Cron job and duplicate product logos..."
+        \\    rm -r "$pkgdir"/etc/cron.daily/ "$pkgdir"/opt/google/chrome-$_channel/cron/
+        \\    rm "$pkgdir"/opt/google/chrome-$_channel/product_logo_*.png
         \\}
     ;
     var expectedMap = std.StringHashMap(*Content).init(testing.allocator);
