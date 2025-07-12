@@ -6,6 +6,8 @@ jobs:
     steps:
       - name: Check out repository code
         uses: actions/checkout@v2
+        with:
+          clean: false
       - run: ls -la
       - run: zig test src/tests.zig 
       - run: zig build
