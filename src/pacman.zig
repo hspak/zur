@@ -11,6 +11,10 @@ const color = @import("color.zig");
 const Pkgbuild = @import("pkgbuild.zig").Pkgbuild;
 const Request = @import("req.zig").Request;
 
+var stdout_buffer: [4096]u8 = undefined;
+var stdout_writer: std.fs.File.Writer = std.fs.File.stdin().writer(&stdout_buffer);
+const stdout = &stdout_writer.interface;
+
 pub const Package = struct {
     base_name: ?[]const u8 = null,
     version: []const u8,
@@ -38,6 +42,9 @@ pub const Pacman = struct {
     zur_pkg_dir: []const u8,
     updates: usize = 0,
     stdin_has_input: bool = false,
+    var stdin_buffer: [4096]u8 = undefined;
+    var stdin_reader: std.fs.File.Reader = std.fs.File.stdin().reader(&stdin_buffer);
+    const stdin = &stdin_reader.interface;
 
     pub fn init(allocator: mem.Allocator) !Pacman {
         const home = posix.getenv("HOME") orelse return error.NoHomeEnvVarFound;
@@ -89,7 +96,7 @@ pub const Pacman = struct {
         }
     }
 
-    pub fn setInstallPackages(self: *Pacman, pkg_list: std.ArrayList([]const u8)) !void {
+    pub fn setInstallPackages(self: *Pacman, pkg_list: std.array_list.Managed([]const u8)) !void {
         if (self.pkgs.count() != 0) {
             return error.BadInitialPkgsState;
         }
@@ -274,8 +281,7 @@ pub const Pacman = struct {
         print(" downloading from: {s}{s}{s}\n", .{ color.Bold, url, color.Reset });
         const http = try Request.init(self.allocator);
         defer http.deinit();
-        const uri = try std.Uri.parse(url);
-        const snapshot = try http.request(.GET, uri);
+        const snapshot = try http.getRequest(url);
         print(" downloaded to: {s}{s}{s}\n", .{ color.Bold, full_file_path, color.Reset });
 
         try fs.cwd().makePath(full_dir);
@@ -409,7 +415,7 @@ pub const Pacman = struct {
             } else {
                 const format = "\n{s}::{s} File: {s}{s}{s} {s}===================={s}\n{s}";
                 print(format, .{
-                    color.BoldForegroundBlue,
+                    color.BoldForegroundBlue.*,
                     color.Reset,
                     color.Bold,
                     pkg_file.key_ptr.*,
@@ -456,8 +462,8 @@ pub const Pacman = struct {
         var runner = std.process.Child.init(argv, self.allocator);
 
         try self.stdinClearByte();
-        runner.stdin = std.io.getStdIn();
-        runner.stdout = std.io.getStdOut();
+        runner.stdin = std.fs.File.stdin();
+        runner.stdout = std.fs.File.stdout();
         runner.stdin_behavior = std.process.Child.StdIo.Inherit;
         runner.stdout_behavior = std.process.Child.StdIo.Inherit;
 
@@ -498,7 +504,7 @@ pub const Pacman = struct {
         defer dir.close();
 
         // TODO: Implement better method to sorting these files by mtime.
-        var list = std.ArrayList(i128).init(self.allocator);
+        var list = std.array_list.Managed(i128).init(self.allocator);
         var map = std.AutoHashMap(i128, []const u8).init(self.allocator);
         var dir_iter = dir.iterate();
         while (try dir_iter.next()) |node| {
@@ -577,7 +583,7 @@ pub const Pacman = struct {
 
             // PKGBUILD's have their own indent logic
             if (!mem.eql(u8, node.name, "PKGBUILD")) {
-                var buf = std.ArrayList(u8).init(self.allocator);
+                var buf = std.array_list.Managed(u8).init(self.allocator);
                 var lines_iter = mem.splitScalar(u8, file_contents, '\n');
                 while (lines_iter.next()) |line| {
                     try buf.appendSlice("  ");
@@ -597,8 +603,7 @@ pub const Pacman = struct {
     }
 
     fn stdinReadByte(self: *Pacman) !u8 {
-        var stdin = std.io.getStdIn();
-        const input = try stdin.reader().readByte();
+        const input = try Pacman.stdin.takeByte();
         self.stdin_has_input = true;
         return input;
     }
@@ -609,8 +614,7 @@ pub const Pacman = struct {
         if (!self.stdin_has_input) {
             return;
         }
-        var stdin = std.io.getStdIn();
-        _ = try stdin.reader().readBytesNoEof(1);
+        _ = try Pacman.stdin.take(1);
         self.stdin_has_input = false;
     }
 };
@@ -641,8 +645,6 @@ pub fn search(allocator: std.mem.Allocator, pkg: []const u8) !void {
 }
 
 fn print(comptime format: []const u8, args: anytype) void {
-    var stdout = std.io.getStdOut();
-    const stdout_writer = stdout.writer();
-
-    std.fmt.format(stdout_writer, format, args) catch unreachable;
+    stdout.print(format, args) catch unreachable;
+    stdout.flush() catch unreachable;
 }

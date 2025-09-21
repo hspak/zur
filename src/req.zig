@@ -7,23 +7,26 @@ pub const Request = struct {
 
     pub fn init(allocator: Allocator) !*Request {
         var new = try allocator.create(Request);
-        new.client = std.http.Client{ .allocator = allocator };
+        new.client = .{ .allocator = allocator };
         new.allocator = allocator;
         return new;
     }
 
     pub fn deinit(self: *Request) void {
+        self.client.deinit();
         self.allocator.destroy(self);
     }
 
-    pub fn request(self: *Request, method: std.http.Method, url: std.Uri) ![]u8 {
-        var header_buffer: [4096 * 2]u8 = undefined; // TODO: no idea what happens when this overflows
-        var req = try self.client.open(method, url, .{ .server_header_buffer = &header_buffer });
-        defer req.deinit();
-        try req.send();
-        try req.wait();
-        const body = req.reader().readAllAlloc(self.allocator, 10000000) catch unreachable;
-        errdefer self.allocator.free(body);
-        return body;
+    pub fn getRequest(self: *Request, url: []const u8) ![]u8 {
+        var body: std.Io.Writer.Allocating = .init(self.allocator);
+        defer body.deinit();
+
+        _ = try self.client.fetch(.{
+            .location = .{ .url = url },
+            .method = .GET,
+            .response_writer = &body.writer,
+        });
+
+        return body.toOwnedSlice();
     }
 };

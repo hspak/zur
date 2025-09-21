@@ -10,12 +10,12 @@ pub const Action = enum {
 };
 
 pub const Args = struct {
-    pkgs: std.ArrayList([]const u8),
+    pkgs: std.array_list.Managed([]const u8),
     action: Action,
 
     pub fn init(allocator: mem.Allocator) Args {
         return Args{
-            .pkgs = std.ArrayList([]const u8).init(allocator),
+            .pkgs = std.array_list.Managed([]const u8).init(allocator),
             .action = .Unset,
         };
     }

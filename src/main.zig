@@ -23,30 +23,49 @@ pub fn main() !void {
     defer args.deinit();
     try args.parse();
 
+    var stderr_buffer: [1024]u8 = undefined;
+    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    const stderr = &stderr_writer.interface;
+
     switch (args.action) {
-        .PrintHelp => try printHelp(),
-        .PrintVersion => try printVersion(),
+        .PrintHelp => {
+            const msg =
+                \\usage: zur [action]
+                \\
+                \\  actions:
+                \\    -S <pkg1> [pkg2]...  install packages
+                \\    -Ss <pkg>            search for packages by name
+                \\
+                \\  default action: update out-of-date AUR packages
+                \\
+            ;
+            _ = try stderr.write(msg);
+        },
+        .PrintVersion => {
+            _ = try stderr.write("version: " ++ build_version ++ "\n");
+        },
         .Search => search(allocator, args.pkgs.items[0]) catch |err| {
             if (err == mainerror.CouldntResolveHost) {
-                try io.getStdOut().writer().print("Please check your connection\n", .{});
+                try stderr.print("Please check your connection\n", .{});
             } else {
-                try io.getStdErr().writer().print("Found error {any}\n", .{err});
+                try stderr.print("Found error {any}\n", .{err});
             }
         },
         .InstallOrUpgrade => installOrUpdate(allocator, args.pkgs) catch |err| {
             if (err == mainerror.ZeroResultsFromAurQuery) {
-                try io.getStdOut().writer().print("No aur packages found\n", .{});
+                try stderr.print("No aur packages found\n", .{});
             } else if (err == mainerror.CouldntResolveHost) {
-                try io.getStdOut().writer().print("Please check your connection\n", .{});
+                try stderr.print("Please check your connection\n", .{});
             } else {
-                try io.getStdErr().writer().print("Found error {any}\n", .{err});
+                try stderr.print("Found error {any}\n", .{err});
             }
         },
         .Unset => @panic("Args somehow ended up with 'Unset' state"),
     }
+    try stderr.flush();
 }
 
-fn installOrUpdate(allocator: std.mem.Allocator, pkg_list: std.ArrayList([]const u8)) !void {
+fn installOrUpdate(allocator: std.mem.Allocator, pkg_list: std.array_list.Managed([]const u8)) !void {
     var pacman = try Pacman.init(allocator);
 
     // default to updating all AUR packages
@@ -60,24 +79,4 @@ fn installOrUpdate(allocator: std.mem.Allocator, pkg_list: std.ArrayList([]const
     try pacman.fetchRemoteAurVersions();
     try pacman.compareVersions();
     try pacman.processOutOfDate();
-}
-
-fn printHelp() !void {
-    const msg =
-        \\usage: zur [action]
-        \\
-        \\  actions:
-        \\    -S <pkg1> [pkg2]...  install packages
-        \\    -Ss <pkg>            search for packages by name
-        \\
-        \\  default action: update out-of-date AUR packages
-        \\
-    ;
-    var stderr = &io.getStdErr().writer();
-    _ = try stderr.write(msg);
-}
-
-fn printVersion() !void {
-    var stdout = &io.getStdOut().writer();
-    _ = try stdout.write("version: " ++ build_version ++ "\n");
 }

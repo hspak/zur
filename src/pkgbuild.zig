@@ -53,7 +53,7 @@ pub const Pkgbuild = struct {
     pub fn readLines(self: *Pkgbuild) !void {
         var fixedbufferstream = std.io.fixedBufferStream(self.file_contents);
         var stream = fixedbufferstream.reader();
-        var buf = std.ArrayList(u8).init(self.allocator);
+        var buf = std.array_list.Managed(u8).init(self.allocator);
         defer buf.deinit();
         while (true) {
             const byte = stream.readByte() catch |err| switch (err) {
@@ -156,7 +156,7 @@ pub const Pkgbuild = struct {
     }
 
     pub fn indentValues(self: *Pkgbuild, spaces_count: usize) !void {
-        var buf = std.ArrayList(u8).init(self.allocator);
+        var buf = std.array_list.Managed(u8).init(self.allocator);
         var fields_iter = self.fields.iterator();
         while (fields_iter.next()) |field| {
             if (!std.mem.containsAtLeast(u8, field.key_ptr.*, 1, "()")) {
@@ -248,13 +248,13 @@ test "Pkgbuild - readLines - neovim-git" {
     var expectedMap = std.StringHashMap(*Content).init(testing.allocator);
     defer expectedMap.deinit();
 
-    var install_val = std.ArrayList(u8).init(testing.allocator);
+    var install_val = std.array_list.Managed(u8).init(testing.allocator);
     try install_val.appendSlice("neovim-git.install");
     var install_content = try Content.init(testing.allocator, try install_val.toOwnedSlice());
     defer install_content.deinit(testing.allocator);
     try expectedMap.putNoClobber("install", install_content);
 
-    var package_val = std.ArrayList(u8).init(testing.allocator);
+    var package_val = std.array_list.Managed(u8).init(testing.allocator);
     try package_val.appendSlice(
         \\{
         \\  cd "${srcdir}/build"
@@ -354,13 +354,13 @@ test "Pkgbuild - readLines - google-chrome-dev" {
     var expectedMap = std.StringHashMap(*Content).init(testing.allocator);
     defer expectedMap.deinit();
 
-    var install_val = std.ArrayList(u8).init(testing.allocator);
+    var install_val = std.array_list.Managed(u8).init(testing.allocator);
     try install_val.appendSlice("$pkgname.install");
     var install_content = try Content.init(testing.allocator, try install_val.toOwnedSlice());
     defer install_content.deinit(testing.allocator);
     try expectedMap.putNoClobber("install", install_content);
 
-    var source_val = std.ArrayList(u8).init(testing.allocator);
+    var source_val = std.array_list.Managed(u8).init(testing.allocator);
     try source_val.appendSlice(
         \\"https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-${_channel}/google-chrome-${_channel}_${pkgver}-1_amd64.deb"
         \\'eula_text.html'
@@ -370,7 +370,7 @@ test "Pkgbuild - readLines - google-chrome-dev" {
     defer source_content.deinit(testing.allocator);
     try expectedMap.putNoClobber("source", source_content);
 
-    var package_val = std.ArrayList(u8).init(testing.allocator);
+    var package_val = std.array_list.Managed(u8).init(testing.allocator);
     try package_val.appendSlice(
         \\{
         \\      msg2 "Extracting the data.tar.xz..."
@@ -554,7 +554,7 @@ test "Pkgbuild - indentValue - google-chrome-dev" {
     var expectedMap = std.StringHashMap(*Content).init(testing.allocator);
     defer expectedMap.deinit();
 
-    var package_val = std.ArrayList(u8).init(testing.allocator);
+    var package_val = std.array_list.Managed(u8).init(testing.allocator);
     try package_val.appendSlice(
         \\  {
         \\      msg2 "Extracting the data.tar.xz..."

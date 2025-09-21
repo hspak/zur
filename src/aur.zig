@@ -68,11 +68,10 @@ pub const Search = struct {
 
 pub fn queryAll(allocator: std.mem.Allocator, pkgs: std.StringHashMap(*pacman.Package)) !RPCRespV5 {
     const uri = try buildInfoQuery(allocator, pkgs);
-    const url = try std.Uri.parse(uri);
 
     const http = try Request.init(allocator);
     defer http.deinit();
-    const body = try http.request(.GET, url);
+    const body = try http.getRequest(uri);
 
     const result = try std.json.parseFromSlice(RPCRespV5, allocator, body, .{ .ignore_unknown_fields = true });
 
@@ -80,7 +79,7 @@ pub fn queryAll(allocator: std.mem.Allocator, pkgs: std.StringHashMap(*pacman.Pa
 }
 
 pub fn search(allocator: std.mem.Allocator, search_name: []const u8) !RPCSearchRespV5 {
-    var uri = std.ArrayList(u8).init(allocator);
+    var uri = std.array_list.Managed(u8).init(allocator);
 
     try uri.appendSlice(Host);
     try uri.appendSlice("&type=search&by=name&arg="); // TODO: maybe consider opening this up
@@ -89,8 +88,8 @@ pub fn search(allocator: std.mem.Allocator, search_name: []const u8) !RPCSearchR
     const http = try Request.init(allocator);
     defer http.deinit();
 
-    const url = try std.Uri.parse(try uri.toOwnedSlice());
-    const body = try http.request(.GET, url);
+    const body = try http.getRequest(try uri.toOwnedSlice());
+    // defer http.deinit();
 
     const result = try std.json.parseFromSlice(RPCSearchRespV5, allocator, body, .{ .ignore_unknown_fields = true });
 
@@ -98,7 +97,7 @@ pub fn search(allocator: std.mem.Allocator, search_name: []const u8) !RPCSearchR
 }
 
 fn buildInfoQuery(allocator: std.mem.Allocator, pkgs: std.StringHashMap(*pacman.Package)) ![]const u8 {
-    var uri = std.ArrayList(u8).init(allocator);
+    var uri = std.array_list.Managed(u8).init(allocator);
 
     try uri.appendSlice(Host);
     try uri.appendSlice("&type=info");
