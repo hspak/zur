@@ -614,7 +614,7 @@ pub const Pacman = struct {
         if (!self.stdin_has_input) {
             return;
         }
-        _ = try Pacman.stdin.take(1);
+        _ = try Pacman.stdin.takeArray(1);
         self.stdin_has_input = false;
     }
 };
