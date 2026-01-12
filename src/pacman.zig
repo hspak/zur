@@ -11,7 +11,7 @@ const Pkgbuild = @import("pkgbuild.zig").Pkgbuild;
 const Request = @import("req.zig").Request;
 
 var stdout_buffer: [4096]u8 = undefined;
-var stdout_writer: std.fs.File.Writer = std.fs.File.stdin().writer(&stdout_buffer);
+var stdout_writer: std.fs.File.Writer = std.fs.File.stdout().writer(&stdout_buffer);
 const stdout = &stdout_writer.interface;
 
 pub const Package = struct {
@@ -418,7 +418,7 @@ pub const Pacman = struct {
             } else {
                 const format = "\n{s}::{s} File: {s}{s}{s} {s}===================={s}\n{s}";
                 print(format, .{
-                    color.BoldForegroundBlue.*,
+                    color.BoldForegroundBlue,
                     color.Reset,
                     color.Bold,
                     pkg_file.key_ptr.*,
