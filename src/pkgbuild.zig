@@ -73,17 +73,24 @@ pub const Pkgbuild = struct {
                 // PKGBUILD key=value
                 '=' => {
                     const key = try buf.toOwnedSlice();
-                    var in_quotes = false;
+                    errdefer self.allocator.free(key);
+                    var quote_char: ?u8 = null;
                     while (true) {
                         const lookahead = try stream.readByte();
                         if (lookahead == '(') {
                             while (true) {
                                 const moreahead = try stream.readByte();
 
-                                // This naive parsing goofs when there are parens in quotes
-                                if (moreahead == '\'') in_quotes = !in_quotes;
+                                // Track quote state properly - only the matching quote closes
+                                if (moreahead == '\'' or moreahead == '"') {
+                                    if (quote_char == null) {
+                                        quote_char = moreahead;
+                                    } else if (quote_char == moreahead) {
+                                        quote_char = null;
+                                    }
+                                }
 
-                                if (moreahead == ')' and !in_quotes) break;
+                                if (moreahead == ')' and quote_char == null) break;
                                 if (moreahead != ' ' and moreahead != '\t') {
                                     try buf.append(moreahead);
                                 }
@@ -107,6 +114,7 @@ pub const Pkgbuild = struct {
                     try buf.appendSlice("()");
 
                     const key = try buf.toOwnedSlice();
+                    errdefer self.allocator.free(key);
                     const close_paren = try stream.readByte();
                     if (close_paren != ')') {
                         return error.MalformedPkgbuildFunction;
@@ -115,7 +123,7 @@ pub const Pkgbuild = struct {
                     if (maybe_space != ' ') {
                         try buf.append(maybe_space);
                     }
-                    var prev: u8 = undefined;
+                    var prev: u8 = 0;
                     while (true) {
                         const lookahead = try stream.readByte();
                         try buf.append(lookahead);
@@ -145,8 +153,11 @@ pub const Pkgbuild = struct {
             if (prev == null and curr != null) {
                 curr.?.updated = true;
             } else if (prev != null and curr == null) {
-                curr.?.value = "(removed)";
-                curr.?.updated = true;
+                // Field was removed - create a placeholder entry to mark as updated
+                const content = try Content.init(self.allocator, try self.allocator.dupe(u8, "(removed)"));
+                content.updated = true;
+                const key_copy = try self.allocator.dupe(u8, field);
+                try self.fields.put(key_copy, content);
             } else if (prev == null and curr == null) {
                 continue;
             } else if (prev != null and curr != null and !std.mem.eql(u8, prev.?.value, curr.?.value)) {
@@ -157,11 +168,13 @@ pub const Pkgbuild = struct {
 
     pub fn indentValues(self: *Pkgbuild, spaces_count: usize) !void {
         var buf = std.array_list.Managed(u8).init(self.allocator);
+        defer buf.deinit();
         var fields_iter = self.fields.iterator();
         while (fields_iter.next()) |field| {
             if (!std.mem.containsAtLeast(u8, field.key_ptr.*, 1, "()")) {
                 continue;
             }
+            buf.clearRetainingCapacity();
             var lines_iter = std.mem.splitScalar(u8, field.value_ptr.*.value, '\n');
             while (lines_iter.next()) |line| {
                 var count: usize = 0;
@@ -595,4 +608,117 @@ test "Pkgbuild - indentValue - google-chrome-dev" {
     try pkgbuild.indentValues(2);
 
     try testing.expectEqualStrings(expectedMap.get("package()").?.value, pkgbuild.fields.get("package()").?.value);
+}
+
+test "Pkgbuild - comparePrev - field removed should not crash" {
+    const old =
+        \\pkgname=testpkg
+        \\install=test.install
+        \\package() {
+        \\    echo "hello"
+        \\}
+    ;
+    const new =
+        \\pkgname=testpkg
+        \\package() {
+        \\    echo "hello"
+        \\}
+    ;
+
+    var pkgbuild_old = Pkgbuild.init(testing.allocator, old);
+    defer pkgbuild_old.deinit();
+    try pkgbuild_old.readLines();
+
+    var pkgbuild_new = Pkgbuild.init(testing.allocator, new);
+    defer pkgbuild_new.deinit();
+    try pkgbuild_new.readLines();
+
+    // This should not crash when 'install' exists in old but not in new
+    try pkgbuild_new.comparePrev(pkgbuild_old);
+
+    // The removed field should be marked as updated with "(removed)" value
+    const install_field = pkgbuild_new.fields.get("install");
+    try testing.expect(install_field != null);
+    try testing.expectEqualStrings("(removed)", install_field.?.value);
+    try testing.expect(install_field.?.updated);
+}
+
+test "Pkgbuild - indentValues - multiple functions should not accumulate" {
+    const file_contents =
+        \\pkgname=testpkg
+        \\build() {
+        \\    make
+        \\}
+        \\package() {
+        \\    make install
+        \\}
+    ;
+
+    var pkgbuild = Pkgbuild.init(testing.allocator, file_contents);
+    defer pkgbuild.deinit();
+    try pkgbuild.readLines();
+    try pkgbuild.indentValues(2);
+
+    // Each function's value should only contain its own content, not accumulated from previous
+    const build_val = pkgbuild.fields.get("build()").?.value;
+    const package_val = pkgbuild.fields.get("package()").?.value;
+
+    // build() should NOT appear in package() value
+    try testing.expect(!std.mem.containsAtLeast(u8, package_val, 1, "make\n"));
+    // package() should contain its own content
+    try testing.expect(std.mem.containsAtLeast(u8, package_val, 1, "make install"));
+    // build() should contain its own content
+    try testing.expect(std.mem.containsAtLeast(u8, build_val, 1, "make"));
+}
+
+test "Pkgbuild - readLines - minimal function body" {
+    // Tests that prev=0 initialization works for functions with minimal bodies
+    const file_contents =
+        \\pkgname=testpkg
+        \\pkgver() {
+        \\}
+    ;
+
+    var pkgbuild = Pkgbuild.init(testing.allocator, file_contents);
+    defer pkgbuild.deinit();
+    try pkgbuild.readLines();
+
+    const pkgver_field = pkgbuild.fields.get("pkgver()");
+    try testing.expect(pkgver_field != null);
+}
+
+test "Pkgbuild - readLines - double quotes with parentheses" {
+    // Tests that parentheses inside double-quoted strings don't break parsing
+    const file_contents =
+        \\pkgname=testpkg
+        \\source=("http://example.com/file(1).tar.gz" "other.patch")
+        \\depends=('dep1' 'dep2')
+        \\
+    ;
+
+    var pkgbuild = Pkgbuild.init(testing.allocator, file_contents);
+    defer pkgbuild.deinit();
+    try pkgbuild.readLines();
+
+    const source_val = pkgbuild.fields.get("source").?.value;
+    // The full URL with parentheses should be preserved
+    try testing.expect(std.mem.containsAtLeast(u8, source_val, 1, "file(1).tar.gz"));
+    try testing.expect(std.mem.containsAtLeast(u8, source_val, 1, "other.patch"));
+}
+
+test "Pkgbuild - readLines - mixed quotes with parentheses" {
+    // Tests both single and double quotes containing parentheses
+    const file_contents =
+        \\pkgname=testpkg
+        \\optdepends=('pkg1: for feature (optional)' "pkg2: another (thing)")
+        \\
+    ;
+
+    var pkgbuild = Pkgbuild.init(testing.allocator, file_contents);
+    defer pkgbuild.deinit();
+    try pkgbuild.readLines();
+
+    const optdepends_val = pkgbuild.fields.get("optdepends").?.value;
+    try testing.expect(std.mem.containsAtLeast(u8, optdepends_val, 1, "(optional)"));
+    try testing.expect(std.mem.containsAtLeast(u8, optdepends_val, 1, "(thing)"));
 }
