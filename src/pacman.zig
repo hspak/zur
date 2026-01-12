@@ -3,7 +3,6 @@ const fs = std.fs;
 const mem = std.mem;
 const os = std.os;
 const posix = std.posix;
-const testing = std.testing;
 
 const alpm = @import("alpm.zig");
 const aur = @import("aur.zig");
@@ -240,6 +239,7 @@ pub const Pacman = struct {
         // TODO: maybe we want to be like yay and also find some VCS info to do this correctly.
         // For -git packages, we need to force zur to always install because we don't know if there's been an update or not.
         var dir = try fs.openDirAbsolute(self.zur_pkg_dir, .{ .iterate = true, .access_sub_paths = false, .no_follow = true });
+        defer dir.close();
         var dir_iter = dir.iterate();
         while (try dir_iter.next()) |node| {
             if (mem.eql(u8, node.name, full_pkg_name) and !mem.containsAtLeast(u8, node.name, 1, "-git")) {
@@ -314,6 +314,9 @@ pub const Pacman = struct {
         var old_files = old_files_maybe.?;
 
         const new_files_maybe = try self.snapshotFiles(pkg_name, pkg.aur_version.?);
+        if (new_files_maybe == null) {
+            return self.bareInstall(pkg_name, pkg);
+        }
         var new_files = new_files_maybe.?;
 
         const old_pkgbuild_content = old_files.get("PKGBUILD") orelse return;
@@ -479,7 +482,7 @@ pub const Pacman = struct {
 
         var dir = fs.openDirAbsolute(full_pkg_dir, .{ .iterate = true, .access_sub_paths = false, .no_follow = true }) catch |err| switch (err) {
             error.FileNotFound => return,
-            else => unreachable,
+            else => return err,
         };
         defer dir.close();
 
@@ -499,7 +502,7 @@ pub const Pacman = struct {
     fn removeStaleArtifacts(self: *Pacman, pkg_name: []const u8, dir_path: []const u8) !void {
         var dir = fs.openDirAbsolute(dir_path, .{ .iterate = true, .access_sub_paths = false, .no_follow = true }) catch |err| switch (err) {
             error.FileNotFound => return,
-            else => unreachable,
+            else => return err,
         };
         defer dir.close();
 
@@ -544,7 +547,7 @@ pub const Pacman = struct {
 
         var dir = fs.openDirAbsolute(path, .{ .iterate = true, .access_sub_paths = false, .no_follow = true }) catch |err| switch (err) {
             error.FileNotFound => return null,
-            else => unreachable,
+            else => return err,
         };
         defer dir.close();
         print(" reading files in {s}{s}{s}\n", .{ color.Bold, path, color.Reset });
@@ -578,7 +581,7 @@ pub const Pacman = struct {
                     });
                     continue;
                 },
-                else => unreachable,
+                else => return err,
             };
 
             // PKGBUILD's have their own indent logic

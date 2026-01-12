@@ -19,7 +19,7 @@ pub const Request = struct {
 
     pub fn getRequest(self: *Request, url: []const u8) ![]u8 {
         var body: std.Io.Writer.Allocating = .init(self.allocator);
-        defer body.deinit();
+        errdefer body.deinit();
 
         _ = try self.client.fetch(.{
             .location = .{ .url = url },

@@ -80,6 +80,7 @@ pub fn queryAll(allocator: std.mem.Allocator, pkgs: std.StringHashMap(*pacman.Pa
 
 pub fn search(allocator: std.mem.Allocator, search_name: []const u8) !RPCSearchRespV5 {
     var uri = std.array_list.Managed(u8).init(allocator);
+    defer uri.deinit();
 
     try uri.appendSlice(Host);
     try uri.appendSlice("&type=search&by=name&arg="); // TODO: maybe consider opening this up
@@ -88,8 +89,7 @@ pub fn search(allocator: std.mem.Allocator, search_name: []const u8) !RPCSearchR
     const http = try Request.init(allocator);
     defer http.deinit();
 
-    const body = try http.getRequest(try uri.toOwnedSlice());
-    // defer http.deinit();
+    const body = try http.getRequest(uri.items);
 
     const result = try std.json.parseFromSlice(RPCSearchRespV5, allocator, body, .{ .ignore_unknown_fields = true });
 
@@ -98,6 +98,7 @@ pub fn search(allocator: std.mem.Allocator, search_name: []const u8) !RPCSearchR
 
 fn buildInfoQuery(allocator: std.mem.Allocator, pkgs: std.StringHashMap(*pacman.Package)) ![]const u8 {
     var uri = std.array_list.Managed(u8).init(allocator);
+    errdefer uri.deinit();
 
     try uri.appendSlice(Host);
     try uri.appendSlice("&type=info");
@@ -105,11 +106,43 @@ fn buildInfoQuery(allocator: std.mem.Allocator, pkgs: std.StringHashMap(*pacman.
     var pkgs_iter = pkgs.iterator();
     while (pkgs_iter.next()) |pkg| {
         try uri.appendSlice("&arg[]=");
-
-        const copyKey = try allocator.alloc(u8, pkg.key_ptr.*.len);
-        std.mem.copyForwards(u8, copyKey, pkg.key_ptr.*);
-        try uri.appendSlice(copyKey);
-        defer allocator.free(copyKey);
+        try uri.appendSlice(pkg.key_ptr.*);
     }
     return try uri.toOwnedSlice();
+}
+
+const testing = std.testing;
+
+test "buildInfoQuery - builds correct URL with packages" {
+    var pkgs = std.StringHashMap(*pacman.Package).init(testing.allocator);
+    defer pkgs.deinit();
+
+    const pkg1 = try pacman.Package.init(testing.allocator, "1.0.0");
+    defer testing.allocator.destroy(pkg1);
+    try pkgs.put("neovim-git", pkg1);
+
+    const result = try buildInfoQuery(testing.allocator, pkgs);
+    defer testing.allocator.free(result);
+
+    try testing.expect(std.mem.containsAtLeast(u8, result, 1, Host));
+    try testing.expect(std.mem.containsAtLeast(u8, result, 1, "&type=info"));
+    try testing.expect(std.mem.containsAtLeast(u8, result, 1, "&arg[]=neovim-git"));
+}
+
+test "buildInfoQuery - no memory leaks with testing allocator" {
+    var pkgs = std.StringHashMap(*pacman.Package).init(testing.allocator);
+    defer pkgs.deinit();
+
+    const pkg1 = try pacman.Package.init(testing.allocator, "1.0");
+    defer testing.allocator.destroy(pkg1);
+    const pkg2 = try pacman.Package.init(testing.allocator, "2.0");
+    defer testing.allocator.destroy(pkg2);
+
+    try pkgs.put("pkg-a", pkg1);
+    try pkgs.put("pkg-b", pkg2);
+
+    const result = try buildInfoQuery(testing.allocator, pkgs);
+    defer testing.allocator.free(result);
+
+    // Testing allocator will fail if there are leaks
 }
