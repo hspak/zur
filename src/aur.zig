@@ -43,10 +43,13 @@ pub const Info = struct {
     URL: []const u8,
     NumVotes: usize,
     Popularity: f64,
-    OutOfDate: ?i32 = null, // TODO: parse this unixtime
+    /// Unix epoch seconds; null if the package is not flagged out-of-date.
+    OutOfDate: ?i64 = null,
     Maintainer: ?[]const u8 = null,
-    FirstSubmitted: i32, // TODO: parse this unixtime
-    LastModified: i32, // TODO: parse this unixtime
+    /// Unix epoch seconds.
+    FirstSubmitted: i64,
+    /// Unix epoch seconds.
+    LastModified: i64,
     URLPath: []const u8,
     Depends: ?[][]const u8 = null,
     MakeDepends: ?[][]const u8 = null,
@@ -70,10 +73,13 @@ pub const Search = struct {
     URL: ?[]const u8 = null,
     NumVotes: usize,
     Popularity: f64,
-    OutOfDate: ?i32 = null, // TODO: parse this unixtime
+    /// Unix epoch seconds; null if the package is not flagged out-of-date.
+    OutOfDate: ?i64 = null,
     Maintainer: ?[]const u8 = null,
-    FirstSubmitted: i32, // TODO: parse this unixtime
-    LastModified: i32, // TODO: parse this unixtime
+    /// Unix epoch seconds.
+    FirstSubmitted: i64,
+    /// Unix epoch seconds.
+    LastModified: i64,
     URLPath: []const u8,
 };
 
