@@ -71,6 +71,7 @@ pub const Pacman = struct {
     }
 
     pub fn deinit(self: *Pacman) void {
+        self.flushStdout();
         if (self.pacman_output) |out| self.allocator.free(out);
         // pkg keys are borrowed slices (into pacman_output or argv), so only
         // the Package structs themselves are owned here.
@@ -98,7 +99,15 @@ pub const Pacman = struct {
     fn print(self: *Pacman, comptime format: []const u8, args: anytype) !void {
         const w = self.stdout();
         try w.print(format, args);
-        try w.flush();
+    }
+
+    /// Flush buffered stdout at the points where visibility/ordering matters:
+    /// before interactive prompts, before spawning a child that inherits
+    /// stdout, and on teardown. This lets `print` batch output instead of
+    /// doing a write syscall per line.
+    fn flushStdout(self: *Pacman) void {
+        const w = self.stdout();
+        w.flush() catch {};
     }
 
     // TODO: use libalpm once this issue is fixed:
@@ -270,18 +279,24 @@ pub const Pacman = struct {
     fn localPackageExists(self: *Pacman, pkg_name: []const u8, new_ver: []const u8) !bool {
         // TODO: Handle "any" arch package names.
         const full_pkg_name = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, new_ver, "x86_64.pkg.tar.zst" });
+        defer self.allocator.free(full_pkg_name);
 
-        // TODO: maybe we want to be like yay and also find some VCS info to do this correctly.
-        // For -git packages, we need to force zur to always install because we don't know if there's been an update or not.
-        var dir = try Dir.openDirAbsolute(self.io, self.zur_pkg_dir, .{ .iterate = true, .access_sub_paths = false, .follow_symlinks = false });
-        defer dir.close(self.io);
-        var dir_iter = dir.iterate();
-        while (try dir_iter.next(self.io)) |node| {
-            if (mem.eql(u8, node.name, full_pkg_name) and !mem.containsAtLeast(u8, node.name, 1, "-git")) {
-                return true;
-            }
+        // For -git packages we always force an install (we don't know if
+        // there's been a source update), so don't treat them as existing.
+        if (mem.containsAtLeast(u8, full_pkg_name, 1, "-git")) {
+            return false;
         }
-        return false;
+
+        const full_path = try Dir.path.join(self.allocator, &[_][]const u8{ self.zur_pkg_dir, full_pkg_name });
+        defer self.allocator.free(full_path);
+
+        // Direct existence check rather than scanning the whole directory.
+        var f = Dir.openFileAbsolute(self.io, full_path, .{}) catch |err| switch (err) {
+            error.FileNotFound => return false,
+            else => return err,
+        };
+        defer f.close(self.io);
+        return true;
     }
 
     fn downloadAndExtractPackage(self: *Pacman, pkg_name: []const u8, pkg: *Package) !void {
@@ -336,7 +351,7 @@ pub const Pacman = struct {
         });
         defer self.allocator.free(result.stdout);
         defer self.allocator.free(result.stderr);
-        try Dir.cwd().deleteFile(self.io, file_path);
+        try Dir.deleteFileAbsolute(self.io, file_path);
     }
 
     fn compareUpdateAndInstall(self: *Pacman, pkg_name: []const u8, pkg: *Package) !void {
@@ -498,6 +513,9 @@ pub const Pacman = struct {
 
     fn execCommand(self: *Pacman, argv: []const []const u8) !void {
         try self.stdinClearByte();
+        // Our pending output must be flushed before the child inherits stdout,
+        // otherwise it could appear after the child's own output.
+        self.flushStdout();
 
         var child = try std.process.spawn(self.io, .{
             .argv = argv,
@@ -652,6 +670,8 @@ pub const Pacman = struct {
     }
 
     fn stdinReadByte(self: *Pacman) !u8 {
+        // Make sure the prompt is flushed before we block waiting for input.
+        self.flushStdout();
         const input = try self.stdin().interface.takeByte();
         self.stdin_has_input = true;
         return input;
