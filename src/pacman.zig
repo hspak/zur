@@ -5,6 +5,9 @@ const Allocator = mem.Allocator;
 const Dir = Io.Dir;
 const File = Io.File;
 
+const tar = std.tar;
+const flate = std.compress.flate;
+
 const alpm = @import("alpm.zig");
 const aur = @import("aur.zig");
 const color = @import("color.zig");
@@ -74,6 +77,30 @@ fn artifactNameForPkg(name: []const u8, want: []const u8) bool {
     if (!mem.startsWith(u8, name, want)) return false;
     if (name.len == want.len) return true;
     return name[want.len] == '-'; // next component boundary
+}
+
+/// Decompress a gzip-compressed tar archive `archive_name` located in
+/// `dest_dir` and extract it into the same directory, stripping the single
+/// top-level directory that AUR snapshots are wrapped in.
+fn extractTarGz(io: Io, dest_dir: Io.Dir, archive_name: []const u8) !void {
+    const file = try dest_dir.openFile(io, archive_name, .{});
+    defer file.close(io);
+
+    var file_buffer: [8192]u8 = undefined;
+    var file_reader = file.reader(io, &file_buffer);
+
+    // Decompress the gzip stream and extract the contained tar in one pass.
+    var gzip_buffer: [flate.max_window_len]u8 = undefined;
+    var decompress = flate.Decompress.init(&file_reader.interface, .gzip, &gzip_buffer);
+
+    // std.tar sanitizes paths and applies the executable bit from the archive.
+    try tar.extract(io, dest_dir, &decompress.reader, .{
+        .strip_components = 1,
+        .mode_mode = .executable_bit_only,
+    });
+
+    // The archive file is consumed once extracted.
+    try dest_dir.deleteFile(io, archive_name);
 }
 
 pub const Pacman = struct {
@@ -435,16 +462,11 @@ pub const Pacman = struct {
         try self.extractPackage(full_dir, pkg_name);
     }
 
-    // TODO: Maybe one day if there's and easy way to extract tar.gz archives in Zig (be it stdlib or 3rd party), we can replace this.
     fn extractPackage(self: *Pacman, snapshot_path: []const u8, pkg_name: []const u8) !void {
         const file_name = try mem.join(self.allocator, ".", &[_][]const u8{ pkg_name, "tar.gz" });
-        const file_path = try Dir.path.join(self.allocator, &[_][]const u8{ snapshot_path, file_name });
-        const result = try std.process.run(self.allocator, self.io, .{
-            .argv = &[_][]const u8{ "tar", "-xf", file_path, "-C", snapshot_path, "--strip-components=1" },
-        });
-        defer self.allocator.free(result.stdout);
-        defer self.allocator.free(result.stderr);
-        try Dir.deleteFileAbsolute(self.io, file_path);
+        var dir = try Dir.openDirAbsolute(self.io, snapshot_path, .{});
+        defer dir.close(self.io);
+        try extractTarGz(self.io, dir, file_name);
     }
 
     fn compareUpdateAndInstall(self: *Pacman, pkg_name: []const u8, pkg: *Package) !void {
@@ -922,4 +944,56 @@ test "artifactNameForPkg - matches only full leading components" {
     try testing.expect(artifactNameForPkg("neovim-git-r100.abc-x86_64.pkg.tar.zst", "neovim-git"));
     // A prefix that is not at a component boundary must not match.
     try testing.expect(!artifactNameForPkg("foo-lib-1.0-1-x86_64.pkg.tar.zst", "foo-l"));
+}
+
+test "extractTarGz - strips the top-level snapshot directory" {
+    const testing = std.testing;
+    const io = testing.io;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Build a fake AUR snapshot tree with a single top-level directory.
+    try tmp.dir.createDirPath(io, "pkg-1.0/nested");
+    var src = try tmp.dir.openDir(io, "pkg-1.0", .{});
+    defer src.close(io);
+    try src.writeFile(io, .{ .sub_path = "PKGBUILD", .data = "pkgname=pkg\n" });
+    try src.writeFile(io, .{ .sub_path = "nested/hook.sh", .data = "#!/bin/sh\necho hi\n" });
+
+    // Create pkg.tar.gz using the same tools zur relies on at runtime. Change
+    // into the temp dir first so the archive is always written there (the
+    // archive name is relative to the process's working directory, which can
+    // differ from where testing.tmpDir created the dir).
+    const rel_tmp = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer allocator.free(rel_tmp);
+    const tar_run = try std.process.run(allocator, io, .{
+        .argv = &[_][]const u8{ "sh", "-c", "cd \"$1\" && tar czf pkg.tar.gz pkg-1.0", "sh", rel_tmp },
+    });
+    defer allocator.free(tar_run.stdout);
+    defer allocator.free(tar_run.stderr);
+    if (tar_run.term != .exited or tar_run.term.exited != 0) return error.TarFailed;
+
+    // Remove the source tree so only the archive remains in the dir.
+    try tmp.dir.deleteTree(io, "pkg-1.0");
+
+    // Extract; the top-level dir must be stripped away.
+    try extractTarGz(io, tmp.dir, "pkg.tar.gz");
+
+    // Files land directly in dest_dir (no pkg-1.0/ prefix).
+    const pkgbuild = try tmp.dir.readFileAlloc(io, "PKGBUILD", allocator, .unlimited);
+    defer allocator.free(pkgbuild);
+    try testing.expectEqualStrings("pkgname=pkg\n", pkgbuild);
+
+    const hook = try tmp.dir.readFileAlloc(io, "nested/hook.sh", allocator, .unlimited);
+    defer allocator.free(hook);
+    try testing.expectEqualStrings("#!/bin/sh\necho hi\n", hook);
+
+    // The archive file is consumed by extraction.
+    const leftover = tmp.dir.openFile(io, "pkg.tar.gz", .{}) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => return err,
+    };
+    try testing.expect(leftover == null);
+    if (leftover) |f| f.close(io);
 }
