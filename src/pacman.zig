@@ -59,7 +59,6 @@ pub const Pacman = struct {
     zur_path: []const u8,
     zur_pkg_dir: []const u8,
     updates: usize = 0,
-    stdin_has_input: bool = false,
 
     stdout_buffer: [4096]u8 = undefined,
     stdout_writer: ?File.Writer = null,
@@ -84,7 +83,6 @@ pub const Pacman = struct {
             .aur_resp = null,
             .pacman_output = null,
             .updates = 0,
-            .stdin_has_input = false,
         };
     }
 
@@ -460,7 +458,6 @@ pub const Pacman = struct {
             if (input != 'y' and input != 'Y') {
                 return;
             } else {
-                try self.stdinClearByte();
                 try self.print("\n", .{});
             }
         } else {
@@ -519,7 +516,6 @@ pub const Pacman = struct {
             try self.install(pkg_name, pkg);
         } else {
             try self.print("\n", .{});
-            try self.stdinClearByte();
         }
     }
 
@@ -543,7 +539,6 @@ pub const Pacman = struct {
     }
 
     fn execCommand(self: *Pacman, argv: []const []const u8) !void {
-        try self.stdinClearByte();
         // Our pending output must be flushed before the child inherits stdout,
         // otherwise it could appear after the child's own output.
         self.flushStdout();
@@ -730,19 +725,12 @@ pub const Pacman = struct {
     fn stdinReadByte(self: *Pacman) !u8 {
         // Make sure the prompt is flushed before we block waiting for input.
         self.flushStdout();
-        const input = try self.stdin().interface.takeByte();
-        self.stdin_has_input = true;
-        return input;
-    }
-
-    // We want to "eat" a character so that it doesn't get exposed to the child process.
-    // TODO: There's likely a more correct way to handle this.
-    fn stdinClearByte(self: *Pacman) !void {
-        if (!self.stdin_has_input) {
-            return;
-        }
-        _ = try self.stdin().interface.takeArray(1);
-        self.stdin_has_input = false;
+        // Read the whole line (including the newline) so leftover input isn't
+        // exposed to a child process that inherits stdin.
+        const reader = self.stdin();
+        const line = try reader.interface.takeDelimiterInclusive('\n');
+        if (line.len == 0) return 0;
+        return line[0];
     }
 };
 
