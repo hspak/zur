@@ -564,11 +564,18 @@ pub const Pacman = struct {
         };
         defer dir.close(self.io);
 
-        // TODO: Implement better method to sorting these files by mtime.
-        var list: std.ArrayList(i128) = .empty;
-        defer list.deinit(self.allocator);
-        var map = std.AutoHashMap(i128, []const u8).init(self.allocator);
-        defer map.deinit();
+        // Collect (mtime, name) pairs in a single slice and sort it directly,
+        // rather than keeping a parallel list + map keyed by mtime (which also
+        // collided when two files shared a timestamp).
+        const Artifact = struct {
+            mtime: i128,
+            name: []u8,
+        };
+        var artifacts: std.ArrayList(Artifact) = .empty;
+        defer {
+            for (artifacts.items) |a| self.allocator.free(a.name);
+            artifacts.deinit(self.allocator);
+        }
         var dir_iter = dir.iterate();
         while (try dir_iter.next(self.io)) |node| {
             // TODO: This is broken if the package name is a substring of another.
@@ -576,37 +583,38 @@ pub const Pacman = struct {
                 continue;
             }
             const path = try Dir.path.join(self.allocator, &[_][]const u8{ dir_path, node.name });
+            defer self.allocator.free(path);
             var f = try Dir.openFileAbsolute(self.io, path, .{});
             defer f.close(self.io);
             const stat = try f.stat(self.io);
-            const mtime_ns: i128 = stat.mtime.nanoseconds;
             // Store an owned copy of the entry name (dir_iter buffers are
             // reused) so we can delete via a Dir handle after iteration.
             const name_copy = try self.allocator.dupe(u8, node.name);
             errdefer self.allocator.free(name_copy);
-            try map.putNoClobber(mtime_ns, name_copy);
-            try list.append(self.allocator, mtime_ns);
+            try artifacts.append(self.allocator, .{ .mtime = stat.mtime.nanoseconds, .name = name_copy });
         }
 
         // Keep the last 3 installed versions of the package.
-        if (list.items.len > 3) {
-            const asc_i128 = comptime std.sort.asc(i128);
-            std.sort.insertion(i128, list.items, {}, asc_i128);
+        if (artifacts.items.len > 3) {
+            const LessThan = struct {
+                fn lessThan(_: void, a: Artifact, b: Artifact) bool {
+                    return a.mtime < b.mtime;
+                }
+            };
+            std.mem.sort(Artifact, artifacts.items, {}, LessThan.lessThan);
 
-            const marked_for_removal = list.items[0 .. list.items.len - 3];
+            const marked_for_removal = artifacts.items[0 .. artifacts.items.len - 3];
             // deleteTree is relative to a Dir handle, so open the (absolute)
             // parent directory once and delete by entry name rather than
             // resolving an absolute path through cwd.
             var parent = try Dir.openDirAbsolute(self.io, dir_path, .{});
             defer parent.close(self.io);
-            for (marked_for_removal) |mtime| {
-                const name = map.get(mtime).?;
-                try parent.deleteTree(self.io, name);
-                self.allocator.free(name);
+            for (marked_for_removal) |artifact| {
+                try parent.deleteTree(self.io, artifact.name);
                 try self.print("  {s}->{s} deleting stale file or dir: {s}\n", .{
                     color.ForegroundBlue,
                     color.Reset,
-                    name,
+                    artifact.name,
                 });
             }
         }
