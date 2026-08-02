@@ -180,9 +180,9 @@ pub const Pacman = struct {
             curr_pkg.aur_version = result.Version;
 
             // Only store Package.base_name if the name doesn't match base name.
-            // We use the null state to see if they defer.
-            // TODO: Actually, PKGBUILDs with multiple pkgnames' install multiple packages;
-            // zur currently duplicates these package installs because of this.
+            // We use the null state to see if they defer. A non-null base
+            // (a split package) is de-duplicated in processOutOfDate so the
+            // shared base is only installed once.
             if (!mem.eql(u8, result.Name, result.PackageBase)) {
                 curr_pkg.base_name = result.PackageBase;
             }
