@@ -556,8 +556,16 @@ pub const Pacman = struct {
         });
         // TODO: Ctrl+c from a [sudo] prompt causes some weird output behavior.
         // I probably need signal handling for this to properly work.
-        // TODO: We also need some additional cleanup steps if it fails.
-        _ = try child.wait(self.io);
+        // Surface a child failure instead of treating it as success: a
+        // non-zero exit or termination by a signal means the build/install
+        // didn't complete, so abort the operation rather than continuing.
+        const term = try child.wait(self.io);
+        switch (term) {
+            .exited => |code| if (code != 0) {
+                return error.CommandFailed;
+            },
+            .signal, .stopped, .unknown => return error.CommandFailed,
+        }
     }
 
     fn moveBuiltPackages(self: *Pacman, pkg_name: []const u8, pkg: *Package) !void {
