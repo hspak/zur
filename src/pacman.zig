@@ -355,19 +355,17 @@ pub const Pacman = struct {
     }
 
     fn compareUpdateAndInstall(self: *Pacman, pkg_name: []const u8, pkg: *Package) !void {
-        const old_files_maybe = try self.snapshotFiles(pkg_name, pkg.version);
-        if (old_files_maybe == null) {
-            // We have no older version in stored in the filesystem.
+        const old_files = try self.snapshotFiles(pkg_name, pkg.version);
+        if (old_files.count() == 0) {
+            // We have no older version stored in the filesystem.
             // Fallback to just installing
             return self.bareInstall(pkg_name, pkg);
         }
-        var old_files = old_files_maybe.?;
 
-        const new_files_maybe = try self.snapshotFiles(pkg_name, pkg.aur_version.?);
-        if (new_files_maybe == null) {
+        const new_files = try self.snapshotFiles(pkg_name, pkg.aur_version.?);
+        if (new_files.count() == 0) {
             return self.bareInstall(pkg_name, pkg);
         }
-        var new_files = new_files_maybe.?;
 
         const old_pkgbuild_content = old_files.get("PKGBUILD") orelse return;
         var old_pkgbuild = Pkgbuild.init(self.allocator, old_pkgbuild_content);
@@ -450,9 +448,8 @@ pub const Pacman = struct {
     // 3. Install AUR deps
     // 4. Then install the package
     fn bareInstall(self: *Pacman, pkg_name: []const u8, pkg: *Package) !void {
-        // TODO: Rethink the optional here.
         var pkg_files = try self.snapshotFiles(pkg_name, pkg.aur_version.?);
-        var pkg_files_iter = pkg_files.?.iterator();
+        var pkg_files_iter = pkg_files.iterator();
         while (pkg_files_iter.next()) |pkg_file| {
             if (mem.eql(u8, pkg_file.key_ptr.*, "PKGBUILD")) {
                 var pkgbuild = Pkgbuild.init(self.allocator, pkg_file.value_ptr.*);
@@ -615,12 +612,15 @@ pub const Pacman = struct {
         }
     }
 
-    fn snapshotFiles(self: *Pacman, pkg_name: []const u8, pkg_version: []const u8) !?std.StringHashMap([]u8) {
+    fn snapshotFiles(self: *Pacman, pkg_name: []const u8, pkg_version: []const u8) !std.StringHashMap([]u8) {
         const dir_name = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg_version });
         const path = try Dir.path.join(self.allocator, &[_][]const u8{ self.zur_path, dir_name });
 
         var dir = Dir.openDirAbsolute(self.io, path, .{ .iterate = true, .access_sub_paths = false, .follow_symlinks = false }) catch |err| switch (err) {
-            error.FileNotFound => return null,
+            // No snapshot directory yet (e.g. a package that was never
+            // downloaded): return an empty map so callers avoid unwrapping
+            // an optional.
+            error.FileNotFound => return std.StringHashMap([]u8).init(self.allocator),
             else => return err,
         };
         defer dir.close(self.io);
