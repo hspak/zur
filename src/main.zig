@@ -71,6 +71,7 @@ fn installOrUpdate(
     pkg_list: std.ArrayList([]const u8),
 ) !void {
     var pacman = try Pacman.init(allocator, io, environ_map);
+    defer pacman.deinit();
 
     // default to updating all AUR packages
     if (pkg_list.items.len == 0) {

@@ -70,6 +70,17 @@ pub const Pacman = struct {
         };
     }
 
+    pub fn deinit(self: *Pacman) void {
+        if (self.pacman_output) |out| self.allocator.free(out);
+        // pkg keys are borrowed slices (into pacman_output or argv), so only
+        // the Package structs themselves are owned here.
+        var it = self.pkgs.iterator();
+        while (it.next()) |e| {
+            self.allocator.destroy(e.value_ptr.*);
+        }
+        self.pkgs.deinit();
+    }
+
     fn stdout(self: *Pacman) *Io.Writer {
         if (self.stdout_writer == null) {
             self.stdout_writer = File.stdout().writer(self.io, &self.stdout_buffer);
@@ -84,10 +95,10 @@ pub const Pacman = struct {
         return &self.stdin_reader.?;
     }
 
-    fn print(self: *Pacman, comptime format: []const u8, args: anytype) void {
+    fn print(self: *Pacman, comptime format: []const u8, args: anytype) !void {
         const w = self.stdout();
-        w.print(format, args) catch unreachable;
-        w.flush() catch unreachable;
+        try w.print(format, args);
+        try w.flush();
     }
 
     // TODO: use libalpm once this issue is fixed:
@@ -159,7 +170,7 @@ pub const Pacman = struct {
             const local_version = pkg.value_ptr.*.version;
 
             if (pkg.value_ptr.*.aur_version == null) {
-                self.print("{s}warning:{s} {s}{s}{s} was orphaned or non-existant in AUR, skipping\n", .{
+                try self.print("{s}warning:{s} {s}{s}{s} was orphaned or non-existant in AUR, skipping\n", .{
                     color.BoldForegroundYellow,
                     color.Reset,
                     color.Bold,
@@ -187,17 +198,17 @@ pub const Pacman = struct {
             return;
         }
         pkgs_iter = self.pkgs.iterator();
-        self.print("{s}::{s} Packages to be installed or updated:\n", .{ color.BoldForegroundBlue, color.Reset });
+        try self.print("{s}::{s} Packages to be installed or updated:\n", .{ color.BoldForegroundBlue, color.Reset });
         while (pkgs_iter.next()) |pkg| {
             if (pkg.value_ptr.*.requires_update) {
-                self.print(" {s}\n", .{pkg.key_ptr.*});
+                try self.print(" {s}\n", .{pkg.key_ptr.*});
             }
         }
     }
 
     pub fn processOutOfDate(self: *Pacman) !void {
         if (self.updates == 0) {
-            self.print("{s}::{s} {s}All AUR packages are up-to-date.{s}\n", .{
+            try self.print("{s}::{s} {s}All AUR packages are up-to-date.{s}\n", .{
                 color.BoldForegroundBlue,
                 color.Reset,
                 color.Bold,
@@ -211,7 +222,7 @@ pub const Pacman = struct {
         while (pkgs_iter.next()) |pkg| {
             if (pkg.value_ptr.*.requires_update) {
                 if (try self.localPackageExists(pkg.key_ptr.*, pkg.value_ptr.*.aur_version.?)) {
-                    self.print("{s}warning:{s} Found existing up-to-date package: {s}{s}-{s}{s}, deferring to pacman -U...\n", .{
+                    try self.print("{s}warning:{s} Found existing up-to-date package: {s}{s}-{s}{s}, deferring to pacman -U...\n", .{
                         color.BoldForegroundYellow,
                         color.Reset,
                         color.Bold,
@@ -225,7 +236,7 @@ pub const Pacman = struct {
 
                 // The install hack is bleeding into here.
                 if (!mem.eql(u8, pkg.value_ptr.*.version, "0")) {
-                    self.print("{s}::{s} Updating {s}{s}{s}: {s}{s}{s} -> {s}{s}{s}\n", .{
+                    try self.print("{s}::{s} Updating {s}{s}{s}: {s}{s}{s} -> {s}{s}{s}\n", .{
                         color.BoldForegroundBlue,
                         color.Reset,
                         color.Bold,
@@ -239,7 +250,7 @@ pub const Pacman = struct {
                         color.Reset,
                     });
                 } else {
-                    self.print("{s}::{s} Installing {s}{s}{s} {s}{s}{s}\n", .{
+                    try self.print("{s}::{s} Installing {s}{s}{s} {s}{s}{s}\n", .{
                         color.BoldForegroundBlue,
                         color.Reset,
                         color.Bold,
@@ -281,14 +292,14 @@ pub const Pacman = struct {
         const full_file_path = try Dir.path.join(self.allocator, &[_][]const u8{ full_dir, file_name });
 
         //This is not perfect (not robust against manual changes), but it's sufficient for it's purpose (short-circuiting)
-        var existing = Dir.cwd().openDir(self.io, full_dir, .{}) catch |err| switch (err) {
+        var existing = Dir.openDirAbsolute(self.io, full_dir, .{}) catch |err| switch (err) {
             error.FileNotFound => null,
             else => return err,
         };
 
         if (existing) |*d| {
             d.close(self.io);
-            self.print(" skipping download, {s}{s}{s} already exists...\n", .{ color.Bold, full_dir, color.Reset });
+            try self.print(" skipping download, {s}{s}{s} already exists...\n", .{ color.Bold, full_dir, color.Reset });
             return;
         }
 
@@ -300,15 +311,17 @@ pub const Pacman = struct {
             url = try mem.join(self.allocator, "/", &[_][]const u8{ aur.Snapshot, file_name });
         }
 
-        self.print(" downloading from: {s}{s}{s}\n", .{ color.Bold, url, color.Reset });
+        try self.print(" downloading from: {s}{s}{s}\n", .{ color.Bold, url, color.Reset });
         const http = try Request.init(self.allocator, self.io);
         defer http.deinit();
         const snapshot = try http.getRequest(url);
-        self.print(" downloaded to: {s}{s}{s}\n", .{ color.Bold, full_file_path, color.Reset });
+        try self.print(" downloaded to: {s}{s}{s}\n", .{ color.Bold, full_file_path, color.Reset });
 
         try Dir.cwd().createDirPath(self.io, full_dir);
-        try Dir.cwd().writeFile(self.io, .{
-            .sub_path = full_file_path,
+        var dl_dir = try Dir.openDirAbsolute(self.io, full_dir, .{});
+        defer dl_dir.close(self.io);
+        try dl_dir.writeFile(self.io, .{
+            .sub_path = file_name,
             .data = snapshot,
         });
         try self.extractPackage(full_dir, pkg_name);
@@ -354,7 +367,7 @@ pub const Pacman = struct {
         while (new_pkgbuild_iter.next()) |field| {
             if (field.value_ptr.*.updated) {
                 at_least_one_diff = true;
-                self.print("{s}::{s} {s}{s}{s} was updated: {s}\n", .{
+                try self.print("{s}::{s} {s}{s}{s} was updated: {s}\n", .{
                     color.BoldForegroundBlue,
                     color.Reset,
                     color.Bold,
@@ -381,7 +394,7 @@ pub const Pacman = struct {
                     at_least_one_diff = true;
 
                     // TODO: would be cool to show a real diff here
-                    self.print("{s}::{s} {s}{s}{s} was updated:\n{s}\n", .{
+                    try self.print("{s}::{s} {s}{s}{s} was updated:\n{s}\n", .{
                         color.BoldForegroundBlue,
                         color.Reset,
                         color.Bold,
@@ -393,16 +406,16 @@ pub const Pacman = struct {
             }
         }
         if (at_least_one_diff) {
-            self.print("\nContinue? [Y/n]: ", .{});
+            try self.print("\nContinue? [Y/n]: ", .{});
             const input = try self.stdinReadByte();
             if (input != 'y' and input != 'Y') {
                 return;
             } else {
                 try self.stdinClearByte();
-                self.print("\n", .{});
+                try self.print("\n", .{});
             }
         } else {
-            self.print("{s}::{s} No meaningful diff's found\n", .{ color.ForegroundBlue, color.Reset });
+            try self.print("{s}::{s} No meaningful diff's found\n", .{ color.ForegroundBlue, color.Reset });
         }
         try self.install(pkg_name, pkg);
     }
@@ -422,7 +435,7 @@ pub const Pacman = struct {
                 var pkgbuild = Pkgbuild.init(self.allocator, pkg_file.value_ptr.*);
                 try pkgbuild.readLines();
                 const format = "\n{s}::{s} File: {s}PKGBUILD{s} {s}===================={s}\n";
-                self.print(format, .{
+                try self.print(format, .{
                     color.BoldForegroundBlue,
                     color.Reset,
                     color.Bold,
@@ -435,11 +448,11 @@ pub const Pacman = struct {
                 var fields_iter = pkgbuild.fields.iterator();
                 while (fields_iter.next()) |field| {
                     if (!mem.endsWith(u8, field.key_ptr.*, "()")) continue;
-                    self.print("  {s} {s}\n", .{ field.key_ptr.*, field.value_ptr.*.value });
+                    try self.print("  {s} {s}\n", .{ field.key_ptr.*, field.value_ptr.*.value });
                 }
             } else {
                 const format = "\n{s}::{s} File: {s}{s}{s} {s}===================={s}\n{s}";
-                self.print(format, .{
+                try self.print(format, .{
                     color.BoldForegroundBlue,
                     color.Reset,
                     color.Bold,
@@ -452,12 +465,12 @@ pub const Pacman = struct {
             }
         }
 
-        self.print("Install? [Y/n]: ", .{});
+        try self.print("Install? [Y/n]: ", .{});
         const input = try self.stdinReadByte();
         if (input == 'y' or input == 'Y') {
             try self.install(pkg_name, pkg);
         } else {
-            self.print("\n", .{});
+            try self.print("\n", .{});
             try self.stdinClearByte();
         }
     }
@@ -544,7 +557,11 @@ pub const Pacman = struct {
             defer f.close(self.io);
             const stat = try f.stat(self.io);
             const mtime_ns: i128 = stat.mtime.nanoseconds;
-            try map.putNoClobber(mtime_ns, path);
+            // Store an owned copy of the entry name (dir_iter buffers are
+            // reused) so we can delete via a Dir handle after iteration.
+            const name_copy = try self.allocator.dupe(u8, node.name);
+            errdefer self.allocator.free(name_copy);
+            try map.putNoClobber(mtime_ns, name_copy);
             try list.append(self.allocator, mtime_ns);
         }
 
@@ -554,13 +571,19 @@ pub const Pacman = struct {
             std.sort.insertion(i128, list.items, {}, asc_i128);
 
             const marked_for_removal = list.items[0 .. list.items.len - 3];
+            // deleteTree is relative to a Dir handle, so open the (absolute)
+            // parent directory once and delete by entry name rather than
+            // resolving an absolute path through cwd.
+            var parent = try Dir.openDirAbsolute(self.io, dir_path, .{});
+            defer parent.close(self.io);
             for (marked_for_removal) |mtime| {
-                const file_name = map.get(mtime).?;
-                try Dir.cwd().deleteTree(self.io, file_name);
-                self.print("  {s}->{s} deleting stale file or dir: {s}\n", .{
+                const name = map.get(mtime).?;
+                try parent.deleteTree(self.io, name);
+                self.allocator.free(name);
+                try self.print("  {s}->{s} deleting stale file or dir: {s}\n", .{
                     color.ForegroundBlue,
                     color.Reset,
-                    file_name,
+                    name,
                 });
             }
         }
@@ -575,7 +598,7 @@ pub const Pacman = struct {
             else => return err,
         };
         defer dir.close(self.io);
-        self.print(" reading files in {s}{s}{s}\n", .{ color.Bold, path, color.Reset });
+        try self.print(" reading files in {s}{s}{s}\n", .{ color.Bold, path, color.Reset });
 
         var files_map = std.StringHashMap([]u8).init(self.allocator);
         var dir_iter = dir.iterate();
@@ -597,7 +620,7 @@ pub const Pacman = struct {
             // No one is going to want to read a novel before installing.
             const file_contents = dir.readFileAlloc(self.io, node.name, self.allocator, .limited(4096)) catch |err| switch (err) {
                 error.StreamTooLong => {
-                    self.print("  {s}->{s} skipping diff for large file: {s}{s}{s}\n", .{
+                    try self.print("  {s}->{s} skipping diff for large file: {s}{s}{s}\n", .{
                         color.ForegroundBlue,
                         color.Reset,
                         color.Bold,
@@ -652,6 +675,7 @@ pub fn search(
     pkg: []const u8,
 ) !void {
     var pacman = try Pacman.init(allocator, io, environ_map);
+    defer pacman.deinit();
     try pacman.fetchLocalPackages();
 
     const installed = color.BoldForegroundCyan ++ "[Installed]" ++ color.Reset;
@@ -659,7 +683,7 @@ pub fn search(
     for (resp.results) |result| {
         const installed_text = if (pacman.pkgs.get(result.Name) == null) "" else installed;
         const desc = result.Description orelse "(missing)";
-        pacman.print("{s}aur/{s}{s}{s}{s} {s}{s}{s} {s} ({d})\n    {s}\n", .{
+        try pacman.print("{s}aur/{s}{s}{s}{s} {s}{s}{s} {s} ({d})\n    {s}\n", .{
             color.BoldForegroundMagenta,
             color.Reset,
             color.Bold,
