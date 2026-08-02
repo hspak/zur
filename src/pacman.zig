@@ -582,10 +582,20 @@ pub const Pacman = struct {
             for (artifacts.items) |a| self.allocator.free(a.name);
             artifacts.deinit(self.allocator);
         }
+        // Match only entries whose package name is a full leading component,
+        // so "foo" doesn't also match "foobar-...".
+        const nameIsForPkg = struct {
+            fn matches(name: []const u8, want: []const u8) bool {
+                if (name.len < want.len) return false;
+                if (!mem.startsWith(u8, name, want)) return false;
+                if (name.len == want.len) return true;
+                return name[want.len] == '-'; // next component boundary
+            }
+        }.matches;
+
         var dir_iter = dir.iterate();
         while (try dir_iter.next(self.io)) |node| {
-            // TODO: This is broken if the package name is a substring of another.
-            if (!mem.containsAtLeast(u8, node.name, 1, pkg_name)) {
+            if (!nameIsForPkg(node.name, pkg_name)) {
                 continue;
             }
             const path = try Dir.path.join(self.allocator, &[_][]const u8{ dir_path, node.name });
