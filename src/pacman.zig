@@ -95,6 +95,38 @@ fn artifactNameForPkg(name: []const u8, want: []const u8) bool {
     return name[want.len] == '-'; // next component boundary
 }
 
+/// Turn a dependency string from an AUR info `Depends`/`MakeDepends` entry
+/// into a bare package name, resolving the common forms AUR packages use:
+///   "foo"        -> "foo"
+///   "foo>=1.2.3" -> "foo"   (version constraint)
+///   "foo|bar"    -> "foo"   (first OR-alternative)
+///   "$pkgname"   -> error  (self-reference, unresolvable via AUR)
+/// The caller owns the returned slice.
+fn normalizeDepName(allocator: Allocator, dep: []const u8) ![]const u8 {
+    const trimmed = mem.trim(u8, dep, " \t");
+    if (trimmed.len == 0) return error.EmptyDependency;
+
+    // Take the first alternative of an OR-list ("a|b" means "a" or "b").
+    const first = if (mem.indexOfScalar(u8, trimmed, '|')) |idx| trimmed[0..idx] else trimmed;
+
+    // Strip a version constraint suffix: "foo>=1.0", "foo=1.0", "foo<2".
+    const ops = [_][]const u8{ ">=", "<=", "==", "=", ">", "<" };
+    var name = mem.trim(u8, first, " \t");
+    for (ops) |op| {
+        if (mem.indexOf(u8, name, op)) |idx| {
+            name = mem.trim(u8, name[0..idx], " \t");
+            break;
+        }
+    }
+    if (name.len == 0) return error.EmptyDependency;
+
+    // A literal "$" (e.g. "$pkgname" / "$pkgver") is a self-reference we
+    // can't resolve through the AUR; the dependency isn't an external package.
+    if (mem.indexOfScalar(u8, name, '$') != null) return error.VariableDependency;
+
+    return try allocator.dupe(u8, name);
+}
+
 /// Decompress a gzip-compressed tar archive `archive_name` located in
 /// `dest_dir` and extract it into the same directory, stripping the single
 /// top-level directory that AUR snapshots are wrapped in.
@@ -129,6 +161,9 @@ pub const Pacman = struct {
     zur_path: []const u8,
     zur_pkg_dir: []const u8,
     updates: usize = 0,
+    /// Package bases whose AUR dependencies have already been resolved during
+    /// this run, so recursive dependency resolution never re-enters or loops.
+    aur_deps_done: std.StringHashMap(void),
 
     stdout_buffer: [4096]u8 = undefined,
     stdout_writer: ?File.Writer = null,
@@ -153,6 +188,7 @@ pub const Pacman = struct {
             .aur_resp = null,
             .pacman_output = null,
             .updates = 0,
+            .aur_deps_done = std.StringHashMap(void).init(allocator),
         };
     }
 
@@ -166,6 +202,7 @@ pub const Pacman = struct {
             self.allocator.destroy(e.value_ptr.*);
         }
         self.pkgs.deinit();
+        self.aur_deps_done.deinit();
     }
 
     fn stdout(self: *Pacman) *Io.Writer {
@@ -379,10 +416,88 @@ pub const Pacman = struct {
                         color.Reset,
                     });
                 }
-                try self.downloadAndExtractPackage(pkg.key_ptr.*, pkg.value_ptr.*);
-                try self.compareUpdateAndInstall(pkg.key_ptr.*, pkg.value_ptr.*);
+                try self.installWithDeps(pkg.key_ptr.*, pkg.value_ptr.*);
             }
         }
+    }
+
+    /// Install `pkg` (download snapshot, build, install), first resolving and
+    /// building any AUR-only dependencies it needs. Official/repo deps are
+    /// left for `makepkg -s` to satisfy during the build; only deps that exist
+    /// in the AUR and aren't already installed need zur to build them first.
+    fn installWithDeps(self: *Pacman, pkg_name: []const u8, pkg: *Package) !void {
+        try self.ensureAurDepsInstalled(pkg_name);
+        try self.downloadAndExtractPackage(pkg_name, pkg);
+        try self.compareUpdateAndInstall(pkg_name, pkg);
+    }
+
+    /// Recursively ensure that every AUR-only dependency of `pkg_name` is
+    /// built and installed before the package itself. `pkg_name` is marked
+    /// handled up front so dependency cycles and repeated packages terminate.
+    fn ensureAurDepsInstalled(self: *Pacman, pkg_name: []const u8) !void {
+        if (self.aur_deps_done.contains(pkg_name)) return;
+        try self.aur_deps_done.put(pkg_name, {});
+
+        const info = (try self.getAurInfo(pkg_name)) orelse return;
+        const dep_lists = [_]?[][]const u8{ info.Depends, info.MakeDepends };
+        for (dep_lists) |maybe_list| {
+            const list = maybe_list orelse continue;
+            for (list) |dep| {
+                const dep_name = normalizeDepName(self.allocator, dep) catch continue;
+                defer self.allocator.free(dep_name);
+                if (dep_name.len == 0) continue;
+
+                // Already handled, installed, or not an AUR package: skip.
+                if (self.aur_deps_done.contains(dep_name)) continue;
+                if (try self.isInstalled(dep_name)) continue;
+                const dep_info = (try self.getAurInfo(dep_name)) orelse continue;
+
+                // Resolve the dep's own dependencies before building it.
+                try self.ensureAurDepsInstalled(dep_name);
+
+                var dep_pkg = try Package.init(self.allocator, "0");
+                dep_pkg.aur_version = dep_info.Version;
+                // A split-package dep shares its base's snapshot; set base_name
+                // (mirroring fetchRemoteAurVersions) so the right archive and
+                // directory are used.
+                if (!mem.eql(u8, dep_info.Name, dep_info.PackageBase)) {
+                    dep_pkg.base_name = dep_info.PackageBase;
+                }
+                try self.downloadAndExtractPackage(dep_name, dep_pkg);
+                try self.compareUpdateAndInstall(dep_name, dep_pkg);
+            }
+        }
+    }
+
+    /// The full AUR info for `name`: from the already-fetched response if
+    /// present, otherwise a fresh single-name query. Returns null when `name`
+    /// isn't an AUR package (so it's an official/repo dependency).
+    fn getAurInfo(self: *Pacman, name: []const u8) !?aur.Info {
+        if (self.aurInfoFor(name)) |info| return info;
+        return try aur.queryName(self.allocator, self.io, name);
+    }
+
+    fn aurInfoFor(self: *Pacman, name: []const u8) ?aur.Info {
+        const resp = self.aur_resp orelse return null;
+        for (resp.results) |info| {
+            if (mem.eql(u8, info.Name, name)) return info;
+        }
+        return null;
+    }
+
+    /// True if a package `name` is already installed locally. Used to decide
+    /// whether a dependency needs zur to build it or pacman/makepkg already
+    /// satisfies it.
+    fn isInstalled(self: *Pacman, name: []const u8) !bool {
+        const result = try std.process.run(self.allocator, self.io, .{
+            .argv = &[_][]const u8{ "pacman", "-Q", name },
+        });
+        self.allocator.free(result.stdout);
+        self.allocator.free(result.stderr);
+        return switch (result.term) {
+            .exited => |code| code == 0,
+            else => false,
+        };
     }
 
     // Returns the filename of an already-built package for (pkg_name, version)
@@ -631,12 +746,10 @@ pub const Pacman = struct {
         }
     }
 
-    // TODO: handle recursively installing dependencies from AUR
-    // 0. Parse the dep list from .SRCINFO
-    // 1. We need a strategy to split official/AUR deps
-    // 2. Install official deps
-    // 3. Install AUR deps
-    // 4. Then install the package
+    // AUR-only dependencies are resolved and built before the parent package
+    // (see installWithDeps/ensureAurDepsInstalled): each dep that exists in the
+    // AUR and isn't installed yet is built and installed first, recursively.
+    // Official/repo deps are left to `makepkg -s` during the build.
     fn bareInstall(self: *Pacman, pkg_name: []const u8, pkg: *Package) !void {
         var pkg_files = try self.snapshotFiles(pkg_name, pkg.aur_version.?);
         var pkg_files_iter = pkg_files.iterator();
@@ -982,6 +1095,31 @@ test "shouldUpdate - git packages rebuild when pkgver matches" {
     try testing.expect(shouldUpdate("neovim-git", "r100.abc", "r200.def", true));
     // A non-git package must not rebuild when versions match.
     try testing.expect(!shouldUpdate("neovim", "1.0", "1.0", false));
+}
+
+test "normalizeDepName - resolves common AUR dependency forms" {
+    const testing = std.testing;
+    const cases = [_]struct { in: []const u8, want: []const u8 }{
+        .{ .in = "foo", .want = "foo" },
+        .{ .in = "foo>=1.2.3", .want = "foo" },
+        .{ .in = "foo=1.0", .want = "foo" },
+        .{ .in = "foo<2", .want = "foo" },
+        .{ .in = "foo|bar", .want = "foo" },
+        .{ .in = "  libluv ", .want = "libluv" },
+        .{ .in = "libvterm>=0.1.git5", .want = "libvterm" },
+        .{ .in = "foo-bar_baz", .want = "foo-bar_baz" },
+    };
+    for (cases) |case| {
+        const got = try normalizeDepName(testing.allocator, case.in);
+        defer testing.allocator.free(got);
+        try testing.expectEqualStrings(case.want, got);
+    }
+}
+
+test "normalizeDepName - rejects self-references" {
+    const testing = std.testing;
+    try testing.expectError(error.VariableDependency, normalizeDepName(testing.allocator, "$pkgname"));
+    try testing.expectError(error.VariableDependency, normalizeDepName(testing.allocator, "$pkgver"));
 }
 
 test "isGitPkg - only true for a -git suffix" {
