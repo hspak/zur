@@ -1,5 +1,5 @@
 const std = @import("std");
-const io = std.io;
+const Io = std.Io;
 
 const Args = @import("argparse.zig").Args;
 const search = @import("pacman.zig").search;
@@ -14,17 +14,16 @@ const mainerror = error{
     CouldntResolveHost,
 };
 
-pub fn main() !void {
-    var arena_state = std.heap.ArenaAllocator.init(std.heap.c_allocator);
-    defer arena_state.deinit();
-    const allocator = arena_state.allocator();
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const allocator = init.arena.allocator();
 
     var args = Args.init(allocator);
     defer args.deinit();
-    try args.parse();
+    try args.parse(init.minimal.args);
 
     var stderr_buffer: [1024]u8 = undefined;
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    var stderr_writer = Io.File.stderr().writer(io, &stderr_buffer);
     const stderr = &stderr_writer.interface;
 
     switch (args.action) {
@@ -39,19 +38,19 @@ pub fn main() !void {
                 \\  default action: update out-of-date AUR packages
                 \\
             ;
-            _ = try stderr.write(msg);
+            try stderr.writeAll(msg);
         },
         .PrintVersion => {
-            _ = try stderr.write("version: " ++ build_version ++ "\n");
+            try stderr.writeAll("version: " ++ build_version ++ "\n");
         },
-        .Search => search(allocator, args.pkgs.items[0]) catch |err| {
+        .Search => search(allocator, io, init.environ_map, args.pkgs.items[0]) catch |err| {
             if (err == mainerror.CouldntResolveHost) {
                 try stderr.print("Please check your connection\n", .{});
             } else {
                 try stderr.print("Found error {any}\n", .{err});
             }
         },
-        .InstallOrUpgrade => installOrUpdate(allocator, args.pkgs) catch |err| {
+        .InstallOrUpgrade => installOrUpdate(allocator, io, init.environ_map, args.pkgs) catch |err| {
             if (err == mainerror.ZeroResultsFromAurQuery) {
                 try stderr.print("No aur packages found\n", .{});
             } else if (err == mainerror.CouldntResolveHost) {
@@ -65,8 +64,13 @@ pub fn main() !void {
     try stderr.flush();
 }
 
-fn installOrUpdate(allocator: std.mem.Allocator, pkg_list: std.array_list.Managed([]const u8)) !void {
-    var pacman = try Pacman.init(allocator);
+fn installOrUpdate(
+    allocator: std.mem.Allocator,
+    io: Io,
+    environ_map: *const std.process.Environ.Map,
+    pkg_list: std.ArrayList([]const u8),
+) !void {
+    var pacman = try Pacman.init(allocator, io, environ_map);
 
     // default to updating all AUR packages
     if (pkg_list.items.len == 0) {

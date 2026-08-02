@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 
 const Request = @import("req.zig").Request;
 const pacman = @import("pacman.zig");
@@ -66,10 +67,10 @@ pub const Search = struct {
     URLPath: []const u8,
 };
 
-pub fn queryAll(allocator: std.mem.Allocator, pkgs: std.StringHashMap(*pacman.Package)) !RPCRespV5 {
+pub fn queryAll(allocator: std.mem.Allocator, io: Io, pkgs: std.StringHashMap(*pacman.Package)) !RPCRespV5 {
     const uri = try buildInfoQuery(allocator, pkgs);
 
-    const http = try Request.init(allocator);
+    const http = try Request.init(allocator, io);
     defer http.deinit();
     const body = try http.getRequest(uri);
 
@@ -78,15 +79,15 @@ pub fn queryAll(allocator: std.mem.Allocator, pkgs: std.StringHashMap(*pacman.Pa
     return result.value;
 }
 
-pub fn search(allocator: std.mem.Allocator, search_name: []const u8) !RPCSearchRespV5 {
-    var uri = std.array_list.Managed(u8).init(allocator);
-    defer uri.deinit();
+pub fn search(allocator: std.mem.Allocator, io: Io, search_name: []const u8) !RPCSearchRespV5 {
+    var uri: std.ArrayList(u8) = .empty;
+    defer uri.deinit(allocator);
 
-    try uri.appendSlice(Host);
-    try uri.appendSlice("&type=search&by=name&arg="); // TODO: maybe consider opening this up
-    try uri.appendSlice(search_name);
+    try uri.appendSlice(allocator, Host);
+    try uri.appendSlice(allocator, "&type=search&by=name&arg="); // TODO: maybe consider opening this up
+    try uri.appendSlice(allocator, search_name);
 
-    const http = try Request.init(allocator);
+    const http = try Request.init(allocator, io);
     defer http.deinit();
 
     const body = try http.getRequest(uri.items);
@@ -97,18 +98,18 @@ pub fn search(allocator: std.mem.Allocator, search_name: []const u8) !RPCSearchR
 }
 
 fn buildInfoQuery(allocator: std.mem.Allocator, pkgs: std.StringHashMap(*pacman.Package)) ![]const u8 {
-    var uri = std.array_list.Managed(u8).init(allocator);
-    errdefer uri.deinit();
+    var uri: std.ArrayList(u8) = .empty;
+    errdefer uri.deinit(allocator);
 
-    try uri.appendSlice(Host);
-    try uri.appendSlice("&type=info");
+    try uri.appendSlice(allocator, Host);
+    try uri.appendSlice(allocator, "&type=info");
 
     var pkgs_iter = pkgs.iterator();
     while (pkgs_iter.next()) |pkg| {
-        try uri.appendSlice("&arg[]=");
-        try uri.appendSlice(pkg.key_ptr.*);
+        try uri.appendSlice(allocator, "&arg[]=");
+        try uri.appendSlice(allocator, pkg.key_ptr.*);
     }
-    return try uri.toOwnedSlice();
+    return try uri.toOwnedSlice(allocator);
 }
 
 const testing = std.testing;
