@@ -31,6 +31,12 @@ pub const Package = struct {
 };
 
 // TODO: maybe handle <pkg>-git packages like yay
+
+/// Files larger than this are skipped when diffing a package snapshot. A
+/// .install/.sh file that large is unusual, and diffing it would flood the
+/// terminal, so a fixed limit keeps output sane.
+const max_snapshot_diff_bytes: usize = 4096;
+
 pub const Pacman = struct {
     allocator: Allocator,
     io: Io,
@@ -650,9 +656,7 @@ pub const Pacman = struct {
                 continue;
             }
 
-            // TODO: The arbitrary 4096 byte file size limit is _probably_ fine here.
-            // No one is going to want to read a novel before installing.
-            const file_contents = dir.readFileAlloc(self.io, node.name, self.allocator, .limited(4096)) catch |err| switch (err) {
+            const file_contents = dir.readFileAlloc(self.io, node.name, self.allocator, .limited(max_snapshot_diff_bytes)) catch |err| switch (err) {
                 error.StreamTooLong => {
                     try self.print("  {s}->{s} skipping diff for large file: {s}{s}{s}\n", .{
                         color.ForegroundBlue,
