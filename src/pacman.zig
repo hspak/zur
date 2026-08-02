@@ -49,6 +49,33 @@ fn machineArch() []const u8 {
     };
 }
 
+/// Decide whether a package needs an update or install. `remote_newer` is the
+/// result of an alpm version comparison (remote vs local).
+fn shouldUpdate(name: []const u8, local: []const u8, remote: []const u8, remote_newer: bool) bool {
+    // A -git package is rebuilt whenever its AUR pkgver matches the installed
+    // one: the version string rarely changes, but the upstream source may have
+    // moved since the last build.
+    if (mem.endsWith(u8, name, "-git") and mem.eql(u8, remote, local)) {
+        return true;
+    }
+    // Version "0" is the sentinel for a freshly-requested install.
+    if (mem.eql(u8, local, "0")) {
+        return true;
+    }
+    return remote_newer;
+}
+
+/// True if `name` refers to package `want` as a full leading component, so
+/// "foo" doesn't also match "foobar-...". Used when deciding which built
+/// artifacts belong to a package (for removal/keeps and for the "already
+/// built" fast-path).
+fn artifactNameForPkg(name: []const u8, want: []const u8) bool {
+    if (name.len < want.len) return false;
+    if (!mem.startsWith(u8, name, want)) return false;
+    if (name.len == want.len) return true;
+    return name[want.len] == '-'; // next component boundary
+}
+
 pub const Pacman = struct {
     allocator: Allocator,
     io: Io,
@@ -176,7 +203,9 @@ pub const Pacman = struct {
             return error.ZeroResultsFromAurQuery;
         }
         for (self.aur_resp.?.results) |result| {
-            const curr_pkg = self.pkgs.get(result.Name).?;
+            // Skip results the AUR returns for packages we didn't ask about
+            // (e.g. a dependency that also came back) rather than crashing.
+            const curr_pkg = self.pkgs.get(result.Name) orelse continue;
             curr_pkg.aur_version = result.Version;
 
             // Only store Package.base_name if the name doesn't match base name.
@@ -206,14 +235,8 @@ pub const Pacman = struct {
             }
 
             const remote_version = pkg.value_ptr.*.aur_version.?;
-            const git_package_stale = blk: {
-                const is_git_package = mem.endsWith(u8, pkg.key_ptr.*, "-git");
-                if (!is_git_package) {
-                    break :blk false;
-                }
-                break :blk mem.eql(u8, remote_version, local_version);
-            };
-            if (git_package_stale or mem.eql(u8, local_version, "0") or try alpm.is_newer_than(self.allocator, remote_version, local_version)) {
+            const remote_newer = try alpm.is_newer_than(self.allocator, remote_version, local_version);
+            if (shouldUpdate(pkg.key_ptr.*, local_version, remote_version, remote_newer)) {
                 pkg.value_ptr.*.requires_update = true;
                 self.updates += 1;
             }
@@ -280,7 +303,10 @@ pub const Pacman = struct {
                         color.Reset,
                     });
                     try self.installExistingPackage(full_pkg_name);
-                    return;
+                    // Keep going: other packages may also be out of date. An
+                    // early return here would skip the rest of the loop and
+                    // leave them uninstalled.
+                    continue;
                 }
 
                 // The install hack is bleeding into here.
@@ -355,16 +381,34 @@ pub const Pacman = struct {
         const full_dir = try Dir.path.join(self.allocator, &[_][]const u8{ self.zur_path, dir_name });
         const full_file_path = try Dir.path.join(self.allocator, &[_][]const u8{ full_dir, file_name });
 
-        //This is not perfect (not robust against manual changes), but it's sufficient for it's purpose (short-circuiting)
-        var existing = Dir.openDirAbsolute(self.io, full_dir, .{}) catch |err| switch (err) {
+        // Only skip the download if the existing directory is a real,
+        // fully-extracted snapshot (it contains a PKGBUILD). A leftover or
+        // partially-extracted dir from an interrupted run must be removed and
+        // re-downloaded, otherwise a stale or incomplete source could be built
+        // and the wrong package version installed.
+        var existing = Dir.openDirAbsolute(self.io, full_dir, .{ .iterate = true }) catch |err| switch (err) {
             error.FileNotFound => null,
             else => return err,
         };
 
         if (existing) |*d| {
+            var is_valid = false;
+            var existing_iter = d.iterate();
+            while (try existing_iter.next(self.io)) |node| {
+                if (mem.eql(u8, node.name, "PKGBUILD")) {
+                    is_valid = true;
+                    break;
+                }
+            }
             d.close(self.io);
-            try self.print(" skipping download, {s}{s}{s} already exists...\n", .{ color.Bold, full_dir, color.Reset });
-            return;
+            if (is_valid) {
+                try self.print(" skipping download, {s}{s}{s} already exists...\n", .{ color.Bold, full_dir, color.Reset });
+                return;
+            }
+            try self.print(" removing incomplete snapshot {s}{s}{s}, re-downloading...\n", .{ color.Bold, full_dir, color.Reset });
+            var zur_dir = try Dir.openDirAbsolute(self.io, self.zur_path, .{});
+            defer zur_dir.close(self.io);
+            try zur_dir.deleteTree(self.io, dir_name);
         }
 
         var url: []const u8 = undefined;
@@ -405,19 +449,19 @@ pub const Pacman = struct {
 
     fn compareUpdateAndInstall(self: *Pacman, pkg_name: []const u8, pkg: *Package) !void {
         const old_files = try self.snapshotFiles(pkg_name, pkg.version);
-        if (old_files.count() == 0) {
-            // We have no older version stored in the filesystem.
-            // Fallback to just installing
-            return self.bareInstall(pkg_name, pkg);
-        }
-
         const new_files = try self.snapshotFiles(pkg_name, pkg.aur_version.?);
-        if (new_files.count() == 0) {
+
+        // A diff needs both the old and new snapshots present, each with a
+        // PKGBUILD to parse. If either is missing (no prior snapshot, or an
+        // unusual snapshot without a PKGBUILD), fall back to a plain install
+        // rather than silently skipping the package.
+        if (old_files.count() == 0 or new_files.count() == 0 or
+            old_files.get("PKGBUILD") == null or new_files.get("PKGBUILD") == null)
+        {
             return self.bareInstall(pkg_name, pkg);
         }
 
-        const old_pkgbuild_content = old_files.get("PKGBUILD") orelse return;
-        var old_pkgbuild = Pkgbuild.init(self.allocator, old_pkgbuild_content);
+        var old_pkgbuild = Pkgbuild.init(self.allocator, old_files.get("PKGBUILD").?);
         try old_pkgbuild.readLines();
         var new_pkgbuild = Pkgbuild.init(self.allocator, new_files.get("PKGBUILD").?);
         try new_pkgbuild.readLines();
@@ -688,20 +732,9 @@ pub const Pacman = struct {
             for (artifacts.items) |a| self.allocator.free(a.name);
             artifacts.deinit(self.allocator);
         }
-        // Match only entries whose package name is a full leading component,
-        // so "foo" doesn't also match "foobar-...".
-        const nameIsForPkg = struct {
-            fn matches(name: []const u8, want: []const u8) bool {
-                if (name.len < want.len) return false;
-                if (!mem.startsWith(u8, name, want)) return false;
-                if (name.len == want.len) return true;
-                return name[want.len] == '-'; // next component boundary
-            }
-        }.matches;
-
         var dir_iter = dir.iterate();
         while (try dir_iter.next(self.io)) |node| {
-            if (!nameIsForPkg(node.name, pkg_name)) {
+            if (!artifactNameForPkg(node.name, pkg_name)) {
                 continue;
             }
             const path = try Dir.path.join(self.allocator, &[_][]const u8{ dir_path, node.name });
@@ -846,4 +879,47 @@ pub fn search(
             desc,
         });
     }
+}
+
+test "shouldUpdate - fresh install sentinel version 0" {
+    const testing = std.testing;
+    try testing.expect(shouldUpdate("foo", "0", "1.0.0", true));
+    try testing.expect(shouldUpdate("foo", "0", "0.0.0", false));
+}
+
+test "shouldUpdate - normal package only when remote is newer" {
+    const testing = std.testing;
+    // local 1.0, remote 2.0 -> update
+    try testing.expect(shouldUpdate("foo", "1.0", "2.0", true));
+    // local 1.0, remote 1.0 -> no update
+    try testing.expect(!shouldUpdate("foo", "1.0", "1.0", false));
+    // local 2.0, remote 1.0 (remote older) -> no update
+    try testing.expect(!shouldUpdate("foo", "2.0", "1.0", false));
+}
+
+test "shouldUpdate - git packages rebuild when pkgver matches" {
+    const testing = std.testing;
+    // neovim-git: AUR pkgver equals installed -> rebuild to catch new commits.
+    try testing.expect(shouldUpdate("neovim-git", "r100.abc", "r100.abc", false));
+    // AUR pkgver differs from installed -> rely on the version comparison.
+    try testing.expect(!shouldUpdate("neovim-git", "r100.abc", "r200.def", false));
+    try testing.expect(shouldUpdate("neovim-git", "r100.abc", "r200.def", true));
+    // A non-git package must not rebuild when versions match.
+    try testing.expect(!shouldUpdate("neovim", "1.0", "1.0", false));
+}
+
+test "artifactNameForPkg - matches only full leading components" {
+    const testing = std.testing;
+    // Exact match.
+    try testing.expect(artifactNameForPkg("foo", "foo"));
+    // Full component boundary: package "foo" followed by a dash.
+    try testing.expect(artifactNameForPkg("foo-2.0-1-x86_64.pkg.tar.zst", "foo"));
+    // "foo" must NOT match "foobar-..." (a different package).
+    try testing.expect(!artifactNameForPkg("foobar-2.0-1-x86_64.pkg.tar.zst", "foo"));
+    // Shorter name cannot match a longer want.
+    try testing.expect(!artifactNameForPkg("foo", "foobar"));
+    // Package with a dash in its own name still matches fully.
+    try testing.expect(artifactNameForPkg("neovim-git-r100.abc-x86_64.pkg.tar.zst", "neovim-git"));
+    // A prefix that is not at a component boundary must not match.
+    try testing.expect(!artifactNameForPkg("foo-lib-1.0-1-x86_64.pkg.tar.zst", "foo-l"));
 }
