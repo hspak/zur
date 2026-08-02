@@ -8,6 +8,13 @@ const File = Io.File;
 const tar = std.tar;
 const flate = std.compress.flate;
 
+// For `tcgetpgrp`/`tcsetpgrp` (terminal foreground process group control),
+// which the libc-backed `std.posix` layer doesn't expose. zur links libc for
+// libalpm, so these come straight from libc.
+const c = @cImport({
+    @cInclude("unistd.h");
+});
+
 const alpm = @import("alpm.zig");
 const aur = @import("aur.zig");
 const color = @import("color.zig");
@@ -697,13 +704,51 @@ pub const Pacman = struct {
             .stdin = .inherit,
             .stdout = .inherit,
             .stderr = .inherit,
+            .pgid = 0, // child becomes the leader of its own process group
         });
-        // TODO: Ctrl+c from a [sudo] prompt causes some weird output behavior.
-        // I probably need signal handling for this to properly work.
+
+        // If stdin is a terminal, make the child's process group the foreground
+        // one, so Ctrl+C (SIGINT) reaches the child (e.g. a `[sudo]` prompt)
+        // instead of zur. zur then survives to reap the child and hand the
+        // terminal back, which is what keeps the output from looking garbled.
+        // The previous foreground group is captured so it can be restored.
+        const stdin_fd = std.posix.STDIN_FILENO;
+        const original_fg: ?std.posix.pid_t = blk: {
+            const pgrp = c.tcgetpgrp(stdin_fd);
+            if (pgrp == -1) break :blk null; // not a terminal, or not a member
+            break :blk pgrp;
+        };
+        if (original_fg != null) {
+            _ = c.tcsetpgrp(stdin_fd, child.id.?);
+        }
+
         // Surface a child failure instead of treating it as success: a
         // non-zero exit or termination by a signal means the build/install
         // didn't complete, so abort the operation rather than continuing.
-        const term = try child.wait(self.io);
+        const term = child.wait(self.io) catch |err| {
+            // Hand the terminal back before propagating the error.
+            if (original_fg) |fg| _ = c.tcsetpgrp(stdin_fd, fg);
+            return err;
+        };
+
+        if (original_fg) |fg| {
+            // The child's group is gone; hand the terminal back to zur's group.
+            // This restore runs while zur is in the background group, which
+            // would otherwise send SIGTTOU and stop us, so ignore it briefly.
+            var old_act: std.posix.Sigaction = undefined;
+            std.posix.sigaction(
+                std.posix.SIG.TTOU,
+                &.{
+                    .handler = .{ .handler = std.posix.SIG.IGN },
+                    .mask = std.posix.sigemptyset(),
+                    .flags = 0,
+                },
+                &old_act,
+            );
+            _ = c.tcsetpgrp(stdin_fd, fg);
+            std.posix.sigaction(std.posix.SIG.TTOU, &old_act, null);
+        }
+
         switch (term) {
             .exited => |code| if (code != 0) {
                 return error.CommandFailed;
