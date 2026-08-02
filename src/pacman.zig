@@ -37,6 +37,18 @@ pub const Package = struct {
 /// terminal, so a fixed limit keeps output sane.
 const max_snapshot_diff_bytes: usize = 4096;
 
+/// The architecture component used in built package filenames for this
+/// machine. zur is built natively (via its own PKGBUILD), so the compile-time
+/// target matches the running machine.
+fn machineArch() []const u8 {
+    return switch (@import("builtin").cpu.arch) {
+        .x86_64 => "x86_64",
+        .aarch64 => "aarch64",
+        .riscv64 => "riscv64",
+        else => "x86_64",
+    };
+}
+
 pub const Pacman = struct {
     allocator: Allocator,
     io: Io,
@@ -236,7 +248,8 @@ pub const Pacman = struct {
         var pkgs_iter = self.pkgs.iterator();
         while (pkgs_iter.next()) |pkg| {
             if (pkg.value_ptr.*.requires_update) {
-                if (try self.localPackageExists(pkg.key_ptr.*, pkg.value_ptr.*.aur_version.?)) {
+                if (try self.findExistingPackage(pkg.key_ptr.*, pkg.value_ptr.*.aur_version.?)) |full_pkg_name| {
+                    defer self.allocator.free(full_pkg_name);
                     try self.print("{s}warning:{s} Found existing up-to-date package: {s}{s}-{s}{s}, deferring to pacman -U...\n", .{
                         color.BoldForegroundYellow,
                         color.Reset,
@@ -245,7 +258,7 @@ pub const Pacman = struct {
                         pkg.value_ptr.*.aur_version.?,
                         color.Reset,
                     });
-                    try self.installExistingPackage(pkg.key_ptr.*, pkg.value_ptr.*);
+                    try self.installExistingPackage(full_pkg_name);
                     return;
                 }
 
@@ -282,27 +295,36 @@ pub const Pacman = struct {
         }
     }
 
-    fn localPackageExists(self: *Pacman, pkg_name: []const u8, new_ver: []const u8) !bool {
-        // TODO: Handle "any" arch package names.
-        const full_pkg_name = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, new_ver, "x86_64.pkg.tar.zst" });
-        defer self.allocator.free(full_pkg_name);
-
+    // Returns the filename of an already-built package for (pkg_name, version)
+    // in zur_pkg_dir, considering both the machine arch and "any" packages.
+    // The caller owns the returned slice.
+    fn findExistingPackage(self: *Pacman, pkg_name: []const u8, version: []const u8) !?[]u8 {
         // For -git packages we always force an install (we don't know if
         // there's been a source update), so don't treat them as existing.
-        if (mem.containsAtLeast(u8, full_pkg_name, 1, "-git")) {
-            return false;
+        if (mem.containsAtLeast(u8, pkg_name, 1, "-git")) {
+            return null;
         }
 
-        const full_path = try Dir.path.join(self.allocator, &[_][]const u8{ self.zur_pkg_dir, full_pkg_name });
-        defer self.allocator.free(full_path);
-
-        // Direct existence check rather than scanning the whole directory.
-        var f = Dir.openFileAbsolute(self.io, full_path, .{}) catch |err| switch (err) {
-            error.FileNotFound => return false,
-            else => return err,
-        };
-        defer f.close(self.io);
-        return true;
+        const archs = [_][]const u8{ machineArch(), "any" };
+        for (archs) |arch| {
+            const name = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, version, arch, "pkg.tar.zst" });
+            const full_path = try Dir.path.join(self.allocator, &[_][]const u8{ self.zur_pkg_dir, name });
+            var found = false;
+            defer {
+                self.allocator.free(full_path);
+                if (!found) self.allocator.free(name);
+            }
+            const f = Dir.openFileAbsolute(self.io, full_path, .{}) catch |err| switch (err) {
+                error.FileNotFound => null,
+                else => return err,
+            };
+            if (f) |file| {
+                file.close(self.io);
+                found = true;
+                return name;
+            }
+        }
+        return null;
     }
 
     fn downloadAndExtractPackage(self: *Pacman, pkg_name: []const u8, pkg: *Package) !void {
@@ -513,11 +535,9 @@ pub const Pacman = struct {
         try self.moveBuiltPackages(pkg_name, pkg);
     }
 
-    fn installExistingPackage(self: *Pacman, pkg_name: []const u8, pkg: *Package) !void {
+    fn installExistingPackage(self: *Pacman, full_pkg_name: []const u8) !void {
         try std.process.setCurrentPath(self.io, self.zur_pkg_dir);
 
-        // TODO: Dynamically get the right arch
-        const full_pkg_name = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg.aur_version.?, "x86_64.pkg.tar.zst" });
         const argv = &[_][]const u8{ "sudo", "pacman", "-U", full_pkg_name };
         try self.execCommand(argv);
     }
