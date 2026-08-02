@@ -8,6 +8,19 @@ const Host = "https://aur.archlinux.org/rpc/?v=5";
 
 pub const Snapshot = "https://aur.archlinux.org/cgit/aur.git/snapshot";
 
+/// Which field the RPC `search` endpoint matches against.
+pub const SearchBy = enum {
+    name,
+    name_desc,
+
+    fn field(self: SearchBy) []const u8 {
+        return switch (self) {
+            .name => "name",
+            .name_desc => "name-desc",
+        };
+    }
+};
+
 pub const RPCRespV5 = struct {
     version: usize,
     type: []const u8,
@@ -79,12 +92,14 @@ pub fn queryAll(allocator: std.mem.Allocator, io: Io, pkgs: std.StringHashMap(*p
     return result.value;
 }
 
-pub fn search(allocator: std.mem.Allocator, io: Io, search_name: []const u8) !RPCSearchRespV5 {
+pub fn search(allocator: std.mem.Allocator, io: Io, search_name: []const u8, by: SearchBy) !RPCSearchRespV5 {
     var uri: std.ArrayList(u8) = .empty;
     defer uri.deinit(allocator);
 
     try uri.appendSlice(allocator, Host);
-    try uri.appendSlice(allocator, "&type=search&by=name&arg="); // TODO: maybe consider opening this up
+    try uri.appendSlice(allocator, "&type=search&by=");
+    try uri.appendSlice(allocator, by.field());
+    try uri.appendSlice(allocator, "&arg=");
     try uri.appendSlice(allocator, search_name);
 
     const http = try Request.init(allocator, io);

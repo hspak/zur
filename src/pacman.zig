@@ -719,7 +719,7 @@ pub fn search(
     try pacman.fetchLocalPackages();
 
     const installed = color.BoldForegroundCyan ++ "[Installed]" ++ color.Reset;
-    const resp = try aur.search(allocator, io, pkg);
+    const resp = try aur.search(allocator, io, pkg, .name);
     for (resp.results) |result| {
         const installed_text = if (pacman.pkgs.get(result.Name) == null) "" else installed;
         const desc = result.Description orelse "(missing)";
