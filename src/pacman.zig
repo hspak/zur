@@ -243,9 +243,32 @@ pub const Pacman = struct {
         }
         try Dir.cwd().createDirPath(self.io, self.zur_path);
 
+        // De-dup split packages: a PKGBUILD with multiple pkgnames shares a
+        // package base, and installing a base once builds and installs all of
+        // its pkgnames. Track bases already handled and skip the rest, so the
+        // same base isn't downloaded/built/installed once per pkgname.
+        var processed_bases = std.StringHashMap(void).init(self.allocator);
+        defer processed_bases.deinit();
+
         var pkgs_iter = self.pkgs.iterator();
         while (pkgs_iter.next()) |pkg| {
             if (pkg.value_ptr.*.requires_update) {
+                if (pkg.value_ptr.*.base_name) |base| {
+                    if (processed_bases.get(base) != null) {
+                        try self.print("{s}::{s} {s}{s}{s} is part of base {s}{s}{s}, already handled\n", .{
+                            color.BoldForegroundBlue,
+                            color.Reset,
+                            color.Bold,
+                            pkg.key_ptr.*,
+                            color.Reset,
+                            color.Bold,
+                            base,
+                            color.Reset,
+                        });
+                        continue;
+                    }
+                    try processed_bases.putNoClobber(base, {});
+                }
                 if (try self.findExistingPackage(pkg.key_ptr.*, pkg.value_ptr.*.aur_version.?)) |full_pkg_name| {
                     defer self.allocator.free(full_pkg_name);
                     try self.print("{s}warning:{s} Found existing up-to-date package: {s}{s}-{s}{s}, deferring to pacman -U...\n", .{
