@@ -439,16 +439,7 @@ pub const Pacman = struct {
                 const new_content = new_content_maybe.?;
                 if (!mem.eql(u8, old_content, new_content)) {
                     at_least_one_diff = true;
-
-                    // TODO: would be cool to show a real diff here
-                    try self.print("{s}::{s} {s}{s}{s} was updated:\n{s}\n", .{
-                        color.BoldForegroundBlue,
-                        color.Reset,
-                        color.Bold,
-                        file.key_ptr.*,
-                        color.Reset,
-                        new_files.get(file.key_ptr.*).?,
-                    });
+                    try self.printDiff(file.key_ptr.*, old_content, new_content);
                 }
             }
         }
@@ -464,6 +455,75 @@ pub const Pacman = struct {
             try self.print("{s}::{s} No meaningful diff's found\n", .{ color.ForegroundBlue, color.Reset });
         }
         try self.install(pkg_name, pkg);
+    }
+
+    // Print a minimal line-based diff between two file contents using an LCS
+    // (longest common subsequence) to align unchanged lines.
+    fn printDiff(self: *Pacman, name: []const u8, old_content: []const u8, new_content: []const u8) !void {
+        var old_list: std.ArrayList([]const u8) = .empty;
+        defer old_list.deinit(self.allocator);
+        var new_list: std.ArrayList([]const u8) = .empty;
+        defer new_list.deinit(self.allocator);
+        var it = mem.splitScalar(u8, old_content, '\n');
+        while (it.next()) |line| try old_list.append(self.allocator, line);
+        it = mem.splitScalar(u8, new_content, '\n');
+        while (it.next()) |line| try new_list.append(self.allocator, line);
+        const old = old_list.items;
+        const new = new_list.items;
+        const n = old.len;
+        const m = new.len;
+
+        // LCS length table. dp[i][j] = length of LCS of old[i..] and new[j..].
+        const dp = try self.allocator.alloc(usize, (n + 1) * (m + 1));
+        defer self.allocator.free(dp);
+        @memset(dp, 0);
+        const row = struct {
+            fn get(table: []usize, width: usize, r: usize) []usize {
+                return table[r * (width + 1) ..][0 .. width + 1];
+            }
+        }.get;
+        var i: usize = n;
+        while (i > 0) {
+            i -= 1;
+            var j: usize = m;
+            while (j > 0) {
+                j -= 1;
+                if (mem.eql(u8, old[i], new[j])) {
+                    row(dp, m, i)[j] = row(dp, m, i + 1)[j + 1] + 1;
+                } else {
+                    row(dp, m, i)[j] = @max(row(dp, m, i + 1)[j], row(dp, m, i)[j + 1]);
+                }
+            }
+        }
+
+        try self.print("{s}::{s} {s}{s}{s} was updated:{s}\n", .{
+            color.BoldForegroundBlue,
+            color.Reset,
+            color.Bold,
+            name,
+            color.Reset,
+            color.Reset,
+        });
+        i = 0;
+        var j: usize = 0;
+        while (i < n and j < m) {
+            if (mem.eql(u8, old[i], new[j])) {
+                i += 1;
+                j += 1;
+            } else if (row(dp, m, i + 1)[j] >= row(dp, m, i)[j + 1]) {
+                try self.print("{s}- {s}{s}\n", .{ color.ForegroundRed, old[i], color.Reset });
+                i += 1;
+            } else {
+                try self.print("{s}+ {s}{s}\n", .{ color.ForegroundGreen, new[j], color.Reset });
+                j += 1;
+            }
+        }
+        while (i < n) : (i += 1) {
+            try self.print("{s}- {s}{s}\n", .{ color.ForegroundRed, old[i], color.Reset });
+        }
+        while (j < m) : (j += 1) {
+            try self.print("{s}+ {s}{s}\n", .{ color.ForegroundGreen, new[j], color.Reset });
+        }
     }
 
     // TODO: handle recursively installing dependencies from AUR
