@@ -21,20 +21,17 @@ pub const SearchBy = enum {
     }
 };
 
-pub const RPCRespV5 = struct {
-    version: usize,
-    type: []const u8,
-    resultcount: usize,
-    results: []Info,
-};
+fn RPCResp(comptime T: type) type {
+    return struct {
+        version: usize,
+        type: []const u8,
+        resultcount: usize,
+        results: []T,
+    };
+}
 
-// TODO: Maybe some opportunity to de-dep this
-pub const RPCSearchRespV5 = struct {
-    version: usize,
-    type: []const u8,
-    resultcount: usize,
-    results: []Search,
-};
+pub const RPCRespV5 = RPCResp(Info);
+pub const RPCSearchRespV5 = RPCResp(Search);
 
 pub const Info = struct {
     ID: usize,
