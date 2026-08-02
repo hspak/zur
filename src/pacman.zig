@@ -40,7 +40,9 @@ pub const Package = struct {
     }
 };
 
-// TODO: maybe handle <pkg>-git packages like yay
+// -git/VCS packages (e.g. neovim-git) are handled: they're rebuilt whenever
+// their AUR pkgver matches the installed one (see isGitPkg/shouldUpdate) and
+// never reuse a cached artifact (see findExistingPackage).
 
 /// Files larger than this are skipped when diffing a package snapshot. A
 /// .install/.sh file that large is unusual, and diffing it would flood the
@@ -59,13 +61,20 @@ fn machineArch() []const u8 {
     };
 }
 
+/// True if `name` is a VCS/-git package (e.g. `neovim-git`). These are rebuilt
+/// eagerly because their version string changes rarely, but the upstream git
+/// source moves constantly.
+fn isGitPkg(name: []const u8) bool {
+    return mem.endsWith(u8, name, "-git");
+}
+
 /// Decide whether a package needs an update or install. `remote_newer` is the
 /// result of an alpm version comparison (remote vs local).
 fn shouldUpdate(name: []const u8, local: []const u8, remote: []const u8, remote_newer: bool) bool {
     // A -git package is rebuilt whenever its AUR pkgver matches the installed
     // one: the version string rarely changes, but the upstream source may have
     // moved since the last build.
-    if (mem.endsWith(u8, name, "-git") and mem.eql(u8, remote, local)) {
+    if (isGitPkg(name) and mem.eql(u8, remote, local)) {
         return true;
     }
     // Version "0" is the sentinel for a freshly-requested install.
@@ -382,7 +391,7 @@ pub const Pacman = struct {
     fn findExistingPackage(self: *Pacman, pkg_name: []const u8, version: []const u8) !?[]u8 {
         // For -git packages we always force an install (we don't know if
         // there's been a source update), so don't treat them as existing.
-        if (mem.containsAtLeast(u8, pkg_name, 1, "-git")) {
+        if (isGitPkg(pkg_name)) {
             return null;
         }
 
@@ -973,6 +982,15 @@ test "shouldUpdate - git packages rebuild when pkgver matches" {
     try testing.expect(shouldUpdate("neovim-git", "r100.abc", "r200.def", true));
     // A non-git package must not rebuild when versions match.
     try testing.expect(!shouldUpdate("neovim", "1.0", "1.0", false));
+}
+
+test "isGitPkg - only true for a -git suffix" {
+    const testing = std.testing;
+    try testing.expect(isGitPkg("neovim-git"));
+    try testing.expect(isGitPkg("foo-git"));
+    try testing.expect(!isGitPkg("neovim"));
+    try testing.expect(!isGitPkg("foo-git-tools")); // "-git" must be the suffix
+    try testing.expect(!isGitPkg(""));
 }
 
 test "artifactNameForPkg - matches only full leading components" {
