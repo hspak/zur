@@ -399,7 +399,15 @@ pub const Pacman = struct {
                 const old_content_maybe = old_files.get(file.key_ptr.*);
                 const new_content_maybe = new_files.get(file.key_ptr.*);
                 if (old_content_maybe == null or new_content_maybe == null) {
-                    // TODO: print something!
+                    // One side is missing this file (added or removed in this
+                    // update), so there's nothing to compare.
+                    try self.print("{s}->{s} {s}{s}{s} only exists in one version; skipping diff\n", .{
+                        color.ForegroundBlue,
+                        color.Reset,
+                        color.Bold,
+                        file.key_ptr.*,
+                        color.Reset,
+                    });
                     continue;
                 }
 
