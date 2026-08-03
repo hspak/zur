@@ -164,6 +164,9 @@ pub const Pacman = struct {
     /// Package bases whose AUR dependencies have already been resolved during
     /// this run, so recursive dependency resolution never re-enters or loops.
     aur_deps_done: std.StringHashMap(void),
+    /// Lazily-initialized libalpm handle, reused for every local-db query so
+    /// alpm is only initialized once per run (see getAlpm).
+    alpm_state: ?alpm.Alpm = null,
 
     stdout_buffer: [4096]u8 = undefined,
     stdout_writer: ?File.Writer = null,
@@ -203,6 +206,15 @@ pub const Pacman = struct {
         }
         self.pkgs.deinit();
         self.aur_deps_done.deinit();
+        if (self.alpm_state) |*state| state.deinit();
+    }
+
+    /// The shared libalpm handle, initializing it once on first use.
+    fn getAlpm(self: *Pacman) !*alpm.Alpm {
+        if (self.alpm_state == null) {
+            self.alpm_state = try alpm.Alpm.init(self.allocator);
+        }
+        return &self.alpm_state.?;
     }
 
     fn stdout(self: *Pacman) *Io.Writer {
@@ -241,7 +253,7 @@ pub const Pacman = struct {
             return error.BadInitialPkgsState;
         }
 
-        const foreign = try alpm.fetchForeignPackages(self.allocator);
+        const foreign = try (try self.getAlpm()).fetchForeignPackages();
         // The name/version strings are arena-owned (see init's allocator), so
         // they stay alive for the whole run and the pkg map keys/versions may
         // borrow them; nothing is freed individually here.
@@ -437,7 +449,7 @@ pub const Pacman = struct {
 
                 // Already handled, installed, or not an AUR package: skip.
                 if (self.aur_deps_done.contains(dep_name)) continue;
-                if (try self.isInstalled(dep_name)) continue;
+                if (try (try self.getAlpm()).isInstalled(dep_name)) continue;
                 const dep_info = (try self.getAurInfo(dep_name)) orelse continue;
 
                 // Resolve the dep's own dependencies before building it.
@@ -471,21 +483,6 @@ pub const Pacman = struct {
             if (mem.eql(u8, info.Name, name)) return info;
         }
         return null;
-    }
-
-    /// True if a package `name` is already installed locally. Used to decide
-    /// whether a dependency needs zur to build it or pacman/makepkg already
-    /// satisfies it.
-    fn isInstalled(self: *Pacman, name: []const u8) !bool {
-        const result = try std.process.run(self.allocator, self.io, .{
-            .argv = &[_][]const u8{ "pacman", "-Q", name },
-        });
-        self.allocator.free(result.stdout);
-        self.allocator.free(result.stderr);
-        return switch (result.term) {
-            .exited => |code| code == 0,
-            else => false,
-        };
     }
 
     // Returns the filename of an already-built package for (pkg_name, version)
