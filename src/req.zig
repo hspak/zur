@@ -6,21 +6,18 @@ pub const Request = struct {
     client: std.http.Client,
     allocator: Allocator,
 
-    pub fn init(allocator: Allocator, io: Io) !*Request {
-        const new = try allocator.create(Request);
-        new.* = .{
+    pub fn init(allocator: Allocator, io: Io) Request {
+        return .{
             .client = .{
                 .allocator = allocator,
                 .io = io,
             },
             .allocator = allocator,
         };
-        return new;
     }
 
     pub fn deinit(self: *Request) void {
         self.client.deinit();
-        self.allocator.destroy(self);
     }
 
     pub fn getRequest(self: *Request, url: []const u8) ![]u8 {

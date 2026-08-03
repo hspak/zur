@@ -167,6 +167,9 @@ pub const Pacman = struct {
     /// Lazily-initialized libalpm handle, reused for every local-db query so
     /// alpm is only initialized once per run (see getAlpm).
     alpm_state: ?alpm.Alpm = null,
+    /// Persisted HTTP client, reused across all AUR queries so connections and
+    /// TLS sessions are kept alive (see getRequest).
+    request_state: ?Request = null,
 
     stdout_buffer: [4096]u8 = undefined,
     stdout_writer: ?File.Writer = null,
@@ -207,6 +210,7 @@ pub const Pacman = struct {
         self.pkgs.deinit();
         self.aur_deps_done.deinit();
         if (self.alpm_state) |*state| state.deinit();
+        if (self.request_state) |*req| req.deinit();
     }
 
     /// The shared libalpm handle, initializing it once on first use.
@@ -215,6 +219,14 @@ pub const Pacman = struct {
             self.alpm_state = try alpm.Alpm.init(self.allocator);
         }
         return &self.alpm_state.?;
+    }
+
+    /// The shared HTTP client, initializing it once on first use.
+    fn getRequest(self: *Pacman) *Request {
+        if (self.request_state == null) {
+            self.request_state = Request.init(self.allocator, self.io);
+        }
+        return &self.request_state.?;
     }
 
     fn stdout(self: *Pacman) *Io.Writer {
@@ -278,7 +290,7 @@ pub const Pacman = struct {
     }
 
     pub fn fetchRemoteAurVersions(self: *Pacman) !void {
-        self.aur_resp = try aur.queryAll(self.allocator, self.io, self.pkgs);
+        self.aur_resp = try aur.queryAll(self.allocator, self.getRequest(), self.pkgs);
         if (self.aur_resp.?.resultcount == 0) {
             return error.ZeroResultsFromAurQuery;
         }
@@ -474,7 +486,7 @@ pub const Pacman = struct {
     /// isn't an AUR package (so it's an official/repo dependency).
     fn getAurInfo(self: *Pacman, name: []const u8) !?aur.Info {
         if (self.aurInfoFor(name)) |info| return info;
-        return try aur.queryName(self.allocator, self.io, name);
+        return try aur.queryName(self.allocator, self.getRequest(), name);
     }
 
     fn aurInfoFor(self: *Pacman, name: []const u8) ?aur.Info {
@@ -563,9 +575,7 @@ pub const Pacman = struct {
         }
 
         try self.print(" downloading from: {s}{s}{s}\n", .{ color.Bold, url, color.Reset });
-        const http = try Request.init(self.allocator, self.io);
-        defer http.deinit();
-        const snapshot = try http.getRequest(url);
+        const snapshot = try self.getRequest().getRequest(url);
         try self.print(" downloaded to: {s}{s}{s}\n", .{ color.Bold, full_file_path, color.Reset });
 
         try Dir.cwd().createDirPath(self.io, full_dir);
@@ -1035,7 +1045,7 @@ pub fn search(
     try pacman.fetchLocalPackages();
 
     const installed = color.BoldForegroundCyan ++ "[Installed]" ++ color.Reset;
-    const resp = try aur.search(allocator, io, pkg, .name);
+    const resp = try aur.search(allocator, pacman.getRequest(), pkg, .name);
     for (resp.results) |result| {
         const installed_text = if (pacman.pkgs.get(result.Name) == null) "" else installed;
         const desc = result.Description orelse "(missing)";

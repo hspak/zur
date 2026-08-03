@@ -83,12 +83,10 @@ pub const Search = struct {
     URLPath: []const u8,
 };
 
-pub fn queryAll(allocator: std.mem.Allocator, io: Io, pkgs: std.StringHashMap(*pacman.Package)) !RPCRespV5 {
+pub fn queryAll(allocator: std.mem.Allocator, request: *Request, pkgs: std.StringHashMap(*pacman.Package)) !RPCRespV5 {
     const uri = try buildInfoQuery(allocator, pkgs);
 
-    const http = try Request.init(allocator, io);
-    defer http.deinit();
-    const body = try http.getRequest(uri);
+    const body = try request.getRequest(uri);
 
     const result = try std.json.parseFromSlice(RPCRespV5, allocator, body, .{ .ignore_unknown_fields = true });
 
@@ -98,7 +96,7 @@ pub fn queryAll(allocator: std.mem.Allocator, io: Io, pkgs: std.StringHashMap(*p
 /// Query the AUR for a single package's full info (including its Depends /
 /// MakeDepends lists). Returns null if `name` is not an AUR package, which is
 /// how callers distinguish AUR-only deps from official/repo deps.
-pub fn queryName(allocator: std.mem.Allocator, io: Io, name: []const u8) !?Info {
+pub fn queryName(allocator: std.mem.Allocator, request: *Request, name: []const u8) !?Info {
     var uri: std.ArrayList(u8) = .empty;
     defer uri.deinit(allocator);
 
@@ -106,16 +104,14 @@ pub fn queryName(allocator: std.mem.Allocator, io: Io, name: []const u8) !?Info 
     try uri.appendSlice(allocator, "&type=info&arg[]=");
     try uri.appendSlice(allocator, name);
 
-    const http = try Request.init(allocator, io);
-    defer http.deinit();
-    const body = try http.getRequest(uri.items);
+    const body = try request.getRequest(uri.items);
 
     const result = try std.json.parseFromSlice(RPCRespV5, allocator, body, .{ .ignore_unknown_fields = true });
     if (result.value.resultcount == 0) return null;
     return result.value.results[0];
 }
 
-pub fn search(allocator: std.mem.Allocator, io: Io, search_name: []const u8, by: SearchBy) !RPCSearchRespV5 {
+pub fn search(allocator: std.mem.Allocator, request: *Request, search_name: []const u8, by: SearchBy) !RPCSearchRespV5 {
     var uri: std.ArrayList(u8) = .empty;
     defer uri.deinit(allocator);
 
@@ -125,10 +121,7 @@ pub fn search(allocator: std.mem.Allocator, io: Io, search_name: []const u8, by:
     try uri.appendSlice(allocator, "&arg=");
     try uri.appendSlice(allocator, search_name);
 
-    const http = try Request.init(allocator, io);
-    defer http.deinit();
-
-    const body = try http.getRequest(uri.items);
+    const body = try request.getRequest(uri.items);
 
     const result = try std.json.parseFromSlice(RPCSearchRespV5, allocator, body, .{ .ignore_unknown_fields = true });
 
