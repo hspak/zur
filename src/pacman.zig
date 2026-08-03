@@ -233,33 +233,21 @@ pub const Pacman = struct {
         w.flush() catch {};
     }
 
-    // TODO: use libalpm once this issue is fixed:
-    // https://github.com/ziglang/zig/issues/1499
+    /// Enumerate installed AUR packages directly through libalpm instead of
+    /// spawning `pacman -Qm`. (This used to be blocked on ziglang/zig#1499,
+    /// translate-c not handling libalpm's bitfields; that's resolved now.)
     pub fn fetchLocalPackages(self: *Pacman) !void {
         if (self.pkgs.count() != 0) {
             return error.BadInitialPkgsState;
         }
 
-        const result = try std.process.run(self.allocator, self.io, .{
-            .argv = &[_][]const u8{ "pacman", "-Qm" },
-        });
-        defer self.allocator.free(result.stderr);
-        self.pacman_output = result.stdout;
-
-        var lines = mem.splitScalar(u8, result.stdout, '\n');
-        while (lines.next()) |line| {
-            // ignore empty lines if they exist
-            if (line.len <= 1) {
-                continue;
-            }
-
-            var line_iter = mem.splitScalar(u8, line, ' ');
-            const name = line_iter.next() orelse return error.UnknownPacmanQmOutputFormat;
-            const version = line_iter.next() orelse return error.UnknownPacmanQmOutputFormat;
-
-            const new_pkg = try Package.init(self.allocator, version);
-
-            try self.pkgs.putNoClobber(name, new_pkg);
+        const foreign = try alpm.fetchForeignPackages(self.allocator);
+        // The name/version strings are arena-owned (see init's allocator), so
+        // they stay alive for the whole run and the pkg map keys/versions may
+        // borrow them; nothing is freed individually here.
+        for (foreign) |pkg_info| {
+            const new_pkg = try Package.init(self.allocator, pkg_info.version);
+            try self.pkgs.putNoClobber(pkg_info.name, new_pkg);
         }
     }
 
