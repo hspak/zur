@@ -85,6 +85,7 @@ pub const Search = struct {
 
 pub fn queryAll(allocator: std.mem.Allocator, request: *Request, pkgs: std.StringHashMap(*pacman.Package)) !RPCRespV5 {
     const uri = try buildInfoQuery(allocator, pkgs);
+    defer allocator.free(uri);
 
     const body = try request.getRequest(uri);
 

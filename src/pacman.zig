@@ -769,7 +769,9 @@ pub const Pacman = struct {
                     try self.print("  {s} {s}\n", .{ field.key_ptr.*, field.value_ptr.*.value });
                 }
             } else {
-                const format = "\n{s}::{s} File: {s}{s}{s} {s}===================={s}\n{s}";
+                // snapshotFiles stores raw contents; indent them here for the
+                // display only, so the hot diff path stays copy-free.
+                const format = "\n{s}::{s} File: {s}{s}{s} {s}===================={s}\n";
                 try self.print(format, .{
                     color.BoldForegroundBlue,
                     color.Reset,
@@ -778,8 +780,16 @@ pub const Pacman = struct {
                     color.Reset,
                     color.BoldForegroundBlue,
                     color.Reset,
-                    pkg_file.value_ptr.*,
                 });
+                var buf: std.ArrayList(u8) = .empty;
+                defer buf.deinit(self.allocator);
+                var lines_iter = mem.splitScalar(u8, pkg_file.value_ptr.*, '\n');
+                while (lines_iter.next()) |line| {
+                    try buf.appendSlice(self.allocator, "  ");
+                    try buf.appendSlice(self.allocator, line);
+                    try buf.append(self.allocator, '\n');
+                }
+                try self.print("{s}\n", .{buf.items});
             }
         }
 
@@ -1003,21 +1013,11 @@ pub const Pacman = struct {
                 else => return err,
             };
 
-            // PKGBUILD's have their own indent logic
-            if (!mem.eql(u8, node.name, "PKGBUILD")) {
-                var buf: std.ArrayList(u8) = .empty;
-                var lines_iter = mem.splitScalar(u8, file_contents, '\n');
-                while (lines_iter.next()) |line| {
-                    try buf.appendSlice(self.allocator, "  ");
-                    try buf.appendSlice(self.allocator, line);
-                    try buf.append(self.allocator, '\n');
-                }
-                const copyName = try self.allocator.dupe(u8, node.name);
-                try files_map.putNoClobber(copyName, try buf.toOwnedSlice(self.allocator));
-            } else {
-                const copyName = try self.allocator.dupe(u8, node.name);
-                try files_map.putNoClobber(copyName, file_contents);
-            }
+            // Store raw file contents. Any indentation is applied only at
+            // display time (bareInstall), so the update/diff path never copies
+            // every snapshot file.
+            const copyName = try self.allocator.dupe(u8, node.name);
+            try files_map.putNoClobber(copyName, file_contents);
         }
         return files_map;
     }

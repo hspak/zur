@@ -78,9 +78,10 @@ pub const Alpm = struct {
 
         var node = cache;
         while (node != null) : (node = node.*.next) {
-            const pkg: *const alpm.alpm_pkg_t = @ptrCast(node.*.data);
+            // Every cache entry is a package, so the data pointer is never null.
+            const pkg: *const alpm.alpm_pkg_t = @ptrCast(node.*.data.?);
             const name = std.mem.span(alpm.alpm_pkg_get_name(@constCast(pkg)));
-            if (!self.isInSyncDbs(name)) {
+            if (!try self.isInSyncDbs(name)) {
                 try list.append(self.allocator, .{
                     .name = try self.allocator.dupe(u8, name),
                     .version = try self.allocator.dupe(u8, std.mem.span(alpm.alpm_pkg_get_version(@constCast(pkg)))),
@@ -98,11 +99,20 @@ pub const Alpm = struct {
     }
 
     /// True if `name` appears in any of the registered sync database caches.
-    fn isInSyncDbs(self: *Alpm, name: []const u8) bool {
+    ///
+    /// `alpm_db_get_pkg` expects a null-terminated C string, but `name` is a
+    /// plain slice, so a sentinel-terminated copy is handed to alpm (mirroring
+    /// isInstalled) rather than trusting that `name` points at an existing C
+    /// string.
+    fn isInSyncDbs(self: *Alpm, name: []const u8) !bool {
+        const name_cstr = try std.mem.concatWithSentinel(self.allocator, u8, &.{name}, 0);
+        defer self.allocator.free(name_cstr);
+
         var dbs = alpm.alpm_get_syncdbs(self.handle);
         while (dbs != null) : (dbs = dbs.*.next) {
-            const sync_db: *const alpm.alpm_db_t = @ptrCast(dbs.*.data);
-            if (alpm.alpm_db_get_pkg(@constCast(sync_db), @ptrCast(name.ptr)) != null) return true;
+            // Every sync-db entry is a database, so the data pointer is never null.
+            const sync_db: *const alpm.alpm_db_t = @ptrCast(dbs.*.data.?);
+            if (alpm.alpm_db_get_pkg(@constCast(sync_db), @ptrCast(name_cstr.ptr)) != null) return true;
         }
         return false;
     }
