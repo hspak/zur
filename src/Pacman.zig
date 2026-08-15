@@ -53,16 +53,8 @@ pub const Package = struct {
     aur_version: ?[]const u8 = null,
     requires_update: bool = false,
 
-    // allocator.create does not respect default values so safeguard via an init() call
-    pub fn init(allocator: Allocator, version: []const u8) !*Package {
-        const new_pkg = try allocator.create(Package);
-        new_pkg.* = .{
-            .base_name = null,
-            .version = version,
-            .aur_version = null,
-            .requires_update = false,
-        };
-        return new_pkg;
+    pub fn init(version: []const u8) Package {
+        return .{ .version = version };
     }
 };
 
@@ -266,7 +258,9 @@ pub fn fetchLocalPackages(self: *Pacman) !void {
     // they stay alive for the whole run and the pkg map keys/versions may
     // borrow them; nothing is freed individually here.
     for (foreign) |pkg_info| {
-        const new_pkg = try Package.init(self.allocator, pkg_info.version);
+        const new_pkg = try self.allocator.create(Package);
+        errdefer self.allocator.destroy(new_pkg);
+        new_pkg.* = .init(pkg_info.version);
         try self.pkgs.putNoClobber(self.allocator, pkg_info.name, new_pkg);
     }
 }
@@ -279,7 +273,9 @@ pub fn setInstallPackages(self: *Pacman, pkg_list: std.ArrayList([]const u8)) !v
     for (pkg_list.items) |pkg_name| {
         // This is the hack:
         // We're setting an impossible version to initialize the packages to install.
-        const new_pkg = try Package.init(self.allocator, "0");
+        const new_pkg = try self.allocator.create(Package);
+        errdefer self.allocator.destroy(new_pkg);
+        new_pkg.* = .init("0");
 
         try self.pkgs.putNoClobber(self.allocator, pkg_name, new_pkg);
     }
@@ -463,7 +459,9 @@ fn ensureAurDepsInstalled(self: *Pacman, pkg_name: []const u8) !void {
             // Resolve the dep's own dependencies before building it.
             try self.ensureAurDepsInstalled(dep_name);
 
-            var dep_pkg = try Package.init(self.allocator, "0");
+            const dep_pkg = try self.allocator.create(Package);
+            errdefer self.allocator.destroy(dep_pkg);
+            dep_pkg.* = .init("0");
             dep_pkg.aur_version = dep_info.version;
             // A split-package dep shares its base's snapshot; set base_name
             // (mirroring fetchRemoteAurVersions) so the right archive and

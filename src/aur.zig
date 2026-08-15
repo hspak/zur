@@ -271,8 +271,9 @@ test "buildInfoQuery - builds correct URL with packages" {
     var pkgs: std.StringHashMapUnmanaged(*Pacman.Package) = .empty;
     defer pkgs.deinit(testing.allocator);
 
-    const pkg1 = try Pacman.Package.init(testing.allocator, "1.0.0");
+    const pkg1 = try testing.allocator.create(Pacman.Package);
     defer testing.allocator.destroy(pkg1);
+    pkg1.* = .init("1.0.0");
     try pkgs.put(testing.allocator, "neovim-git", pkg1);
 
     const result = try buildInfoQuery(testing.allocator, pkgs);
@@ -287,10 +288,12 @@ test "buildInfoQuery - no memory leaks with testing allocator" {
     var pkgs: std.StringHashMapUnmanaged(*Pacman.Package) = .empty;
     defer pkgs.deinit(testing.allocator);
 
-    const pkg1 = try Pacman.Package.init(testing.allocator, "1.0");
+    const pkg1 = try testing.allocator.create(Pacman.Package);
     defer testing.allocator.destroy(pkg1);
-    const pkg2 = try Pacman.Package.init(testing.allocator, "2.0");
+    pkg1.* = .init("1.0");
+    const pkg2 = try testing.allocator.create(Pacman.Package);
     defer testing.allocator.destroy(pkg2);
+    pkg2.* = .init("2.0");
 
     try pkgs.put(testing.allocator, "pkg-a", pkg1);
     try pkgs.put(testing.allocator, "pkg-b", pkg2);

@@ -50,14 +50,8 @@ const Content = struct {
     value: []const u8,
     updated: bool = false,
 
-    // allocator.create does not respect default values so safeguard via an init() call
-    pub fn init(allocator: Allocator, value: []const u8) !*Content {
-        const new = try allocator.create(Content);
-        new.* = .{
-            .value = value,
-            .updated = false,
-        };
-        return new;
+    pub fn init(value: []const u8) Content {
+        return .{ .value = value };
     }
 
     pub fn deinit(self: *Content, allocator: Allocator) void {
@@ -338,7 +332,8 @@ const Parser = struct {
     }
 
     fn putFieldOwnedKey(self: *Parser, key: []u8, value: []u8) !void {
-        const content = try Content.init(self.allocator, value);
+        const content = try self.allocator.create(Content);
+        content.* = .init(value);
         errdefer content.deinit(self.allocator);
         // Last assignment wins (bash semantics); free previous if present
         if (self.fields.fetchRemove(key)) |old| {
@@ -430,7 +425,11 @@ pub fn comparePrev(self: *Pkgbuild, prev_pkgbuild: Pkgbuild) !void {
             curr.?.updated = true;
         } else if (prev != null and curr == null) {
             // Field was removed - create a placeholder entry to mark as updated
-            const content = try Content.init(self.allocator, try self.allocator.dupe(u8, "(removed)"));
+            const removed = try self.allocator.dupe(u8, "(removed)");
+            errdefer self.allocator.free(removed);
+            const content = try self.allocator.create(Content);
+            errdefer self.allocator.destroy(content);
+            content.* = .init(removed);
             content.updated = true;
             const key_copy = try self.allocator.dupe(u8, field);
             try self.fields.put(self.allocator, key_copy, content);
