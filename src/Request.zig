@@ -19,6 +19,7 @@ pub fn init(allocator: Allocator, io: Io) Request {
 
 pub fn deinit(self: *Request) void {
     self.client.deinit();
+    self.* = undefined;
 }
 
 pub fn getRequest(self: *Request, url: []const u8) ![]u8 {

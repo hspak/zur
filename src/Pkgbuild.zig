@@ -56,6 +56,7 @@ const Content = struct {
 
     pub fn deinit(self: *Content, allocator: Allocator) void {
         allocator.free(self.value);
+        self.* = undefined;
     }
 };
 
@@ -407,6 +408,7 @@ pub fn deinit(self: *Pkgbuild) void {
         self.allocator.destroy(entry.value_ptr.*);
     }
     self.fields.deinit(self.allocator);
+    self.* = undefined;
 }
 
 pub fn readLines(self: *Pkgbuild) !void {

@@ -22,6 +22,7 @@ pub fn init(allocator: Allocator) Args {
 
 pub fn deinit(self: *Args) void {
     self.pkgs.deinit(self.allocator);
+    self.* = undefined;
 }
 
 pub fn parse(self: *Args, process_args: std.process.Args) !void {

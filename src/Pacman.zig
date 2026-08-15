@@ -199,6 +199,7 @@ pub fn deinit(self: *Pacman) void {
     self.aur_deps_done.deinit(self.allocator);
     if (self.alpm_state) |*state| state.deinit();
     if (self.request_state) |*req| req.deinit();
+    self.* = undefined;
 }
 
 /// The shared libalpm handle, initializing it once on first use.

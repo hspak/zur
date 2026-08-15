@@ -51,6 +51,7 @@ pub fn init(allocator: std.mem.Allocator) !Alpm {
 
 pub fn deinit(self: *Alpm) void {
     _ = alpm.alpm_release(self.handle);
+    self.* = undefined;
 }
 
 /// Enumerate installed packages that are not present in any registered sync
