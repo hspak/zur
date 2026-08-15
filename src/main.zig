@@ -1,7 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Args = @import("argparse.zig").Args;
+const Args = @import("Args.zig");
 const search = @import("pacman.zig").search;
 const Pacman = @import("pacman.zig").Pacman;
 
