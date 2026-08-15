@@ -1,6 +1,7 @@
 //! Long-lived libalpm handle for local-db and sync-repo queries.
 
 const std = @import("std");
+const log = std.log.scoped(.alpm);
 const alpm = @cImport({
     @cInclude("alpm.h");
 });
@@ -48,6 +49,7 @@ pub fn init(allocator: std.mem.Allocator) Error!Alpm {
     }
 
     const local_db = alpm.alpm_get_localdb(handle) orelse return error.AlpmNoLocalDb;
+    log.debug("initialized libalpm", .{});
 
     return .{
         .allocator = allocator,

@@ -3,6 +3,7 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
+const log = std.log.scoped(.args);
 
 const Args = @This();
 
@@ -61,4 +62,5 @@ pub fn parse(self: *Args, process_args: std.process.Args) Error!void {
     } else {
         self.action = .print_help;
     }
+    log.debug("action={t} pkgs={d}", .{ self.action, self.pkgs.items.len });
 }

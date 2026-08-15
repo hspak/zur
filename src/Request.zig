@@ -3,6 +3,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const log = std.log.scoped(.request);
 
 const Request = @This();
 
@@ -34,6 +35,7 @@ pub fn getRequest(self: *Request, url: []const u8) Error![]u8 {
     var body: std.Io.Writer.Allocating = .init(self.allocator);
     errdefer body.deinit();
 
+    log.debug("GET {s}", .{url});
     _ = try self.client.fetch(.{
         .location = .{ .url = url },
         .method = .GET,

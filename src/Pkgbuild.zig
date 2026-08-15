@@ -5,6 +5,7 @@ const std = @import("std");
 const testing = std.testing;
 const mem = std.mem;
 const Allocator = mem.Allocator;
+const log = std.log.scoped(.pkgbuild);
 
 // Supported forms: name=value, name=( ... ), name() { ... }, package_foo() { ... }.
 // $var/${var}, command substitution, and conditionals are left as literal text.
@@ -412,6 +413,7 @@ pub fn readLines(self: *Pkgbuild) Error!void {
         .fields = &self.fields,
     };
     try parser.parse();
+    log.debug("parsed {d} fields", .{self.fields.count()});
 }
 
 /// Mark relevant fields as `updated` when they differ from `prev_pkgbuild`.

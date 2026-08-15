@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const Io = std.Io;
+const log = std.log.scoped(.main);
 
 const Args = @import("Args.zig");
 const Pacman = @import("Pacman.zig");
@@ -22,6 +23,7 @@ pub fn main(init: std.process.Init) !void {
     var args = Args.init(allocator);
     defer args.deinit();
     try args.parse(init.minimal.args);
+    log.debug("starting action={t}", .{args.action});
 
     var stderr_buffer: [1024]u8 = undefined;
     var stderr_writer = Io.File.stderr().writer(io, &stderr_buffer);

@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const Io = std.Io;
+const log = std.log.scoped(.aur);
 
 const Request = @import("Request.zig");
 const Pacman = @import("Pacman.zig");
@@ -225,6 +226,7 @@ pub fn queryAll(allocator: std.mem.Allocator, request: *Request, pkgs: std.Strin
         .ignore_unknown_fields = true,
         .allocate = .alloc_always,
     });
+    log.debug("info query returned {d} results", .{json_resp.resultcount});
 
     return try mapInfoResp(allocator, json_resp);
 }

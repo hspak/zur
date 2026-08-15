@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const Io = std.Io;
+const log = std.log.scoped(.pacman);
 const mem = std.mem;
 const Allocator = mem.Allocator;
 const Dir = Io.Dir;
@@ -189,6 +190,7 @@ pub fn init(allocator: Allocator, io: Io, environ_map: *const std.process.Enviro
     const pkg_dir = try Dir.path.join(allocator, &[_][]const u8{ zur_path, ".pkg" });
     errdefer allocator.free(pkg_dir);
     try Dir.cwd().createDirPath(io, pkg_dir);
+    log.debug("zur_path={s}", .{zur_path});
 
     return .{
         .allocator = allocator,
