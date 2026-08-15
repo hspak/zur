@@ -204,20 +204,33 @@ fn mapSearchResp(allocator: std.mem.Allocator, json_resp: RPCResp(SearchJson)) !
     };
 }
 
+/// Fetch AUR info for every key in `pkgs`.
+///
+/// Strings inside the returned value are allocated from `allocator` (leaky
+/// JSON parse). The caller owns `results` and must free that slice; the
+/// string graph is freed with `allocator` (use an arena, or accept the leak
+/// until the allocator is torn down).
 pub fn queryAll(allocator: std.mem.Allocator, request: *Request, pkgs: std.StringHashMapUnmanaged(*Pacman.Package)) !RPCRespV5 {
     const uri = try buildInfoQuery(allocator, pkgs);
     defer allocator.free(uri);
 
     const body = try request.getRequest(uri);
+    defer allocator.free(body);
 
-    const result = try std.json.parseFromSlice(RPCResp(InfoJson), allocator, body, .{ .ignore_unknown_fields = true });
+    const json_resp = try std.json.parseFromSliceLeaky(RPCResp(InfoJson), allocator, body, .{
+        .ignore_unknown_fields = true,
+        .allocate = .alloc_always,
+    });
 
-    return try mapInfoResp(allocator, result.value);
+    return try mapInfoResp(allocator, json_resp);
 }
 
 /// Query the AUR for a single package's full info (including its Depends /
 /// MakeDepends lists). Returns null if `name` is not an AUR package, which is
 /// how callers distinguish AUR-only deps from official/repo deps.
+///
+/// Strings inside the returned `Info` are allocated from `allocator` and are
+/// not freed here (same lifetime as `queryAll`).
 pub fn queryName(allocator: std.mem.Allocator, request: *Request, name: []const u8) !?Info {
     var uri: std.ArrayList(u8) = .empty;
     defer uri.deinit(allocator);
@@ -227,12 +240,19 @@ pub fn queryName(allocator: std.mem.Allocator, request: *Request, name: []const 
     try uri.appendSlice(allocator, name);
 
     const body = try request.getRequest(uri.items);
+    defer allocator.free(body);
 
-    const result = try std.json.parseFromSlice(RPCResp(InfoJson), allocator, body, .{ .ignore_unknown_fields = true });
-    if (result.value.resultcount == 0) return null;
-    return infoFromJson(result.value.results[0]);
+    const json_resp = try std.json.parseFromSliceLeaky(RPCResp(InfoJson), allocator, body, .{
+        .ignore_unknown_fields = true,
+        .allocate = .alloc_always,
+    });
+    if (json_resp.resultcount == 0) return null;
+    return infoFromJson(json_resp.results[0]);
 }
 
+/// Search the AUR. The caller owns `results` and must free that slice.
+/// Strings inside each hit are allocated from `allocator` (same lifetime
+/// as `queryAll`).
 pub fn search(allocator: std.mem.Allocator, request: *Request, search_name: []const u8, by: SearchBy) !RPCSearchRespV5 {
     var uri: std.ArrayList(u8) = .empty;
     defer uri.deinit(allocator);
@@ -244,10 +264,14 @@ pub fn search(allocator: std.mem.Allocator, request: *Request, search_name: []co
     try uri.appendSlice(allocator, search_name);
 
     const body = try request.getRequest(uri.items);
+    defer allocator.free(body);
 
-    const result = try std.json.parseFromSlice(RPCResp(SearchJson), allocator, body, .{ .ignore_unknown_fields = true });
+    const json_resp = try std.json.parseFromSliceLeaky(RPCResp(SearchJson), allocator, body, .{
+        .ignore_unknown_fields = true,
+        .allocate = .alloc_always,
+    });
 
-    return try mapSearchResp(allocator, result.value);
+    return try mapSearchResp(allocator, json_resp);
 }
 
 fn buildInfoQuery(allocator: std.mem.Allocator, pkgs: std.StringHashMapUnmanaged(*Pacman.Package)) ![]const u8 {

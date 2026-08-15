@@ -191,6 +191,7 @@ pub fn init(allocator: Allocator, io: Io, environ_map: *const std.process.Enviro
 pub fn deinit(self: *Pacman) void {
     self.flushStdout();
     if (self.pacman_output) |out| self.allocator.free(out);
+    if (self.aur_resp) |resp| self.allocator.free(resp.results);
     // pkg keys are borrowed slices (into pacman_output or argv), so only
     // the Package structs themselves are owned here.
     var it = self.pkgs.iterator();
@@ -573,6 +574,7 @@ fn downloadAndExtractPackage(self: *Pacman, pkg_name: []const u8, pkg: *Package)
 
     try self.print(" downloading from: {s}{s}{s}\n", .{ color.bold, url, color.reset });
     const snapshot = try self.getRequest().getRequest(url);
+    defer self.allocator.free(snapshot);
     try self.print(" downloaded to: {s}{s}{s}\n", .{ color.bold, full_file_path, color.reset });
 
     try Dir.cwd().createDirPath(self.io, full_dir);
@@ -1060,6 +1062,7 @@ pub fn search(
 
     const installed = color.bold_foreground_cyan ++ "[Installed]" ++ color.reset;
     const resp = try aur.search(allocator, pacman.getRequest(), pkg, .name);
+    defer allocator.free(resp.results);
     for (resp.results) |result| {
         const installed_text = if (pacman.pkgs.get(result.name) == null) "" else installed;
         const desc = result.description orelse "(missing)";

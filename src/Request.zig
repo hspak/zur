@@ -22,6 +22,8 @@ pub fn deinit(self: *Request) void {
     self.* = undefined;
 }
 
+/// GET `url` and return the response body. The caller owns the slice and
+/// must free it with `self.allocator`.
 pub fn getRequest(self: *Request, url: []const u8) ![]u8 {
     var body: std.Io.Writer.Allocating = .init(self.allocator);
     errdefer body.deinit();
