@@ -15,7 +15,7 @@ const c = @cImport({
     @cInclude("unistd.h");
 });
 
-const alpm = @import("alpm.zig");
+const Alpm = @import("Alpm.zig");
 const aur = @import("aur.zig");
 const color = @import("color.zig");
 const Pkgbuild = @import("Pkgbuild.zig");
@@ -166,7 +166,7 @@ pub const Pacman = struct {
     aur_deps_done: std.StringHashMap(void),
     /// Lazily-initialized libalpm handle, reused for every local-db query so
     /// alpm is only initialized once per run (see getAlpm).
-    alpm_state: ?alpm.Alpm = null,
+    alpm_state: ?Alpm = null,
     /// Persisted HTTP client, reused across all AUR queries so connections and
     /// TLS sessions are kept alive (see getRequest).
     request_state: ?Request = null,
@@ -214,9 +214,9 @@ pub const Pacman = struct {
     }
 
     /// The shared libalpm handle, initializing it once on first use.
-    fn getAlpm(self: *Pacman) !*alpm.Alpm {
+    fn getAlpm(self: *Pacman) !*Alpm {
         if (self.alpm_state == null) {
-            self.alpm_state = try alpm.Alpm.init(self.allocator);
+            self.alpm_state = try Alpm.init(self.allocator);
         }
         return &self.alpm_state.?;
     }
@@ -327,7 +327,7 @@ pub const Pacman = struct {
             }
 
             const remote_version = pkg.value_ptr.*.aur_version.?;
-            const remote_newer = try alpm.is_newer_than(self.allocator, remote_version, local_version);
+            const remote_newer = try Alpm.is_newer_than(self.allocator, remote_version, local_version);
             if (shouldUpdate(pkg.key_ptr.*, local_version, remote_version, remote_newer)) {
                 pkg.value_ptr.*.requires_update = true;
                 self.updates += 1;

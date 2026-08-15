@@ -1,5 +1,5 @@
 const pkgbuild = @import("Pkgbuild.zig");
-const alpm = @import("alpm.zig");
+const alpm = @import("Alpm.zig");
 const args = @import("Args.zig");
 const aur = @import("aur.zig");
 const pacman = @import("pacman.zig");
