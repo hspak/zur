@@ -766,13 +766,28 @@ fn printDiff(self: *Pacman, name: []const u8, old_content: []const u8, new_conte
     }
 }
 
+fn printBarePkgbuildFields(allocator: Allocator, writer: *Io.Writer, file_contents: []const u8) !void {
+    var pkgbuild = Pkgbuild.init(allocator, file_contents);
+    defer pkgbuild.deinit();
+    try pkgbuild.readLines();
+    try pkgbuild.indentValues(2);
+
+    if (pkgbuild.fields.get("source")) |source| {
+        try writer.print("  source {s}\n\n", .{source.value});
+    }
+
+    var fields_iter = pkgbuild.fields.iterator();
+    while (fields_iter.next()) |field| {
+        const name = field.key_ptr.*;
+        if (!mem.eql(u8, name, "install") and !mem.endsWith(u8, name, "()")) continue;
+        try writer.print("  {s} {s}\n", .{ field.key_ptr.*, field.value_ptr.*.value });
+    }
+}
+
 fn bareInstall(self: *Pacman, pkg_name: []const u8, pkg_files: std.StringHashMapUnmanaged([]u8), update_version: []const u8) !void {
     var pkg_files_iter = pkg_files.iterator();
     while (pkg_files_iter.next()) |pkg_file| {
         if (mem.eql(u8, pkg_file.key_ptr.*, "PKGBUILD")) {
-            var pkgbuild = Pkgbuild.init(self.allocator, pkg_file.value_ptr.*);
-            defer pkgbuild.deinit();
-            try pkgbuild.readLines();
             const format = "\n{s}::{s} File: {s}PKGBUILD{s} {s}===================={s}\n";
             try self.print(format, .{
                 color.bold_foreground_blue,
@@ -783,12 +798,7 @@ fn bareInstall(self: *Pacman, pkg_name: []const u8, pkg_files: std.StringHashMap
                 color.reset,
             });
 
-            try pkgbuild.indentValues(2);
-            var fields_iter = pkgbuild.fields.iterator();
-            while (fields_iter.next()) |field| {
-                if (!mem.endsWith(u8, field.key_ptr.*, "()")) continue;
-                try self.print("  {s} {s}\n", .{ field.key_ptr.*, field.value_ptr.*.value });
-            }
+            try printBarePkgbuildFields(self.allocator, self.stdout(), pkg_file.value_ptr.*);
         } else {
             // snapshotFiles stores raw contents; indent them here for the
             // display only, so the hot diff path stays copy-free.
@@ -1170,6 +1180,28 @@ test "artifactNameForPkg - matches only full leading components" {
     try testing.expect(!artifactNameForPkg("foo", "foobar"));
     try testing.expect(artifactNameForPkg("neovim-git-r100.abc-x86_64.pkg.tar.zst", "neovim-git"));
     try testing.expect(!artifactNameForPkg("foo-lib-1.0-1-x86_64.pkg.tar.zst", "foo-l"));
+}
+
+test "printBarePkgbuildFields includes reviewed assignments and functions" {
+    const testing = std.testing;
+    const pkgbuild_contents =
+        \\pkgname=testpkg
+        \\source=('https://example.com/testpkg.tar.gz')
+        \\install=testpkg.install
+        \\install() {
+        \\  install -Dm755 testpkg "$pkgdir/usr/bin/testpkg"
+        \\}
+    ;
+
+    var output_buffer: [1024]u8 = undefined;
+    var writer = Io.Writer.fixed(&output_buffer);
+    try printBarePkgbuildFields(testing.allocator, &writer, pkgbuild_contents);
+
+    const output = writer.buffered();
+    try testing.expect(mem.startsWith(u8, output, "  source 'https://example.com/testpkg.tar.gz'\n\n"));
+    try testing.expect(mem.indexOf(u8, output, "install testpkg.install") != null);
+    try testing.expect(mem.indexOf(u8, output, "install()") != null);
+    try testing.expect(mem.indexOf(u8, output, "pkgname") == null);
 }
 
 test "extractTarGz - strips the top-level snapshot directory" {
