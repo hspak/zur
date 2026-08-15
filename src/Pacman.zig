@@ -613,8 +613,12 @@ fn extractPackage(self: *Pacman, snapshot_path: []const u8, pkg_name: []const u8
 }
 
 fn compareUpdateAndInstall(self: *Pacman, pkg_name: []const u8, pkg: *Package) !void {
-    var old_files = try self.snapshotFiles(pkg_name, pkg.version);
+    // pkg.version = 0 is the hack to forcibly install manually specified
+    // packages. This causes us to read the same dir twice.
+    const empty_map: std.StringHashMapUnmanaged([]u8) = .empty;
+    var old_files = if (!std.mem.eql(u8, pkg.version, "0")) try self.snapshotFiles(pkg_name, pkg.version) else empty_map;
     defer deinitSnapshotFiles(self.allocator, &old_files);
+
     var new_files = try self.snapshotFiles(pkg_name, pkg.aur_version.?);
     defer deinitSnapshotFiles(self.allocator, &new_files);
 
@@ -625,7 +629,7 @@ fn compareUpdateAndInstall(self: *Pacman, pkg_name: []const u8, pkg: *Package) !
     if (old_files.count() == 0 or new_files.count() == 0 or
         old_files.get("PKGBUILD") == null or new_files.get("PKGBUILD") == null)
     {
-        return self.bareInstall(pkg_name, pkg);
+        return self.bareInstall(pkg_name, new_files, pkg.aur_version.?);
     }
 
     var old_pkgbuild = Pkgbuild.init(self.allocator, old_files.get("PKGBUILD").?);
@@ -690,7 +694,7 @@ fn compareUpdateAndInstall(self: *Pacman, pkg_name: []const u8, pkg: *Package) !
     } else {
         try self.print("{s}::{s} No meaningful diff's found\n", .{ color.foreground_blue, color.reset });
     }
-    try self.install(pkg_name, pkg);
+    try self.install(pkg_name, pkg.aur_version.?);
 }
 
 // Print a minimal line-based diff between two file contents using an LCS
@@ -762,9 +766,7 @@ fn printDiff(self: *Pacman, name: []const u8, old_content: []const u8, new_conte
     }
 }
 
-fn bareInstall(self: *Pacman, pkg_name: []const u8, pkg: *Package) !void {
-    var pkg_files = try self.snapshotFiles(pkg_name, pkg.aur_version.?);
-    defer deinitSnapshotFiles(self.allocator, &pkg_files);
+fn bareInstall(self: *Pacman, pkg_name: []const u8, pkg_files: std.StringHashMapUnmanaged([]u8), update_version: []const u8) !void {
     var pkg_files_iter = pkg_files.iterator();
     while (pkg_files_iter.next()) |pkg_file| {
         if (mem.eql(u8, pkg_file.key_ptr.*, "PKGBUILD")) {
@@ -815,14 +817,14 @@ fn bareInstall(self: *Pacman, pkg_name: []const u8, pkg: *Package) !void {
     try self.print("Install? [Y/n]: ", .{});
     const input = try self.stdinReadByte();
     if (input == 'y' or input == 'Y') {
-        try self.install(pkg_name, pkg);
+        try self.install(pkg_name, update_version);
     } else {
         try self.print("\n", .{});
     }
 }
 
-fn install(self: *Pacman, pkg_name: []const u8, pkg: *Package) !void {
-    const pkg_dir = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg.aur_version.? });
+fn install(self: *Pacman, pkg_name: []const u8, update_version: []const u8) !void {
+    const pkg_dir = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, update_version });
     const full_pkg_dir = try Dir.path.join(self.allocator, &[_][]const u8{ self.zur_path, pkg_dir });
     try std.process.setCurrentPath(self.io, full_pkg_dir);
 
@@ -830,7 +832,7 @@ fn install(self: *Pacman, pkg_name: []const u8, pkg: *Package) !void {
     try self.execCommand(argv);
 
     try self.removeStaleArtifacts(pkg_name, self.zur_pkg_dir);
-    try self.moveBuiltPackages(pkg_name, pkg);
+    try self.moveBuiltPackages(pkg_name, update_version);
 }
 
 fn installExistingPackage(self: *Pacman, full_pkg_name: []const u8) !void {
@@ -907,8 +909,8 @@ fn execCommand(self: *Pacman, argv: []const []const u8) !void {
     }
 }
 
-fn moveBuiltPackages(self: *Pacman, pkg_name: []const u8, pkg: *Package) !void {
-    const pkg_dir = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg.aur_version.? });
+fn moveBuiltPackages(self: *Pacman, pkg_name: []const u8, update_version: []const u8) !void {
+    const pkg_dir = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, update_version });
     const full_pkg_dir = try Dir.path.join(self.allocator, &[_][]const u8{ self.zur_path, pkg_dir });
 
     var dir = Dir.openDirAbsolute(self.io, full_pkg_dir, .{ .iterate = true, .access_sub_paths = false, .follow_symlinks = false }) catch |err| switch (err) {

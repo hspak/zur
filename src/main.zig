@@ -80,8 +80,8 @@ fn installOrUpdate(
     if (pkg_list.items.len == 0) {
         try pacman.fetchLocalPackages();
     } else {
-        // This is a slight hack to have the install process share
-        // the same code path as the update process.
+        // TODO: This is a slight hack to have the install process share
+        // the same code path as the update process. Remove hack.
         try pacman.setInstallPackages(pkg_list);
     }
     try pacman.fetchRemoteAurVersions();
