@@ -104,7 +104,7 @@ fn isInSyncDbs(self: *Alpm, name: []const u8) !bool {
     return false;
 }
 
-pub fn is_newer_than(allocator: std.mem.Allocator, ver_a: []const u8, ver_b: []const u8) !bool {
+pub fn isNewerThan(allocator: std.mem.Allocator, ver_a: []const u8, ver_b: []const u8) !bool {
     const ver_a_sentinel = try std.mem.concatWithSentinel(allocator, u8, &.{ver_a}, 0);
     defer allocator.free(ver_a_sentinel);
     const ver_b_sentinel = try std.mem.concatWithSentinel(allocator, u8, &.{ver_b}, 0);
@@ -122,9 +122,9 @@ pub fn is_newer_than(allocator: std.mem.Allocator, ver_a: []const u8, ver_b: []c
 
 const testing = std.testing;
 
-test "is_newer_than - basic version comparison" {
+test "isNewerThan - basic version comparison" {
     // Test that newer version is detected
-    try testing.expect(try is_newer_than(testing.allocator, "2.0.0", "1.0.0"));
-    try testing.expect(!try is_newer_than(testing.allocator, "1.0.0", "2.0.0"));
-    try testing.expect(!try is_newer_than(testing.allocator, "1.0.0", "1.0.0"));
+    try testing.expect(try isNewerThan(testing.allocator, "2.0.0", "1.0.0"));
+    try testing.expect(!try isNewerThan(testing.allocator, "1.0.0", "2.0.0"));
+    try testing.expect(!try isNewerThan(testing.allocator, "1.0.0", "1.0.0"));
 }

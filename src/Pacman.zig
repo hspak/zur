@@ -328,7 +328,7 @@ pub fn compareVersions(self: *Pacman) !void {
         }
 
         const remote_version = pkg.value_ptr.*.aur_version.?;
-        const remote_newer = try Alpm.is_newer_than(self.allocator, remote_version, local_version);
+        const remote_newer = try Alpm.isNewerThan(self.allocator, remote_version, local_version);
         if (shouldUpdate(pkg.key_ptr.*, local_version, remote_version, remote_newer)) {
             pkg.value_ptr.*.requires_update = true;
             self.updates += 1;
