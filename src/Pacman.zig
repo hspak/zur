@@ -23,6 +23,30 @@ const Request = @import("Request.zig");
 
 const Pacman = @This();
 
+pub const Error =
+    Allocator.Error ||
+    Alpm.Error ||
+    aur.Error ||
+    Pkgbuild.Error ||
+    Dir.OpenError ||
+    Dir.CreateDirPathError ||
+    Dir.DeleteTreeError ||
+    Dir.DeleteFileError ||
+    Dir.ReadFileAllocError ||
+    Dir.WriteFileError ||
+    Dir.RenameError ||
+    File.OpenError ||
+    File.StatError ||
+    error{
+        NoHomeEnvVarFound,
+        BadInitialPkgsState,
+        ZeroResultsFromAurQuery,
+        NonzeroStatus,
+        EmptyDependency,
+        VariableDependency,
+        TarCreate,
+    };
+
 allocator: Allocator,
 io: Io,
 environ_map: *const std.process.Environ.Map,
@@ -169,7 +193,7 @@ fn extractTarGz(io: Io, dest_dir: Io.Dir, archive_name: []const u8) !void {
     try dest_dir.deleteFile(io, archive_name);
 }
 
-pub fn init(allocator: Allocator, io: Io, environ_map: *const std.process.Environ.Map) !Pacman {
+pub fn init(allocator: Allocator, io: Io, environ_map: *const std.process.Environ.Map) Error!Pacman {
     const home = environ_map.get("HOME") orelse return error.NoHomeEnvVarFound;
     const zur_dir = ".zur";
 
@@ -252,7 +276,7 @@ fn flushStdout(self: *Pacman) void {
 /// Enumerate installed AUR packages directly through libalpm instead of
 /// spawning `pacman -Qm`. (This used to be blocked on ziglang/zig#1499,
 /// translate-c not handling libalpm's bitfields; that's resolved now.)
-pub fn fetchLocalPackages(self: *Pacman) !void {
+pub fn fetchLocalPackages(self: *Pacman) Error!void {
     if (self.pkgs.count() != 0) {
         return error.BadInitialPkgsState;
     }
@@ -269,7 +293,7 @@ pub fn fetchLocalPackages(self: *Pacman) !void {
     }
 }
 
-pub fn setInstallPackages(self: *Pacman, pkg_list: std.ArrayList([]const u8)) !void {
+pub fn setInstallPackages(self: *Pacman, pkg_list: std.ArrayList([]const u8)) Error!void {
     if (self.pkgs.count() != 0) {
         return error.BadInitialPkgsState;
     }
@@ -285,7 +309,7 @@ pub fn setInstallPackages(self: *Pacman, pkg_list: std.ArrayList([]const u8)) !v
     }
 }
 
-pub fn fetchRemoteAurVersions(self: *Pacman) !void {
+pub fn fetchRemoteAurVersions(self: *Pacman) Error!void {
     self.aur_resp = try aur.queryAll(self.allocator, self.getRequest(), self.pkgs);
     if (self.aur_resp.?.resultcount == 0) {
         return error.ZeroResultsFromAurQuery;
@@ -306,7 +330,7 @@ pub fn fetchRemoteAurVersions(self: *Pacman) !void {
     }
 }
 
-pub fn compareVersions(self: *Pacman) !void {
+pub fn compareVersions(self: *Pacman) Error!void {
     var pkgs_iter = self.pkgs.iterator();
     while (pkgs_iter.next()) |pkg| {
         const local_version = pkg.value_ptr.*.version;
@@ -342,7 +366,7 @@ pub fn compareVersions(self: *Pacman) !void {
     }
 }
 
-pub fn processOutOfDate(self: *Pacman) !void {
+pub fn processOutOfDate(self: *Pacman) Error!void {
     if (self.updates == 0) {
         try self.print("{s}::{s} {s}All AUR packages are up-to-date.{s}\n", .{
             color.bold_foreground_blue,
@@ -1055,7 +1079,7 @@ pub fn search(
     io: Io,
     environ_map: *const std.process.Environ.Map,
     pkg: []const u8,
-) !void {
+) Error!void {
     var pacman = try Pacman.init(allocator, io, environ_map);
     defer pacman.deinit();
     try pacman.fetchLocalPackages();

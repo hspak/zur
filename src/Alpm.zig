@@ -8,6 +8,13 @@ const alpm = @cImport({
 /// query. The sync repos are registered once here.
 const Alpm = @This();
 
+pub const Error = std.mem.Allocator.Error || error{
+    AlpmNoHandle,
+    AlpmNoSyncDb,
+    AlpmNoLocalDb,
+    AlpmNoCache,
+};
+
 allocator: std.mem.Allocator,
 handle: *alpm.alpm_handle_t,
 local_db: *alpm.alpm_db_t,
@@ -25,7 +32,7 @@ const repos = [_][*:0]const u8{ "core", "extra", "multilib" };
 
 const sig_level = alpm.ALPM_SIG_PACKAGE_OPTIONAL | alpm.ALPM_SIG_DATABASE_OPTIONAL;
 
-pub fn init(allocator: std.mem.Allocator) !Alpm {
+pub fn init(allocator: std.mem.Allocator) Error!Alpm {
     var err: alpm.alpm_errno_t = 0;
     const handle = alpm.alpm_initialize("/", "/var/lib/pacman/", &err) orelse {
         return error.AlpmNoHandle;
@@ -58,7 +65,7 @@ pub fn deinit(self: *Alpm) void {
 /// repository ("foreign" / AUR packages, i.e. what `pacman -Qm` lists).
 /// The returned name/version strings are duped into `self.allocator`; the
 /// caller owns the returned slice.
-pub fn fetchForeignPackages(self: *Alpm) ![]ForeignPackage {
+pub fn fetchForeignPackages(self: *Alpm) Error![]ForeignPackage {
     const cache = alpm.alpm_db_get_pkgcache(self.local_db) orelse return error.AlpmNoCache;
 
     var list: std.ArrayList(ForeignPackage) = .empty;
@@ -90,7 +97,7 @@ pub fn fetchForeignPackages(self: *Alpm) ![]ForeignPackage {
 }
 
 /// True if a package `name` is installed in the local database.
-pub fn isInstalled(self: *Alpm, name: []const u8) !bool {
+pub fn isInstalled(self: *Alpm, name: []const u8) Error!bool {
     const name_cstr = try std.mem.concatWithSentinel(self.allocator, u8, &.{name}, 0);
     defer self.allocator.free(name_cstr);
     return alpm.alpm_db_get_pkg(self.local_db, @ptrCast(name_cstr.ptr)) != null;
@@ -115,7 +122,7 @@ fn isInSyncDbs(self: *Alpm, name: []const u8) !bool {
     return false;
 }
 
-pub fn isNewerThan(allocator: std.mem.Allocator, ver_a: []const u8, ver_b: []const u8) !bool {
+pub fn isNewerThan(allocator: std.mem.Allocator, ver_a: []const u8, ver_b: []const u8) Error!bool {
     const ver_a_sentinel = try std.mem.concatWithSentinel(allocator, u8, &.{ver_a}, 0);
     defer allocator.free(ver_a_sentinel);
     const ver_b_sentinel = try std.mem.concatWithSentinel(allocator, u8, &.{ver_b}, 0);

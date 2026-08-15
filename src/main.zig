@@ -9,8 +9,7 @@ const build_version = @import("build_options").version;
 
 pub const log_level: std.log.Level = .info;
 
-const MainError = error{
-    ZeroResultsFromAurQuery,
+const MainError = Pacman.Error || error{
     CouldntResolveHost,
 };
 
@@ -69,7 +68,7 @@ fn installOrUpdate(
     io: Io,
     environ_map: *const std.process.Environ.Map,
     pkg_list: std.ArrayList([]const u8),
-) !void {
+) MainError!void {
     var pacman = try Pacman.init(allocator, io, environ_map);
     defer pacman.deinit();
 

@@ -4,6 +4,8 @@ const Io = std.Io;
 const Request = @import("Request.zig");
 const Pacman = @import("Pacman.zig");
 
+pub const Error = std.mem.Allocator.Error || Request.Error || std.json.ParseError(std.json.Scanner);
+
 const host = "https://aur.archlinux.org/rpc/?v=5";
 
 pub const snapshot = "https://aur.archlinux.org/cgit/aur.git/snapshot";
@@ -210,7 +212,7 @@ fn mapSearchResp(allocator: std.mem.Allocator, json_resp: RPCResp(SearchJson)) !
 /// JSON parse). The caller owns `results` and must free that slice; the
 /// string graph is freed with `allocator` (use an arena, or accept the leak
 /// until the allocator is torn down).
-pub fn queryAll(allocator: std.mem.Allocator, request: *Request, pkgs: std.StringHashMapUnmanaged(*Pacman.Package)) !RPCRespV5 {
+pub fn queryAll(allocator: std.mem.Allocator, request: *Request, pkgs: std.StringHashMapUnmanaged(*Pacman.Package)) Error!RPCRespV5 {
     const uri = try buildInfoQuery(allocator, pkgs);
     defer allocator.free(uri);
 
@@ -231,7 +233,7 @@ pub fn queryAll(allocator: std.mem.Allocator, request: *Request, pkgs: std.Strin
 ///
 /// Strings inside the returned `Info` are allocated from `allocator` and are
 /// not freed here (same lifetime as `queryAll`).
-pub fn queryName(allocator: std.mem.Allocator, request: *Request, name: []const u8) !?Info {
+pub fn queryName(allocator: std.mem.Allocator, request: *Request, name: []const u8) Error!?Info {
     var uri: std.ArrayList(u8) = .empty;
     defer uri.deinit(allocator);
 
@@ -253,7 +255,7 @@ pub fn queryName(allocator: std.mem.Allocator, request: *Request, name: []const 
 /// Search the AUR. The caller owns `results` and must free that slice.
 /// Strings inside each hit are allocated from `allocator` (same lifetime
 /// as `queryAll`).
-pub fn search(allocator: std.mem.Allocator, request: *Request, search_name: []const u8, by: SearchBy) !RPCSearchRespV5 {
+pub fn search(allocator: std.mem.Allocator, request: *Request, search_name: []const u8, by: SearchBy) Error!RPCSearchRespV5 {
     var uri: std.ArrayList(u8) = .empty;
     defer uri.deinit(allocator);
 

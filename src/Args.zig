@@ -4,6 +4,8 @@ const Allocator = mem.Allocator;
 
 const Args = @This();
 
+pub const Error = Allocator.Error;
+
 pkgs: std.ArrayList([]const u8) = .empty,
 allocator: Allocator,
 action: Action = .unset,
@@ -25,7 +27,7 @@ pub fn deinit(self: *Args) void {
     self.* = undefined;
 }
 
-pub fn parse(self: *Args, process_args: std.process.Args) !void {
+pub fn parse(self: *Args, process_args: std.process.Args) Error!void {
     var args_iter = process_args.iterate();
     _ = args_iter.next(); // skip argv[0]
     const action = args_iter.next() orelse "";

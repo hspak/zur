@@ -32,6 +32,12 @@ const Allocator = mem.Allocator;
 /// Scalar values include their surrounding quotes when present.
 const Pkgbuild = @This();
 
+pub const Error = Allocator.Error || error{
+    MalformedPkgbuildFunction,
+    UnterminatedArray,
+    UnterminatedFunction,
+};
+
 allocator: Allocator,
 file_contents: []const u8,
 fields: std.StringHashMapUnmanaged(*Content) = .empty,
@@ -415,7 +421,7 @@ pub fn deinit(self: *Pkgbuild) void {
     self.* = undefined;
 }
 
-pub fn readLines(self: *Pkgbuild) !void {
+pub fn readLines(self: *Pkgbuild) Error!void {
     var parser = Parser{
         .src = self.file_contents,
         .pos = 0,
@@ -425,7 +431,7 @@ pub fn readLines(self: *Pkgbuild) !void {
     try parser.parse();
 }
 
-pub fn comparePrev(self: *Pkgbuild, prev_pkgbuild: Pkgbuild) !void {
+pub fn comparePrev(self: *Pkgbuild, prev_pkgbuild: Pkgbuild) Error!void {
     for (relevant_fields) |field| {
         const prev = prev_pkgbuild.fields.get(field);
         const curr = self.fields.get(field);
@@ -449,7 +455,7 @@ pub fn comparePrev(self: *Pkgbuild, prev_pkgbuild: Pkgbuild) !void {
     }
 }
 
-pub fn indentValues(self: *Pkgbuild, spaces_count: usize) !void {
+pub fn indentValues(self: *Pkgbuild, spaces_count: usize) Error!void {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(self.allocator);
 
