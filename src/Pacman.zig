@@ -540,7 +540,10 @@ fn findExistingPackage(self: *Pacman, pkg_name: []const u8, version: []const u8)
         }
         const f = Dir.openFileAbsolute(self.io, full_path, .{}) catch |err| switch (err) {
             error.FileNotFound => null,
-            else => return err,
+            else => {
+                @branchHint(.cold);
+                return err;
+            },
         };
         if (f) |file| {
             file.close(self.io);
@@ -904,9 +907,13 @@ fn execCommand(self: *Pacman, argv: []const []const u8) !void {
 
     switch (term) {
         .exited => |code| if (code != 0) {
+            @branchHint(.cold);
             return error.NonzeroStatus;
         },
-        .signal, .stopped, .unknown => return error.NonzeroStatus,
+        .signal, .stopped, .unknown => {
+            @branchHint(.cold);
+            return error.NonzeroStatus;
+        },
     }
 }
 
@@ -1037,6 +1044,7 @@ fn snapshotFiles(self: *Pacman, pkg_name: []const u8, pkg_version: []const u8) !
 
         const file_contents = dir.readFileAlloc(self.io, node.name, self.allocator, .limited(max_snapshot_diff_bytes)) catch |err| switch (err) {
             error.StreamTooLong => {
+                @branchHint(.cold);
                 try self.print("  {s}->{s} skipping diff for large file: {s}{s}{s}\n", .{
                     color.foreground_blue,
                     color.reset,
