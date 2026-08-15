@@ -12,10 +12,6 @@ const build_version = @import("build_options").version;
 
 pub const log_level: std.log.Level = .info;
 
-const MainError = Pacman.Error || error{
-    CouldntResolveHost,
-};
-
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const allocator = init.arena.allocator();
@@ -47,20 +43,10 @@ pub fn main(init: std.process.Init) !void {
             try stderr.writeAll("version: " ++ build_version ++ "\n");
         },
         .search => search(allocator, io, init.environ_map, args.pkgs.items[0]) catch |err| {
-            if (err == MainError.CouldntResolveHost) {
-                try stderr.print("Please check your connection\n", .{});
-            } else {
-                try stderr.print("Found error {any}\n", .{err});
-            }
+            try printCaughtError(stderr, err);
         },
         .install_or_upgrade => installOrUpdate(allocator, io, init.environ_map, args.pkgs) catch |err| {
-            if (err == MainError.ZeroResultsFromAurQuery) {
-                try stderr.print("No aur packages found\n", .{});
-            } else if (err == MainError.CouldntResolveHost) {
-                try stderr.print("Please check your connection\n", .{});
-            } else {
-                try stderr.print("Found error {any}\n", .{err});
-            }
+            try printCaughtError(stderr, err);
         },
         // parse() never leaves action unset; Unset is only the pre-parse default.
         .unset => unreachable,
@@ -68,12 +54,25 @@ pub fn main(init: std.process.Init) !void {
     try stderr.flush();
 }
 
+fn printCaughtError(stderr: *Io.Writer, err: Pacman.Error) !void {
+    switch (err) {
+        error.ZeroResultsFromAurQuery => try stderr.print("No aur packages found\n", .{}),
+        // These are the DNS/connect failures std.http actually returns.
+        error.UnknownHostName,
+        error.NameServerFailure,
+        error.NoAddressReturned,
+        error.HostUnreachable,
+        => try stderr.print("Please check your connection\n", .{}),
+        else => try stderr.print("Found error {any}\n", .{err}),
+    }
+}
+
 fn installOrUpdate(
     allocator: std.mem.Allocator,
     io: Io,
     environ_map: *const std.process.Environ.Map,
     pkg_list: std.ArrayList([]const u8),
-) MainError!void {
+) Pacman.Error!void {
     var pacman = try Pacman.init(allocator, io, environ_map);
     defer pacman.deinit();
 
