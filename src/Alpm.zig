@@ -28,7 +28,7 @@ const sig_level = alpm.ALPM_SIG_PACKAGE_OPTIONAL | alpm.ALPM_SIG_DATABASE_OPTION
 pub fn init(allocator: std.mem.Allocator) !Alpm {
     var err: alpm.alpm_errno_t = 0;
     const handle = alpm.alpm_initialize("/", "/var/lib/pacman/", &err) orelse {
-        return error.AlpmInitFailed;
+        return error.AlpmNoHandle;
     };
     errdefer _ = alpm.alpm_release(handle);
 
@@ -36,7 +36,7 @@ pub fn init(allocator: std.mem.Allocator) !Alpm {
     // permissive signature level is fine here.
     for (repos) |repo| {
         if (alpm.alpm_register_syncdb(handle, repo, sig_level) == null) {
-            return error.AlpmRegisterDbFailed;
+            return error.AlpmNoSyncDb;
         }
     }
 

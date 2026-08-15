@@ -879,9 +879,9 @@ fn execCommand(self: *Pacman, argv: []const []const u8) !void {
 
     switch (term) {
         .exited => |code| if (code != 0) {
-            return error.CommandFailed;
+            return error.NonzeroStatus;
         },
-        .signal, .stopped, .unknown => return error.CommandFailed,
+        .signal, .stopped, .unknown => return error.NonzeroStatus,
     }
 }
 
@@ -1168,7 +1168,7 @@ test "extractTarGz - strips the top-level snapshot directory" {
     });
     defer allocator.free(tar_run.stdout);
     defer allocator.free(tar_run.stderr);
-    if (tar_run.term != .exited or tar_run.term.exited != 0) return error.TarFailed;
+    if (tar_run.term != .exited or tar_run.term.exited != 0) return error.TarCreate;
 
     // Remove the source tree so only the archive remains in the dir.
     try tmp.dir.deleteTree(io, "pkg-1.0");
