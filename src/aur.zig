@@ -23,6 +23,8 @@ pub const SearchBy = enum {
 
 fn RPCResp(comptime T: type) type {
     return struct {
+        const Self = @This();
+
         version: usize,
         type: []const u8,
         resultcount: usize,
