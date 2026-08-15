@@ -2,8 +2,8 @@ const std = @import("std");
 const Io = std.Io;
 
 const Args = @import("Args.zig");
-const search = @import("pacman.zig").search;
-const Pacman = @import("pacman.zig").Pacman;
+const Pacman = @import("Pacman.zig");
+const search = Pacman.search;
 
 const build_version = @import("build_options").version;
 
