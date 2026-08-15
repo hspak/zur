@@ -63,6 +63,12 @@ pub fn fetchForeignPackages(self: *Alpm) ![]ForeignPackage {
 
     var list: std.ArrayList(ForeignPackage) = .empty;
     defer list.deinit(self.allocator);
+    errdefer {
+        for (list.items) |pkg_info| {
+            self.allocator.free(pkg_info.name);
+            self.allocator.free(pkg_info.version);
+        }
+    }
 
     var node = cache;
     while (node != null) : (node = node.*.next) {
@@ -70,9 +76,13 @@ pub fn fetchForeignPackages(self: *Alpm) ![]ForeignPackage {
         const pkg: *const alpm.alpm_pkg_t = @ptrCast(node.*.data.?);
         const name = std.mem.span(alpm.alpm_pkg_get_name(@constCast(pkg)));
         if (!try self.isInSyncDbs(name)) {
+            const name_copy = try self.allocator.dupe(u8, name);
+            errdefer self.allocator.free(name_copy);
+            const version_copy = try self.allocator.dupe(u8, std.mem.span(alpm.alpm_pkg_get_version(@constCast(pkg))));
+            errdefer self.allocator.free(version_copy);
             try list.append(self.allocator, .{
-                .name = try self.allocator.dupe(u8, name),
-                .version = try self.allocator.dupe(u8, std.mem.span(alpm.alpm_pkg_get_version(@constCast(pkg)))),
+                .name = name_copy,
+                .version = version_copy,
             });
         }
     }

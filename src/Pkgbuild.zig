@@ -336,13 +336,17 @@ const Parser = struct {
         content.* = .init(value);
         errdefer self.allocator.destroy(content);
         errdefer content.deinit(self.allocator);
-        // Last assignment wins (bash semantics); free previous if present
-        if (self.fields.fetchRemove(key)) |old| {
-            self.allocator.free(old.key);
-            old.value.deinit(self.allocator);
-            self.allocator.destroy(old.value);
+        // Last assignment wins (bash semantics). getOrPut first so a failed
+        // insert cannot drop an existing entry.
+        const gop = try self.fields.getOrPut(self.allocator, key);
+        if (gop.found_existing) {
+            self.allocator.free(key);
+            gop.value_ptr.*.deinit(self.allocator);
+            self.allocator.destroy(gop.value_ptr.*);
+        } else {
+            gop.key_ptr.* = key;
         }
-        try self.fields.put(self.allocator, key, content);
+        gop.value_ptr.* = content;
     }
 
     fn scanName(self: *Parser) bool {
@@ -460,8 +464,9 @@ pub fn indentValues(self: *Pkgbuild, spaces_count: usize) !void {
             try buf.appendSlice(self.allocator, line);
             try buf.append(self.allocator, '\n');
         }
+        const indented = try buf.toOwnedSlice(self.allocator);
         self.allocator.free(field.value_ptr.*.value);
-        field.value_ptr.*.value = try buf.toOwnedSlice(self.allocator);
+        field.value_ptr.*.value = indented;
     }
 }
 

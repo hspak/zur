@@ -174,7 +174,9 @@ pub fn init(allocator: Allocator, io: Io, environ_map: *const std.process.Enviro
     const zur_dir = ".zur";
 
     const zur_path = try Dir.path.join(allocator, &[_][]const u8{ home, zur_dir });
+    errdefer allocator.free(zur_path);
     const pkg_dir = try Dir.path.join(allocator, &[_][]const u8{ zur_path, ".pkg" });
+    errdefer allocator.free(pkg_dir);
     try Dir.cwd().createDirPath(io, pkg_dir);
 
     return .{
@@ -461,7 +463,7 @@ fn ensureAurDepsInstalled(self: *Pacman, pkg_name: []const u8) !void {
             try self.ensureAurDepsInstalled(dep_name);
 
             const dep_pkg = try self.allocator.create(Package);
-            errdefer self.allocator.destroy(dep_pkg);
+            defer self.allocator.destroy(dep_pkg);
             dep_pkg.* = .init("0");
             dep_pkg.aur_version = dep_info.version;
             // A split-package dep shares its base's snapshot; set base_name
@@ -591,8 +593,10 @@ fn extractPackage(self: *Pacman, snapshot_path: []const u8, pkg_name: []const u8
 }
 
 fn compareUpdateAndInstall(self: *Pacman, pkg_name: []const u8, pkg: *Package) !void {
-    const old_files = try self.snapshotFiles(pkg_name, pkg.version);
-    const new_files = try self.snapshotFiles(pkg_name, pkg.aur_version.?);
+    var old_files = try self.snapshotFiles(pkg_name, pkg.version);
+    defer deinitSnapshotFiles(self.allocator, &old_files);
+    var new_files = try self.snapshotFiles(pkg_name, pkg.aur_version.?);
+    defer deinitSnapshotFiles(self.allocator, &new_files);
 
     // A diff needs both the old and new snapshots present, each with a
     // PKGBUILD to parse. If either is missing (no prior snapshot, or an
@@ -605,8 +609,10 @@ fn compareUpdateAndInstall(self: *Pacman, pkg_name: []const u8, pkg: *Package) !
     }
 
     var old_pkgbuild = Pkgbuild.init(self.allocator, old_files.get("PKGBUILD").?);
+    defer old_pkgbuild.deinit();
     try old_pkgbuild.readLines();
     var new_pkgbuild = Pkgbuild.init(self.allocator, new_files.get("PKGBUILD").?);
+    defer new_pkgbuild.deinit();
     try new_pkgbuild.readLines();
 
     var at_least_one_diff = false;
@@ -742,10 +748,12 @@ fn printDiff(self: *Pacman, name: []const u8, old_content: []const u8, new_conte
 // Official/repo deps are left to `makepkg -s` during the build.
 fn bareInstall(self: *Pacman, pkg_name: []const u8, pkg: *Package) !void {
     var pkg_files = try self.snapshotFiles(pkg_name, pkg.aur_version.?);
+    defer deinitSnapshotFiles(self.allocator, &pkg_files);
     var pkg_files_iter = pkg_files.iterator();
     while (pkg_files_iter.next()) |pkg_file| {
         if (mem.eql(u8, pkg_file.key_ptr.*, "PKGBUILD")) {
             var pkgbuild = Pkgbuild.init(self.allocator, pkg_file.value_ptr.*);
+            defer pkgbuild.deinit();
             try pkgbuild.readLines();
             const format = "\n{s}::{s} File: {s}PKGBUILD{s} {s}===================={s}\n";
             try self.print(format, .{
@@ -964,6 +972,15 @@ fn removeStaleArtifacts(self: *Pacman, pkg_name: []const u8, dir_path: []const u
     }
 }
 
+fn deinitSnapshotFiles(allocator: Allocator, files: *std.StringHashMapUnmanaged([]u8)) void {
+    var it = files.iterator();
+    while (it.next()) |entry| {
+        allocator.free(entry.key_ptr.*);
+        allocator.free(entry.value_ptr.*);
+    }
+    files.deinit(allocator);
+}
+
 fn snapshotFiles(self: *Pacman, pkg_name: []const u8, pkg_version: []const u8) !std.StringHashMapUnmanaged([]u8) {
     const dir_name = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg_version });
     const path = try Dir.path.join(self.allocator, &[_][]const u8{ self.zur_path, dir_name });
@@ -979,6 +996,7 @@ fn snapshotFiles(self: *Pacman, pkg_name: []const u8, pkg_version: []const u8) !
     try self.print(" reading files in {s}{s}{s}\n", .{ color.bold, path, color.reset });
 
     var files_map: std.StringHashMapUnmanaged([]u8) = .empty;
+    errdefer deinitSnapshotFiles(self.allocator, &files_map);
     var dir_iter = dir.iterate();
     while (try dir_iter.next(self.io)) |node| {
         if (mem.eql(u8, node.name, ".SRCINFO")) {
@@ -1011,7 +1029,9 @@ fn snapshotFiles(self: *Pacman, pkg_name: []const u8, pkg_version: []const u8) !
         // Store raw file contents. Any indentation is applied only at
         // display time (bareInstall), so the update/diff path never copies
         // every snapshot file.
+        errdefer self.allocator.free(file_contents);
         const copy_name = try self.allocator.dupe(u8, node.name);
+        errdefer self.allocator.free(copy_name);
         try files_map.putNoClobber(self.allocator, copy_name, file_contents);
     }
     return files_map;
