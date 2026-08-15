@@ -37,7 +37,7 @@ file_contents: []const u8,
 fields: std.StringHashMap(*Content),
 
 /// Fields compared when reviewing PKGBUILD changes between versions.
-const RelevantFields = &[_][]const u8{
+const relevant_fields = &[_][]const u8{
     "install",
     "source",
     "pkgver()",
@@ -424,7 +424,7 @@ pub fn readLines(self: *Pkgbuild) !void {
 }
 
 pub fn comparePrev(self: *Pkgbuild, prev_pkgbuild: Pkgbuild) !void {
-    for (RelevantFields) |field| {
+    for (relevant_fields) |field| {
         const prev = prev_pkgbuild.fields.get(field);
         const curr = self.fields.get(field);
         if (prev == null and curr != null) {
