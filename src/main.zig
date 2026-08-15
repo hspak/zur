@@ -9,7 +9,7 @@ const build_version = @import("build_options").version;
 
 pub const log_level: std.log.Level = .info;
 
-const mainerror = error{
+const MainError = error{
     ZeroResultsFromAurQuery,
     CouldntResolveHost,
 };
@@ -44,16 +44,16 @@ pub fn main(init: std.process.Init) !void {
             try stderr.writeAll("version: " ++ build_version ++ "\n");
         },
         .search => search(allocator, io, init.environ_map, args.pkgs.items[0]) catch |err| {
-            if (err == mainerror.CouldntResolveHost) {
+            if (err == MainError.CouldntResolveHost) {
                 try stderr.print("Please check your connection\n", .{});
             } else {
                 try stderr.print("Found error {any}\n", .{err});
             }
         },
         .install_or_upgrade => installOrUpdate(allocator, io, init.environ_map, args.pkgs) catch |err| {
-            if (err == mainerror.ZeroResultsFromAurQuery) {
+            if (err == MainError.ZeroResultsFromAurQuery) {
                 try stderr.print("No aur packages found\n", .{});
-            } else if (err == mainerror.CouldntResolveHost) {
+            } else if (err == MainError.CouldntResolveHost) {
                 try stderr.print("Please check your connection\n", .{});
             } else {
                 try stderr.print("Found error {any}\n", .{err});
