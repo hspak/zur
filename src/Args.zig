@@ -9,18 +9,18 @@ allocator: Allocator,
 action: Action,
 
 pub const Action = enum {
-    Unset,
-    Search,
-    InstallOrUpgrade, // Both actions take the same codepath
-    PrintVersion,
-    PrintHelp,
+    unset,
+    search,
+    install_or_upgrade, // Both actions take the same codepath
+    print_version,
+    print_help,
 };
 
 pub fn init(allocator: Allocator) Args {
     return .{
         .pkgs = .empty,
         .allocator = allocator,
-        .action = .Unset,
+        .action = .unset,
     };
 }
 
@@ -33,27 +33,27 @@ pub fn parse(self: *Args, process_args: std.process.Args) !void {
     _ = args_iter.next(); // skip argv[0]
     const action = args_iter.next() orelse "";
     if (mem.eql(u8, action, "-h") or mem.eql(u8, action, "--help")) {
-        self.action = .PrintHelp;
+        self.action = .print_help;
         return;
     } else if (mem.eql(u8, action, "-v") or mem.eql(u8, action, "--version")) {
-        self.action = .PrintVersion;
+        self.action = .print_version;
         return;
     } else if (mem.eql(u8, action, "-Ss")) {
-        self.action = .Search;
+        self.action = .search;
         const search_name = args_iter.next();
         if (search_name == null) {
-            self.action = .PrintHelp;
+            self.action = .print_help;
             return;
         }
         try self.pkgs.append(self.allocator, search_name.?);
     } else if (mem.eql(u8, action, "-S")) {
-        self.action = .InstallOrUpgrade;
+        self.action = .install_or_upgrade;
         while (args_iter.next()) |arg| {
             try self.pkgs.append(self.allocator, arg);
         }
     } else if (action.len == 0) {
-        self.action = .InstallOrUpgrade;
+        self.action = .install_or_upgrade;
     } else {
-        self.action = .PrintHelp;
+        self.action = .print_help;
     }
 }

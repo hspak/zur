@@ -27,7 +27,7 @@ pub fn main(init: std.process.Init) !void {
     const stderr = &stderr_writer.interface;
 
     switch (args.action) {
-        .PrintHelp => {
+        .print_help => {
             const msg =
                 \\usage: zur [action]
                 \\
@@ -40,17 +40,17 @@ pub fn main(init: std.process.Init) !void {
             ;
             try stderr.writeAll(msg);
         },
-        .PrintVersion => {
+        .print_version => {
             try stderr.writeAll("version: " ++ build_version ++ "\n");
         },
-        .Search => search(allocator, io, init.environ_map, args.pkgs.items[0]) catch |err| {
+        .search => search(allocator, io, init.environ_map, args.pkgs.items[0]) catch |err| {
             if (err == mainerror.CouldntResolveHost) {
                 try stderr.print("Please check your connection\n", .{});
             } else {
                 try stderr.print("Found error {any}\n", .{err});
             }
         },
-        .InstallOrUpgrade => installOrUpdate(allocator, io, init.environ_map, args.pkgs) catch |err| {
+        .install_or_upgrade => installOrUpdate(allocator, io, init.environ_map, args.pkgs) catch |err| {
             if (err == mainerror.ZeroResultsFromAurQuery) {
                 try stderr.print("No aur packages found\n", .{});
             } else if (err == mainerror.CouldntResolveHost) {
@@ -59,7 +59,7 @@ pub fn main(init: std.process.Init) !void {
                 try stderr.print("Found error {any}\n", .{err});
             }
         },
-        .Unset => @panic("Args somehow ended up with 'Unset' state"),
+        .unset => @panic("Args somehow ended up with 'unset' state"),
     }
     try stderr.flush();
 }
