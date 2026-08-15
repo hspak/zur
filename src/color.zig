@@ -1,3 +1,5 @@
+//! ANSI SGR helpers for zur's CLI output.
+
 pub const esc = "\x1B";
 pub const csi = esc ++ "[";
 pub const reset = csi ++ "0m";

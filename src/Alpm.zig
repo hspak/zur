@@ -1,11 +1,10 @@
+//! Long-lived libalpm handle for local-db and sync-repo queries.
+
 const std = @import("std");
 const alpm = @cImport({
     @cInclude("alpm.h");
 });
 
-/// A long-lived libalpm handle. Initializing/releasing alpm is expensive, so
-/// one `Alpm` instance is created up front and reused for every local-db
-/// query. The sync repos are registered once here.
 const Alpm = @This();
 
 pub const Error = std.mem.Allocator.Error || error{

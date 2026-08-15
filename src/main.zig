@@ -1,3 +1,5 @@
+//! zur: install and update AUR packages.
+
 const std = @import("std");
 const Io = std.Io;
 

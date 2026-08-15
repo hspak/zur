@@ -1,3 +1,5 @@
+//! AUR RPC client: info/search queries and the snapshot download URL.
+
 const std = @import("std");
 const Io = std.Io;
 

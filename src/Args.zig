@@ -1,3 +1,5 @@
+//! Command-line flag parsing for zur (`-S`, `-Ss`, help, version).
+
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;

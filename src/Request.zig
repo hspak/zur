@@ -1,3 +1,5 @@
+//! Persisted HTTP client used for AUR RPC and snapshot downloads.
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;

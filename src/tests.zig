@@ -1,3 +1,5 @@
+//! Test root: pull each child file into the test binary.
+
 const pkgbuild = @import("Pkgbuild.zig");
 const alpm = @import("Alpm.zig");
 const args = @import("Args.zig");

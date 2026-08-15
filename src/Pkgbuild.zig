@@ -1,35 +1,15 @@
+//! Static PKGBUILD parser: extract top-level assignments and function
+//! bodies without evaluating Bash, so zur can review and display changes.
+
 const std = @import("std");
 const testing = std.testing;
 const mem = std.mem;
 const Allocator = mem.Allocator;
 
-/// A simple static PKGBUILD parser.
-///
-/// PKGBUILDs are Bash scripts. We intentionally do **not** evaluate shell —
-/// we only extract top-level assignments and function definitions so zur can
-/// review meaningful changes and display build/package logic.
-///
-/// Supported forms:
-///   name=value
-///   name=( ... )          # multi-line arrays, quoted elements
-///   name() { ... }        # brace-nested function bodies
-///   package_foo() { ... } # split-package packaging functions
-///
-/// Not evaluated (left as literal text in values):
-///   $var / ${var}, command substitution, arithmetic, conditionals
-///
-/// ## Value representation
-///
-/// Quotes are **preserved** in stored values so that the original form of
-/// each element is visible during review. For example, `pkgdesc="..."` is
-/// stored with its quotes intact.
-///
-/// For arrays, runs of unquoted whitespace between elements are collapsed
-/// to a single space so adjacent elements never get merged, while quotes
-/// and newlines are preserved. This keeps elements distinguishable during
-/// review and diffing.
-///
-/// Scalar values include their surrounding quotes when present.
+// Supported forms: name=value, name=( ... ), name() { ... }, package_foo() { ... }.
+// $var/${var}, command substitution, and conditionals are left as literal text.
+// Quotes are preserved. Unquoted array whitespace collapses to a single space.
+
 const Pkgbuild = @This();
 
 pub const Error = Allocator.Error || error{
