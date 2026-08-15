@@ -4,9 +4,9 @@ const Io = std.Io;
 const Request = @import("Request.zig");
 const Pacman = @import("Pacman.zig");
 
-const Host = "https://aur.archlinux.org/rpc/?v=5";
+const host = "https://aur.archlinux.org/rpc/?v=5";
 
-pub const Snapshot = "https://aur.archlinux.org/cgit/aur.git/snapshot";
+pub const snapshot = "https://aur.archlinux.org/cgit/aur.git/snapshot";
 
 /// Which field the RPC `search` endpoint matches against.
 pub const SearchBy = enum {
@@ -103,7 +103,7 @@ pub fn queryName(allocator: std.mem.Allocator, request: *Request, name: []const 
     var uri: std.ArrayList(u8) = .empty;
     defer uri.deinit(allocator);
 
-    try uri.appendSlice(allocator, Host);
+    try uri.appendSlice(allocator, host);
     try uri.appendSlice(allocator, "&type=info&arg[]=");
     try uri.appendSlice(allocator, name);
 
@@ -118,7 +118,7 @@ pub fn search(allocator: std.mem.Allocator, request: *Request, search_name: []co
     var uri: std.ArrayList(u8) = .empty;
     defer uri.deinit(allocator);
 
-    try uri.appendSlice(allocator, Host);
+    try uri.appendSlice(allocator, host);
     try uri.appendSlice(allocator, "&type=search&by=");
     try uri.appendSlice(allocator, by.field());
     try uri.appendSlice(allocator, "&arg=");
@@ -135,7 +135,7 @@ fn buildInfoQuery(allocator: std.mem.Allocator, pkgs: std.StringHashMap(*Pacman.
     var uri: std.ArrayList(u8) = .empty;
     errdefer uri.deinit(allocator);
 
-    try uri.appendSlice(allocator, Host);
+    try uri.appendSlice(allocator, host);
     try uri.appendSlice(allocator, "&type=info");
 
     var pkgs_iter = pkgs.iterator();
@@ -159,7 +159,7 @@ test "buildInfoQuery - builds correct URL with packages" {
     const result = try buildInfoQuery(testing.allocator, pkgs);
     defer testing.allocator.free(result);
 
-    try testing.expect(std.mem.containsAtLeast(u8, result, 1, Host));
+    try testing.expect(std.mem.containsAtLeast(u8, result, 1, host));
     try testing.expect(std.mem.containsAtLeast(u8, result, 1, "&type=info"));
     try testing.expect(std.mem.containsAtLeast(u8, result, 1, "&arg[]=neovim-git"));
 }
