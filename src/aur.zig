@@ -35,7 +35,8 @@ fn RPCResp(comptime T: type) type {
 pub const RPCRespV5 = RPCResp(Info);
 pub const RPCSearchRespV5 = RPCResp(Search);
 
-pub const Info = struct {
+// Wire names match the AUR RPC JSON object; public Info/Search are snake_case.
+const InfoJson = struct {
     ID: usize,
     Name: []const u8,
     PackageBaseID: usize,
@@ -45,12 +46,9 @@ pub const Info = struct {
     URL: []const u8,
     NumVotes: usize,
     Popularity: f64,
-    /// Unix epoch seconds; null if the package is not flagged out-of-date.
     OutOfDate: ?i64 = null,
     Maintainer: ?[]const u8 = null,
-    /// Unix epoch seconds.
     FirstSubmitted: i64,
-    /// Unix epoch seconds.
     LastModified: i64,
     URLPath: []const u8,
     Depends: ?[][]const u8 = null,
@@ -65,7 +63,7 @@ pub const Info = struct {
     Keywords: ?[][]const u8 = null,
 };
 
-pub const Search = struct {
+const SearchJson = struct {
     ID: usize,
     Name: []const u8,
     PackageBaseID: usize,
@@ -75,15 +73,136 @@ pub const Search = struct {
     URL: ?[]const u8 = null,
     NumVotes: usize,
     Popularity: f64,
-    /// Unix epoch seconds; null if the package is not flagged out-of-date.
     OutOfDate: ?i64 = null,
     Maintainer: ?[]const u8 = null,
-    /// Unix epoch seconds.
     FirstSubmitted: i64,
-    /// Unix epoch seconds.
     LastModified: i64,
     URLPath: []const u8,
 };
+
+pub const Info = struct {
+    id: usize,
+    name: []const u8,
+    package_base_id: usize,
+    package_base: []const u8,
+    version: []const u8,
+    description: ?[]const u8 = null,
+    url: []const u8,
+    num_votes: usize,
+    popularity: f64,
+    /// Unix epoch seconds; null if the package is not flagged out-of-date.
+    out_of_date: ?i64 = null,
+    maintainer: ?[]const u8 = null,
+    /// Unix epoch seconds.
+    first_submitted: i64,
+    /// Unix epoch seconds.
+    last_modified: i64,
+    url_path: []const u8,
+    depends: ?[][]const u8 = null,
+    make_depends: ?[][]const u8 = null,
+    opt_depends: ?[][]const u8 = null,
+    check_depends: ?[][]const u8 = null,
+    conflicts: ?[][]const u8 = null,
+    provides: ?[][]const u8 = null,
+    replaces: ?[][]const u8 = null,
+    groups: ?[][]const u8 = null,
+    license: ?[][]const u8 = null,
+    keywords: ?[][]const u8 = null,
+};
+
+pub const Search = struct {
+    id: usize,
+    name: []const u8,
+    package_base_id: usize,
+    package_base: []const u8,
+    version: []const u8,
+    description: ?[]const u8 = null,
+    url: ?[]const u8 = null,
+    num_votes: usize,
+    popularity: f64,
+    /// Unix epoch seconds; null if the package is not flagged out-of-date.
+    out_of_date: ?i64 = null,
+    maintainer: ?[]const u8 = null,
+    /// Unix epoch seconds.
+    first_submitted: i64,
+    /// Unix epoch seconds.
+    last_modified: i64,
+    url_path: []const u8,
+};
+
+fn infoFromJson(j: InfoJson) Info {
+    return .{
+        .id = j.ID,
+        .name = j.Name,
+        .package_base_id = j.PackageBaseID,
+        .package_base = j.PackageBase,
+        .version = j.Version,
+        .description = j.Description,
+        .url = j.URL,
+        .num_votes = j.NumVotes,
+        .popularity = j.Popularity,
+        .out_of_date = j.OutOfDate,
+        .maintainer = j.Maintainer,
+        .first_submitted = j.FirstSubmitted,
+        .last_modified = j.LastModified,
+        .url_path = j.URLPath,
+        .depends = j.Depends,
+        .make_depends = j.MakeDepends,
+        .opt_depends = j.OptDepends,
+        .check_depends = j.CheckDepends,
+        .conflicts = j.Conflicts,
+        .provides = j.Provides,
+        .replaces = j.Replaces,
+        .groups = j.Groups,
+        .license = j.License,
+        .keywords = j.Keywords,
+    };
+}
+
+fn searchFromJson(j: SearchJson) Search {
+    return .{
+        .id = j.ID,
+        .name = j.Name,
+        .package_base_id = j.PackageBaseID,
+        .package_base = j.PackageBase,
+        .version = j.Version,
+        .description = j.Description,
+        .url = j.URL,
+        .num_votes = j.NumVotes,
+        .popularity = j.Popularity,
+        .out_of_date = j.OutOfDate,
+        .maintainer = j.Maintainer,
+        .first_submitted = j.FirstSubmitted,
+        .last_modified = j.LastModified,
+        .url_path = j.URLPath,
+    };
+}
+
+fn mapInfoResp(allocator: std.mem.Allocator, json_resp: RPCResp(InfoJson)) !RPCRespV5 {
+    const results = try allocator.alloc(Info, json_resp.results.len);
+    for (json_resp.results, results) |item, *out| {
+        out.* = infoFromJson(item);
+    }
+    return .{
+        .version = json_resp.version,
+        .type = json_resp.type,
+        .resultcount = json_resp.resultcount,
+        .results = results,
+    };
+}
+
+fn mapSearchResp(allocator: std.mem.Allocator, json_resp: RPCResp(SearchJson)) !RPCSearchRespV5 {
+    const results = try allocator.alloc(Search, json_resp.results.len);
+    for (json_resp.results, results) |item, *out| {
+        out.* = searchFromJson(item);
+    }
+    return .{
+        .version = json_resp.version,
+        .type = json_resp.type,
+        .resultcount = json_resp.resultcount,
+        .results = results,
+    };
+}
 
 pub fn queryAll(allocator: std.mem.Allocator, request: *Request, pkgs: std.StringHashMap(*Pacman.Package)) !RPCRespV5 {
     const uri = try buildInfoQuery(allocator, pkgs);
@@ -91,9 +210,9 @@ pub fn queryAll(allocator: std.mem.Allocator, request: *Request, pkgs: std.Strin
 
     const body = try request.getRequest(uri);
 
-    const result = try std.json.parseFromSlice(RPCRespV5, allocator, body, .{ .ignore_unknown_fields = true });
+    const result = try std.json.parseFromSlice(RPCResp(InfoJson), allocator, body, .{ .ignore_unknown_fields = true });
 
-    return result.value;
+    return try mapInfoResp(allocator, result.value);
 }
 
 /// Query the AUR for a single package's full info (including its Depends /
@@ -109,9 +228,9 @@ pub fn queryName(allocator: std.mem.Allocator, request: *Request, name: []const 
 
     const body = try request.getRequest(uri.items);
 
-    const result = try std.json.parseFromSlice(RPCRespV5, allocator, body, .{ .ignore_unknown_fields = true });
+    const result = try std.json.parseFromSlice(RPCResp(InfoJson), allocator, body, .{ .ignore_unknown_fields = true });
     if (result.value.resultcount == 0) return null;
-    return result.value.results[0];
+    return infoFromJson(result.value.results[0]);
 }
 
 pub fn search(allocator: std.mem.Allocator, request: *Request, search_name: []const u8, by: SearchBy) !RPCSearchRespV5 {
@@ -126,9 +245,9 @@ pub fn search(allocator: std.mem.Allocator, request: *Request, search_name: []co
 
     const body = try request.getRequest(uri.items);
 
-    const result = try std.json.parseFromSlice(RPCSearchRespV5, allocator, body, .{ .ignore_unknown_fields = true });
+    const result = try std.json.parseFromSlice(RPCResp(SearchJson), allocator, body, .{ .ignore_unknown_fields = true });
 
-    return result.value;
+    return try mapSearchResp(allocator, result.value);
 }
 
 fn buildInfoQuery(allocator: std.mem.Allocator, pkgs: std.StringHashMap(*Pacman.Package)) ![]const u8 {

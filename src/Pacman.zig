@@ -298,15 +298,15 @@ pub fn fetchRemoteAurVersions(self: *Pacman) !void {
     for (self.aur_resp.?.results) |result| {
         // Skip results the AUR returns for packages we didn't ask about
         // (e.g. a dependency that also came back) rather than crashing.
-        const curr_pkg = self.pkgs.get(result.Name) orelse continue;
-        curr_pkg.aur_version = result.Version;
+        const curr_pkg = self.pkgs.get(result.name) orelse continue;
+        curr_pkg.aur_version = result.version;
 
         // Only store Package.base_name if the name doesn't match base name.
         // We use the null state to see if they defer. A non-null base
         // (a split package) is de-duplicated in processOutOfDate so the
         // shared base is only installed once.
-        if (!mem.eql(u8, result.Name, result.PackageBase)) {
-            curr_pkg.base_name = result.PackageBase;
+        if (!mem.eql(u8, result.name, result.package_base)) {
+            curr_pkg.base_name = result.package_base;
         }
     }
 }
@@ -452,7 +452,7 @@ fn ensureAurDepsInstalled(self: *Pacman, pkg_name: []const u8) !void {
     try self.aur_deps_done.put(pkg_name, {});
 
     const info = (try self.getAurInfo(pkg_name)) orelse return;
-    const dep_lists = [_]?[][]const u8{ info.Depends, info.MakeDepends };
+    const dep_lists = [_]?[][]const u8{ info.depends, info.make_depends };
     for (dep_lists) |maybe_list| {
         const list = maybe_list orelse continue;
         for (list) |dep| {
@@ -469,12 +469,12 @@ fn ensureAurDepsInstalled(self: *Pacman, pkg_name: []const u8) !void {
             try self.ensureAurDepsInstalled(dep_name);
 
             var dep_pkg = try Package.init(self.allocator, "0");
-            dep_pkg.aur_version = dep_info.Version;
+            dep_pkg.aur_version = dep_info.version;
             // A split-package dep shares its base's snapshot; set base_name
             // (mirroring fetchRemoteAurVersions) so the right archive and
             // directory are used.
-            if (!mem.eql(u8, dep_info.Name, dep_info.PackageBase)) {
-                dep_pkg.base_name = dep_info.PackageBase;
+            if (!mem.eql(u8, dep_info.name, dep_info.package_base)) {
+                dep_pkg.base_name = dep_info.package_base;
             }
             try self.downloadAndExtractPackage(dep_name, dep_pkg);
             try self.compareUpdateAndInstall(dep_name, dep_pkg);
@@ -493,7 +493,7 @@ fn getAurInfo(self: *Pacman, name: []const u8) !?aur.Info {
 fn aurInfoFor(self: *Pacman, name: []const u8) ?aur.Info {
     const resp = self.aur_resp orelse return null;
     for (resp.results) |info| {
-        if (mem.eql(u8, info.Name, name)) return info;
+        if (mem.eql(u8, info.name, name)) return info;
     }
     return null;
 }
@@ -1047,19 +1047,19 @@ pub fn search(
     const installed = color.bold_foreground_cyan ++ "[Installed]" ++ color.reset;
     const resp = try aur.search(allocator, pacman.getRequest(), pkg, .name);
     for (resp.results) |result| {
-        const installed_text = if (pacman.pkgs.get(result.Name) == null) "" else installed;
-        const desc = result.Description orelse "(missing)";
+        const installed_text = if (pacman.pkgs.get(result.name) == null) "" else installed;
+        const desc = result.description orelse "(missing)";
         try pacman.print("{s}aur/{s}{s}{s}{s} {s}{s}{s} {s} ({d})\n    {s}\n", .{
             color.bold_foreground_magenta,
             color.reset,
             color.bold,
-            result.Name,
+            result.name,
             color.reset,
             color.bold_foreground_green,
-            result.Version,
+            result.version,
             color.reset,
             installed_text,
-            result.Popularity,
+            result.popularity,
             desc,
         });
     }
