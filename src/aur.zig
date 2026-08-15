@@ -1,7 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const Request = @import("req.zig").Request;
+const Request = @import("Request.zig");
 const pacman = @import("pacman.zig");
 
 const Host = "https://aur.archlinux.org/rpc/?v=5";

@@ -19,7 +19,7 @@ const alpm = @import("alpm.zig");
 const aur = @import("aur.zig");
 const color = @import("color.zig");
 const Pkgbuild = @import("pkgbuild.zig").Pkgbuild;
-const Request = @import("req.zig").Request;
+const Request = @import("Request.zig");
 
 pub const Package = struct {
     base_name: ?[]const u8 = null,
