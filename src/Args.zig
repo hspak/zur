@@ -4,9 +4,9 @@ const Allocator = mem.Allocator;
 
 const Args = @This();
 
-pkgs: std.ArrayList([]const u8),
+pkgs: std.ArrayList([]const u8) = .empty,
 allocator: Allocator,
-action: Action,
+action: Action = .unset,
 
 pub const Action = enum {
     unset,
@@ -17,11 +17,7 @@ pub const Action = enum {
 };
 
 pub fn init(allocator: Allocator) Args {
-    return .{
-        .pkgs = .empty,
-        .allocator = allocator,
-        .action = .unset,
-    };
+    return .{ .allocator = allocator };
 }
 
 pub fn deinit(self: *Args) void {
