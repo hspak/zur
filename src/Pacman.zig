@@ -588,13 +588,10 @@ fn downloadAndExtractPackage(self: *Pacman, pkg_name: []const u8, pkg: *Package)
         try zur_dir.deleteTree(self.io, dir_name);
     }
 
-    var url: []const u8 = undefined;
-    if (pkg.base_name) |base_name| {
+    const url = if (pkg.base_name) |base_name| url: {
         const name = try mem.join(self.allocator, ".", &[_][]const u8{ base_name, "tar.gz" });
-        url = try mem.join(self.allocator, "/", &[_][]const u8{ aur.snapshot, name });
-    } else {
-        url = try mem.join(self.allocator, "/", &[_][]const u8{ aur.snapshot, file_name });
-    }
+        break :url try mem.join(self.allocator, "/", &[_][]const u8{ aur.snapshot, name });
+    } else try mem.join(self.allocator, "/", &[_][]const u8{ aur.snapshot, file_name });
 
     try self.print(" downloading from: {s}{s}{s}\n", .{ color.bold, url, color.reset });
     const snapshot = try self.getRequest().getRequest(url);
