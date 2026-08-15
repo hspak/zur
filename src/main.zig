@@ -58,7 +58,8 @@ pub fn main(init: std.process.Init) !void {
                 try stderr.print("Found error {any}\n", .{err});
             }
         },
-        .unset => @panic("Args somehow ended up with 'unset' state"),
+        // parse() never leaves action unset; Unset is only the pre-parse default.
+        .unset => unreachable,
     }
     try stderr.flush();
 }
