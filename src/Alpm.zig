@@ -142,7 +142,6 @@ pub fn isNewerThan(allocator: std.mem.Allocator, ver_a: []const u8, ver_b: []con
 const testing = std.testing;
 
 test "isNewerThan - basic version comparison" {
-    // Test that newer version is detected
     try testing.expect(try isNewerThan(testing.allocator, "2.0.0", "1.0.0"));
     try testing.expect(!try isNewerThan(testing.allocator, "1.0.0", "2.0.0"));
     try testing.expect(!try isNewerThan(testing.allocator, "1.0.0", "1.0.0"));

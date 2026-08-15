@@ -60,7 +60,7 @@ const Parser = struct {
 
             const name_start = self.pos;
             if (!self.scanName()) {
-                // Not a name — skip the rest of the line (unknown top-level statement)
+                // Unknown top-level statement (not an assignment or function).
                 self.skipToEol();
                 continue;
             }
@@ -76,7 +76,6 @@ const Parser = struct {
             } else if (c == '(') {
                 try self.parseFunction(name);
             } else {
-                // e.g. bare command — skip line
                 self.skipToEol();
             }
         }
@@ -85,7 +84,7 @@ const Parser = struct {
     fn parseAssignment(self: *Parser, name: []const u8) !void {
         self.skipSpacesAndTabs();
         if (self.pos < self.src.len and self.src[self.pos] == '(') {
-            self.pos += 1; // consume '('
+            self.pos += 1;
             const value = try self.readArrayBody();
             errdefer self.allocator.free(value);
             try self.putField(name, value);
@@ -97,7 +96,6 @@ const Parser = struct {
     }
 
     fn parseFunction(self: *Parser, name: []const u8) !void {
-        // Expect "()" then optional whitespace then "{"
         if (self.pos >= self.src.len or self.src[self.pos] != '(') return error.MalformedPkgbuildFunction;
         self.pos += 1;
         self.skipSpacesAndTabs();
@@ -136,7 +134,6 @@ const Parser = struct {
                 try out.append(self.allocator, c);
                 self.pos += 1;
                 if (c == '\\' and q == '"' and self.pos < self.src.len) {
-                    // Preserve escaped char inside double quotes
                     try out.append(self.allocator, self.src[self.pos]);
                     self.pos += 1;
                 } else if (c == q) {
@@ -152,7 +149,6 @@ const Parser = struct {
                     self.pos += 1;
                 },
                 '\\' => {
-                    // Line continuation or escaped char
                     self.pos += 1;
                     if (self.pos < self.src.len and self.src[self.pos] == '\n') {
                         try out.append(self.allocator, '\\');
@@ -223,7 +219,6 @@ const Parser = struct {
                     depth -= 1;
                     self.pos += 1;
                     if (depth == 0) {
-                        // Consume optional trailing junk until newline
                         self.skipSpacesAndTabs();
                         if (self.pos < self.src.len and self.src[self.pos] == '\n') self.pos += 1;
                         return try out.toOwnedSlice(self.allocator);
@@ -245,14 +240,13 @@ const Parser = struct {
                 '\\' => {
                     self.pos += 1;
                     if (self.pos < self.src.len) {
-                        // Keep backslash + next char (often line-continuation newline)
                         try out.append(self.allocator, '\\');
                         try out.append(self.allocator, self.src[self.pos]);
                         self.pos += 1;
                     }
                 },
                 '#' => {
-                    // Unquoted # starts a comment to EOL; keep scanning after
+                    // Unlike a scalar, the array continues on the next line.
                     self.skipToEol();
                 },
                 else => {
@@ -279,7 +273,7 @@ const Parser = struct {
             if (quote) |q| {
                 self.pos += 1;
                 if (c == '\\' and q == '"' and self.pos < self.src.len) {
-                    self.pos += 1; // skip escaped char
+                    self.pos += 1;
                 } else if (c == q) {
                     quote = null;
                 }
@@ -292,7 +286,6 @@ const Parser = struct {
                     self.pos += 1;
                 },
                 '#' => {
-                    // Comment to EOL (common inside functions)
                     self.skipToEol();
                 },
                 '{' => {
@@ -424,7 +417,6 @@ pub fn comparePrev(self: *Pkgbuild, prev_pkgbuild: Pkgbuild) Error!void {
         if (prev == null and curr != null) {
             curr.?.updated = true;
         } else if (prev != null and curr == null) {
-            // Field was removed - create a placeholder entry to mark as updated
             const removed = try self.allocator.dupe(u8, "(removed)");
             errdefer self.allocator.free(removed);
             const content = try self.allocator.create(Content);
@@ -480,10 +472,6 @@ fn isNameStart(c: u8) bool {
 fn isNameCont(c: u8) bool {
     return isNameStart(c) or (c >= '0' and c <= '9');
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 test "Pkgbuild - readLines - neovim-git" {
     const file_contents =
@@ -729,15 +717,10 @@ test "Pkgbuild - compare" {
     try pkgbuild_new.readLines();
 
     try pkgbuild_new.comparePrev(pkgbuild_old);
-    // install field changed from $pkgname.install to CHANGED.install
     try testing.expect(pkgbuild_new.fields.get("install").?.updated);
-    // pkgver() function body changed
     try testing.expect(pkgbuild_new.fields.get("pkgver()").?.updated);
-    // source array unchanged — should NOT be marked as updated
     try testing.expect(!pkgbuild_new.fields.get("source").?.updated);
-    // sha512sums unchanged — should NOT be marked as updated
     try testing.expect(!pkgbuild_new.fields.get("sha512sums").?.updated);
-    // pkgdesc unchanged — should NOT be marked as updated
     try testing.expect(!pkgbuild_new.fields.get("pkgdesc").?.updated);
 }
 
@@ -756,14 +739,12 @@ test "Pkgbuild - indentValue - google-chrome-dev" {
     try pkgbuild.indentValues(2);
 
     const package_val = pkgbuild.get("package()").?;
-    // Every non-empty line should be prefixed with exactly 2 spaces
     var lines = mem.splitScalar(u8, package_val, '\n');
     while (lines.next()) |line| {
         if (line.len == 0) continue;
         try testing.expect(mem.startsWith(u8, line, "  "));
     }
     try testing.expect(mem.indexOf(u8, package_val, "bsdtar") != null);
-    // Exact expected value — verifies indentation logic produces correct output
     const expected = "  {\n        msg2 \"Extracting the data.tar.xz...\"\n        bsdtar -xf data.tar.xz -C \"$pkgdir/\"\n  }\n";
     try testing.expectEqualStrings(expected, package_val);
 }
@@ -791,10 +772,8 @@ test "Pkgbuild - comparePrev - field removed should not crash" {
     defer pkgbuild_new.deinit();
     try pkgbuild_new.readLines();
 
-    // This should not crash when 'install' exists in old but not in new
     try pkgbuild_new.comparePrev(pkgbuild_old);
 
-    // The removed field should be marked as updated with "(removed)" value
     const install_field = pkgbuild_new.fields.get("install");
     try testing.expect(install_field != null);
     try testing.expectEqualStrings("(removed)", install_field.?.value);
@@ -820,11 +799,9 @@ test "Pkgbuild - indentValues - multiple functions should not accumulate" {
     const build_val = pkgbuild.get("build()").?;
     const package_val = pkgbuild.get("package()").?;
 
-    // package() should contain its own content
     try testing.expect(mem.indexOf(u8, package_val, "make install") != null);
-    // build() should contain its own content
     try testing.expect(mem.indexOf(u8, build_val, "make") != null);
-    // build body should not appear inside package
+    // Regression: indentValues used to append every function into the last one.
     try testing.expect(mem.indexOf(u8, package_val, "build()") == null);
 }
 
@@ -899,7 +876,6 @@ test "Pkgbuild - nested braces in function" {
     const body = pkgbuild.get("package()").?;
     try testing.expect(mem.indexOf(u8, body, "echo nested") != null);
     try testing.expect(mem.indexOf(u8, body, "echo group") != null);
-    // Closing brace of function included
     try testing.expect(mem.endsWith(u8, mem.trimEnd(u8, body, " \t\n"), "}"));
 }
 

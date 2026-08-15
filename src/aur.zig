@@ -330,6 +330,4 @@ test "buildInfoQuery - no memory leaks with testing allocator" {
 
     const result = try buildInfoQuery(testing.allocator, pkgs);
     defer testing.allocator.free(result);
-
-    // Testing allocator will fail if there are leaks
 }

@@ -84,10 +84,6 @@ pub const Package = struct {
     }
 };
 
-// -git/VCS packages (e.g. neovim-git) are handled: they're rebuilt whenever
-// their AUR pkgver matches the installed one (see isGitPkg/shouldUpdate) and
-// never reuse a cached artifact (see findExistingPackage).
-
 // Files larger than this are skipped when diffing a package snapshot.
 const max_snapshot_diff_bytes: usize = 4096;
 
@@ -166,7 +162,6 @@ fn extractTarGz(io: Io, dest_dir: Io.Dir, archive_name: []const u8) !void {
     var file_buffer: [8192]u8 = undefined;
     var file_reader = file.reader(io, &file_buffer);
 
-    // Decompress the gzip stream and extract the contained tar in one pass.
     var gzip_buffer: [flate.max_window_len]u8 = undefined;
     var decompress = flate.Decompress.init(&file_reader.interface, .gzip, &gzip_buffer);
 
@@ -219,7 +214,6 @@ pub fn deinit(self: *Pacman) void {
     self.* = undefined;
 }
 
-// The shared libalpm handle, initializing it once on first use.
 fn getAlpm(self: *Pacman) !*Alpm {
     if (self.alpm_state == null) {
         self.alpm_state = try Alpm.init(self.allocator);
@@ -227,7 +221,6 @@ fn getAlpm(self: *Pacman) !*Alpm {
     return &self.alpm_state.?;
 }
 
-// The shared HTTP client, initializing it once on first use.
 fn getRequest(self: *Pacman) *Request {
     if (self.request_state == null) {
         self.request_state = Request.init(self.allocator, self.io);
@@ -307,8 +300,7 @@ pub fn fetchRemoteAurVersions(self: *Pacman) Error!void {
         const curr_pkg = self.pkgs.get(result.name) orelse continue;
         curr_pkg.aur_version = result.version;
 
-        // Only store Package.base_name if the name doesn't match base name.
-        // We use the null state to see if they defer. A non-null base
+        // Null base_name means the pkgname is the base. A non-null base
         // (a split package) is de-duplicated in processOutOfDate so the
         // shared base is only installed once.
         if (!mem.eql(u8, result.name, result.package_base)) {
@@ -442,14 +434,14 @@ pub fn processOutOfDate(self: *Pacman) Error!void {
     }
 }
 
-// Install `pkg` after building any AUR-only deps. Official deps go to makepkg -s.
+// Official/repo deps are left for `makepkg -s`.
 fn installWithDeps(self: *Pacman, pkg_name: []const u8, pkg: *Package) !void {
     try self.ensureAurDepsInstalled(pkg_name);
     try self.downloadAndExtractPackage(pkg_name, pkg);
     try self.compareUpdateAndInstall(pkg_name, pkg);
 }
 
-// Recursively build AUR-only deps of `pkg_name`. Marked handled first to stop cycles.
+// Mark `pkg_name` handled first so cycles and repeats terminate.
 fn ensureAurDepsInstalled(self: *Pacman, pkg_name: []const u8) !void {
     if (self.aur_deps_done.contains(pkg_name)) return;
     try self.aur_deps_done.put(self.allocator, pkg_name, {});
@@ -463,12 +455,10 @@ fn ensureAurDepsInstalled(self: *Pacman, pkg_name: []const u8) !void {
             defer self.allocator.free(dep_name);
             if (dep_name.len == 0) continue;
 
-            // Already handled, installed, or not an AUR package: skip.
             if (self.aur_deps_done.contains(dep_name)) continue;
             if (try (try self.getAlpm()).isInstalled(dep_name)) continue;
             const dep_info = (try self.getAurInfo(dep_name)) orelse continue;
 
-            // Resolve the dep's own dependencies before building it.
             try self.ensureAurDepsInstalled(dep_name);
 
             const dep_pkg = try self.allocator.create(Package);
@@ -750,10 +740,6 @@ fn printDiff(self: *Pacman, name: []const u8, old_content: []const u8, new_conte
     }
 }
 
-// AUR-only dependencies are resolved and built before the parent package
-// (see installWithDeps/ensureAurDepsInstalled): each dep that exists in the
-// AUR and isn't installed yet is built and installed first, recursively.
-// Official/repo deps are left to `makepkg -s` during the build.
 fn bareInstall(self: *Pacman, pkg_name: []const u8, pkg: *Package) !void {
     var pkg_files = try self.snapshotFiles(pkg_name, pkg.aur_version.?);
     defer deinitSnapshotFiles(self.allocator, &pkg_files);
@@ -1051,10 +1037,9 @@ fn snapshotFiles(self: *Pacman, pkg_name: []const u8, pkg_version: []const u8) !
 }
 
 fn stdinReadByte(self: *Pacman) !u8 {
-    // Make sure the prompt is flushed before we block waiting for input.
     self.flushStdout();
-    // Read the whole line (including the newline) so leftover input isn't
-    // exposed to a child process that inherits stdin.
+    // Read the whole line so leftover input isn't exposed to a child
+    // that inherits stdin.
     const reader = self.stdin();
     const line = try reader.interface.takeDelimiterInclusive('\n');
     if (line.len == 0) return 0;
@@ -1102,11 +1087,8 @@ test "shouldUpdate - fresh install sentinel version 0" {
 
 test "shouldUpdate - normal package only when remote is newer" {
     const testing = std.testing;
-    // local 1.0, remote 2.0 -> update
     try testing.expect(shouldUpdate("foo", "1.0", "2.0", true));
-    // local 1.0, remote 1.0 -> no update
     try testing.expect(!shouldUpdate("foo", "1.0", "1.0", false));
-    // local 2.0, remote 1.0 (remote older) -> no update
     try testing.expect(!shouldUpdate("foo", "2.0", "1.0", false));
 }
 
@@ -1157,17 +1139,12 @@ test "isGitPkg - only true for a -git suffix" {
 
 test "artifactNameForPkg - matches only full leading components" {
     const testing = std.testing;
-    // Exact match.
     try testing.expect(artifactNameForPkg("foo", "foo"));
-    // Full component boundary: package "foo" followed by a dash.
     try testing.expect(artifactNameForPkg("foo-2.0-1-x86_64.pkg.tar.zst", "foo"));
-    // "foo" must NOT match "foobar-..." (a different package).
+    // "foo" must not also match a different package named "foobar-...".
     try testing.expect(!artifactNameForPkg("foobar-2.0-1-x86_64.pkg.tar.zst", "foo"));
-    // Shorter name cannot match a longer want.
     try testing.expect(!artifactNameForPkg("foo", "foobar"));
-    // Package with a dash in its own name still matches fully.
     try testing.expect(artifactNameForPkg("neovim-git-r100.abc-x86_64.pkg.tar.zst", "neovim-git"));
-    // A prefix that is not at a component boundary must not match.
     try testing.expect(!artifactNameForPkg("foo-lib-1.0-1-x86_64.pkg.tar.zst", "foo-l"));
 }
 
@@ -1202,10 +1179,8 @@ test "extractTarGz - strips the top-level snapshot directory" {
     // Remove the source tree so only the archive remains in the dir.
     try tmp.dir.deleteTree(io, "pkg-1.0");
 
-    // Extract; the top-level dir must be stripped away.
     try extractTarGz(io, tmp.dir, "pkg.tar.gz");
 
-    // Files land directly in dest_dir (no pkg-1.0/ prefix).
     const pkgbuild = try tmp.dir.readFileAlloc(io, "PKGBUILD", allocator, .unlimited);
     defer allocator.free(pkgbuild);
     try testing.expectEqualStrings("pkgname=pkg\n", pkgbuild);
@@ -1214,7 +1189,6 @@ test "extractTarGz - strips the top-level snapshot directory" {
     defer allocator.free(hook);
     try testing.expectEqualStrings("#!/bin/sh\necho hi\n", hook);
 
-    // The archive file is consumed by extraction.
     const leftover = tmp.dir.openFile(io, "pkg.tar.gz", .{}) catch |err| switch (err) {
         error.FileNotFound => null,
         else => return err,
