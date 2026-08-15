@@ -56,7 +56,6 @@ const Content = struct {
 
     pub fn deinit(self: *Content, allocator: Allocator) void {
         allocator.free(self.value);
-        allocator.destroy(self);
     }
 };
 
@@ -334,11 +333,13 @@ const Parser = struct {
     fn putFieldOwnedKey(self: *Parser, key: []u8, value: []u8) !void {
         const content = try self.allocator.create(Content);
         content.* = .init(value);
+        errdefer self.allocator.destroy(content);
         errdefer content.deinit(self.allocator);
         // Last assignment wins (bash semantics); free previous if present
         if (self.fields.fetchRemove(key)) |old| {
             self.allocator.free(old.key);
             old.value.deinit(self.allocator);
+            self.allocator.destroy(old.value);
         }
         try self.fields.put(self.allocator, key, content);
     }
@@ -403,6 +404,7 @@ pub fn deinit(self: *Pkgbuild) void {
     while (iter.next()) |entry| {
         self.allocator.free(entry.key_ptr.*);
         entry.value_ptr.*.deinit(self.allocator);
+        self.allocator.destroy(entry.value_ptr.*);
     }
     self.fields.deinit(self.allocator);
 }
