@@ -18,7 +18,7 @@ const c = @cImport({
 const alpm = @import("alpm.zig");
 const aur = @import("aur.zig");
 const color = @import("color.zig");
-const Pkgbuild = @import("pkgbuild.zig").Pkgbuild;
+const Pkgbuild = @import("Pkgbuild.zig");
 const Request = @import("Request.zig");
 
 pub const Package = struct {

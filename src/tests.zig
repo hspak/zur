@@ -1,4 +1,4 @@
-const pkgbuild = @import("pkgbuild.zig");
+const pkgbuild = @import("Pkgbuild.zig");
 const alpm = @import("alpm.zig");
 const argparse = @import("argparse.zig");
 const aur = @import("aur.zig");

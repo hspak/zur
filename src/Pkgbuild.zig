@@ -3,36 +3,6 @@ const testing = std.testing;
 const mem = std.mem;
 const Allocator = mem.Allocator;
 
-/// Fields compared when reviewing PKGBUILD changes between versions.
-const RelevantFields = &[_][]const u8{
-    "install",
-    "source",
-    "pkgver()",
-    "check()",
-    "package()",
-    "install()",
-};
-
-const Content = struct {
-    value: []const u8,
-    updated: bool = false,
-
-    // allocator.create does not respect default values so safeguard via an init() call
-    pub fn init(allocator: Allocator, value: []const u8) !*Content {
-        const new = try allocator.create(Content);
-        new.* = .{
-            .value = value,
-            .updated = false,
-        };
-        return new;
-    }
-
-    pub fn deinit(self: *Content, allocator: Allocator) void {
-        allocator.free(self.value);
-        allocator.destroy(self);
-    }
-};
-
 /// A simple static PKGBUILD parser.
 ///
 /// PKGBUILDs are Bash scripts. We intentionally do **not** evaluate shell —
@@ -60,82 +30,39 @@ const Content = struct {
 /// review and diffing.
 ///
 /// Scalar values include their surrounding quotes when present.
-pub const Pkgbuild = struct {
-    allocator: Allocator,
-    file_contents: []const u8,
-    fields: std.StringHashMap(*Content),
+const Pkgbuild = @This();
 
-    pub fn init(allocator: Allocator, file_contents: []const u8) Pkgbuild {
-        return .{
-            .allocator = allocator,
-            .file_contents = file_contents,
-            .fields = std.StringHashMap(*Content).init(allocator),
+allocator: Allocator,
+file_contents: []const u8,
+fields: std.StringHashMap(*Content),
+
+/// Fields compared when reviewing PKGBUILD changes between versions.
+const RelevantFields = &[_][]const u8{
+    "install",
+    "source",
+    "pkgver()",
+    "check()",
+    "package()",
+    "install()",
+};
+
+const Content = struct {
+    value: []const u8,
+    updated: bool = false,
+
+    // allocator.create does not respect default values so safeguard via an init() call
+    pub fn init(allocator: Allocator, value: []const u8) !*Content {
+        const new = try allocator.create(Content);
+        new.* = .{
+            .value = value,
+            .updated = false,
         };
+        return new;
     }
 
-    pub fn deinit(self: *Pkgbuild) void {
-        var iter = self.fields.iterator();
-        while (iter.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-            entry.value_ptr.*.deinit(self.allocator);
-        }
-        self.fields.deinit();
-    }
-
-    pub fn readLines(self: *Pkgbuild) !void {
-        var parser = Parser{
-            .src = self.file_contents,
-            .pos = 0,
-            .allocator = self.allocator,
-            .fields = &self.fields,
-        };
-        try parser.parse();
-    }
-
-    pub fn comparePrev(self: *Pkgbuild, prev_pkgbuild: Pkgbuild) !void {
-        for (RelevantFields) |field| {
-            const prev = prev_pkgbuild.fields.get(field);
-            const curr = self.fields.get(field);
-            if (prev == null and curr != null) {
-                curr.?.updated = true;
-            } else if (prev != null and curr == null) {
-                // Field was removed - create a placeholder entry to mark as updated
-                const content = try Content.init(self.allocator, try self.allocator.dupe(u8, "(removed)"));
-                content.updated = true;
-                const key_copy = try self.allocator.dupe(u8, field);
-                try self.fields.put(key_copy, content);
-            } else if (prev == null and curr == null) {
-                continue;
-            } else if (prev != null and curr != null and !mem.eql(u8, prev.?.value, curr.?.value)) {
-                curr.?.updated = true;
-            }
-        }
-    }
-
-    pub fn indentValues(self: *Pkgbuild, spaces_count: usize) !void {
-        var buf: std.ArrayList(u8) = .empty;
-        defer buf.deinit(self.allocator);
-
-        var fields_iter = self.fields.iterator();
-        while (fields_iter.next()) |field| {
-            if (!mem.endsWith(u8, field.key_ptr.*, "()")) continue;
-
-            buf.clearRetainingCapacity();
-            var lines_iter = mem.splitScalar(u8, field.value_ptr.*.value, '\n');
-            while (lines_iter.next()) |line| {
-                try buf.appendNTimes(self.allocator, ' ', spaces_count);
-                try buf.appendSlice(self.allocator, line);
-                try buf.append(self.allocator, '\n');
-            }
-            self.allocator.free(field.value_ptr.*.value);
-            field.value_ptr.*.value = try buf.toOwnedSlice(self.allocator);
-        }
-    }
-
-    /// Look up a field value by name (e.g. "pkgver", "depends", "package()").
-    pub fn get(self: *const Pkgbuild, name: []const u8) ?[]const u8 {
-        const content = self.fields.get(name) orelse return null;
-        return content.value;
+    pub fn deinit(self: *Content, allocator: Allocator) void {
+        allocator.free(self.value);
+        allocator.destroy(self);
     }
 };
 
@@ -468,6 +395,79 @@ const Parser = struct {
         }
     }
 };
+
+pub fn init(allocator: Allocator, file_contents: []const u8) Pkgbuild {
+    return .{
+        .allocator = allocator,
+        .file_contents = file_contents,
+        .fields = std.StringHashMap(*Content).init(allocator),
+    };
+}
+
+pub fn deinit(self: *Pkgbuild) void {
+    var iter = self.fields.iterator();
+    while (iter.next()) |entry| {
+        self.allocator.free(entry.key_ptr.*);
+        entry.value_ptr.*.deinit(self.allocator);
+    }
+    self.fields.deinit();
+}
+
+pub fn readLines(self: *Pkgbuild) !void {
+    var parser = Parser{
+        .src = self.file_contents,
+        .pos = 0,
+        .allocator = self.allocator,
+        .fields = &self.fields,
+    };
+    try parser.parse();
+}
+
+pub fn comparePrev(self: *Pkgbuild, prev_pkgbuild: Pkgbuild) !void {
+    for (RelevantFields) |field| {
+        const prev = prev_pkgbuild.fields.get(field);
+        const curr = self.fields.get(field);
+        if (prev == null and curr != null) {
+            curr.?.updated = true;
+        } else if (prev != null and curr == null) {
+            // Field was removed - create a placeholder entry to mark as updated
+            const content = try Content.init(self.allocator, try self.allocator.dupe(u8, "(removed)"));
+            content.updated = true;
+            const key_copy = try self.allocator.dupe(u8, field);
+            try self.fields.put(key_copy, content);
+        } else if (prev == null and curr == null) {
+            continue;
+        } else if (prev != null and curr != null and !mem.eql(u8, prev.?.value, curr.?.value)) {
+            curr.?.updated = true;
+        }
+    }
+}
+
+pub fn indentValues(self: *Pkgbuild, spaces_count: usize) !void {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(self.allocator);
+
+    var fields_iter = self.fields.iterator();
+    while (fields_iter.next()) |field| {
+        if (!mem.endsWith(u8, field.key_ptr.*, "()")) continue;
+
+        buf.clearRetainingCapacity();
+        var lines_iter = mem.splitScalar(u8, field.value_ptr.*.value, '\n');
+        while (lines_iter.next()) |line| {
+            try buf.appendNTimes(self.allocator, ' ', spaces_count);
+            try buf.appendSlice(self.allocator, line);
+            try buf.append(self.allocator, '\n');
+        }
+        self.allocator.free(field.value_ptr.*.value);
+        field.value_ptr.*.value = try buf.toOwnedSlice(self.allocator);
+    }
+}
+
+/// Look up a field value by name (e.g. "pkgver", "depends", "package()").
+pub fn get(self: *const Pkgbuild, name: []const u8) ?[]const u8 {
+    const content = self.fields.get(name) orelse return null;
+    return content.value;
+}
 
 fn isArrayWs(c: u8) bool {
     return c == ' ' or c == '\t' or c == '\n' or c == '\r';
