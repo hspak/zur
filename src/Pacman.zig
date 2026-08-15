@@ -869,10 +869,10 @@ fn execCommand(self: *Pacman, argv: []const []const u8) !void {
     // terminal back, which is what keeps the output from looking garbled.
     // The previous foreground group is captured so it can be restored.
     const stdin_fd = std.posix.STDIN_FILENO;
-    const original_fg: ?std.posix.pid_t = blk: {
+    const original_fg: ?std.posix.pid_t = original_fg: {
         const pgrp = c.tcgetpgrp(stdin_fd);
-        if (pgrp == -1) break :blk null; // not a terminal, or not a member
-        break :blk pgrp;
+        if (pgrp == -1) break :original_fg null; // not a terminal, or not a member
+        break :original_fg pgrp;
     };
     if (original_fg != null) {
         _ = c.tcsetpgrp(stdin_fd, child.id.?);
