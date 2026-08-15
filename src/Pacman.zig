@@ -99,7 +99,7 @@ fn machineArch() []const u8 {
         .x86_64 => "x86_64",
         .aarch64 => "aarch64",
         .riscv64 => "riscv64",
-        else => "x86_64",
+        else => @compileError("unsupported architecture for package filenames"),
     };
 }
 
