@@ -12,6 +12,7 @@ pkgs: std.ArrayList([]const u8) = .empty,
 allocator: Allocator,
 action: Action = .unset,
 
+/// What zur should do after parsing argv.
 pub const Action = enum {
     unset,
     search,
@@ -20,15 +21,18 @@ pub const Action = enum {
     print_help,
 };
 
+/// Empty package list and `.unset` action.
 pub fn init(allocator: Allocator) Args {
     return .{ .allocator = allocator };
 }
 
+/// Free the package-name list. Names are borrowed from argv and not freed.
 pub fn deinit(self: *Args) void {
     self.pkgs.deinit(self.allocator);
     self.* = undefined;
 }
 
+/// Read `-S`/`-Ss`/`-h`/`-v` from `process_args`. Package names are borrowed.
 pub fn parse(self: *Args, process_args: std.process.Args) Error!void {
     var args_iter = process_args.iterate();
     _ = args_iter.next(); // skip argv[0]

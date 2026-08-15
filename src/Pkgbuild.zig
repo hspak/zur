@@ -22,7 +22,7 @@ allocator: Allocator,
 file_contents: []const u8,
 fields: std.StringHashMapUnmanaged(*Content) = .empty,
 
-/// Fields compared when reviewing PKGBUILD changes between versions.
+// Fields compared when reviewing PKGBUILD changes between versions.
 const relevant_fields = &[_][]const u8{
     "install",
     "source",
@@ -383,6 +383,7 @@ const Parser = struct {
     }
 };
 
+/// Bind `file_contents` (not copied) and an empty field map.
 pub fn init(allocator: Allocator, file_contents: []const u8) Pkgbuild {
     return .{
         .allocator = allocator,
@@ -390,6 +391,7 @@ pub fn init(allocator: Allocator, file_contents: []const u8) Pkgbuild {
     };
 }
 
+/// Free parsed field keys and values. Does not free `file_contents`.
 pub fn deinit(self: *Pkgbuild) void {
     var iter = self.fields.iterator();
     while (iter.next()) |entry| {
@@ -401,6 +403,7 @@ pub fn deinit(self: *Pkgbuild) void {
     self.* = undefined;
 }
 
+/// Parse `file_contents` into `fields`. Last assignment of a name wins.
 pub fn readLines(self: *Pkgbuild) Error!void {
     var parser = Parser{
         .src = self.file_contents,
@@ -411,6 +414,7 @@ pub fn readLines(self: *Pkgbuild) Error!void {
     try parser.parse();
 }
 
+/// Mark relevant fields as `updated` when they differ from `prev_pkgbuild`.
 pub fn comparePrev(self: *Pkgbuild, prev_pkgbuild: Pkgbuild) Error!void {
     for (relevant_fields) |field| {
         const prev = prev_pkgbuild.fields.get(field);
@@ -435,6 +439,7 @@ pub fn comparePrev(self: *Pkgbuild, prev_pkgbuild: Pkgbuild) Error!void {
     }
 }
 
+/// Prefix every line of function-body fields with `spaces_count` spaces.
 pub fn indentValues(self: *Pkgbuild, spaces_count: usize) Error!void {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(self.allocator);

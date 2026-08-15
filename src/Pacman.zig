@@ -58,14 +58,11 @@ pacman_output: ?[]u8 = null,
 zur_path: []const u8,
 zur_pkg_dir: []const u8,
 updates: usize = 0,
-/// Package bases whose AUR dependencies have already been resolved during
-/// this run, so recursive dependency resolution never re-enters or loops.
+// Package bases already resolved this run, so dep recursion cannot loop.
 aur_deps_done: std.StringHashMapUnmanaged(void) = .empty,
-/// Lazily-initialized libalpm handle, reused for every local-db query so
-/// alpm is only initialized once per run (see getAlpm).
+// Lazily-initialized libalpm handle (see getAlpm).
 alpm_state: ?Alpm = null,
-/// Persisted HTTP client, reused across all AUR queries so connections and
-/// TLS sessions are kept alive (see getRequest).
+// Persisted HTTP client (see getRequest).
 request_state: ?Request = null,
 
 stdout_buffer: [4096]u8 = undefined,
@@ -73,12 +70,14 @@ stdout_writer: ?File.Writer = null,
 stdin_buffer: [4096]u8 = undefined,
 stdin_reader: ?File.Reader = null,
 
+/// One local/AUR package tracked for install or update.
 pub const Package = struct {
     base_name: ?[]const u8 = null,
     version: []const u8,
     aur_version: ?[]const u8 = null,
     requires_update: bool = false,
 
+    /// `version` is borrowed. `"0"` is the fresh-install sentinel.
     pub fn init(version: []const u8) Package {
         return .{ .version = version };
     }
@@ -88,14 +87,10 @@ pub const Package = struct {
 // their AUR pkgver matches the installed one (see isGitPkg/shouldUpdate) and
 // never reuse a cached artifact (see findExistingPackage).
 
-/// Files larger than this are skipped when diffing a package snapshot. A
-/// .install/.sh file that large is unusual, and diffing it would flood the
-/// terminal, so a fixed limit keeps output sane.
+// Files larger than this are skipped when diffing a package snapshot.
 const max_snapshot_diff_bytes: usize = 4096;
 
-/// The architecture component used in built package filenames for this
-/// machine. zur is built natively (via its own PKGBUILD), so the compile-time
-/// target matches the running machine.
+// Architecture component in built package filenames (native compile target).
 fn machineArch() []const u8 {
     return switch (@import("builtin").cpu.arch) {
         .x86_64 => "x86_64",
@@ -105,15 +100,12 @@ fn machineArch() []const u8 {
     };
 }
 
-/// True if `name` is a VCS/-git package (e.g. `neovim-git`). These are rebuilt
-/// eagerly because their version string changes rarely, but the upstream git
-/// source moves constantly.
+// VCS/-git packages (e.g. neovim-git): rebuild even when pkgver is unchanged.
 fn isGitPkg(name: []const u8) bool {
     return mem.endsWith(u8, name, "-git");
 }
 
-/// Decide whether a package needs an update or install. `remote_newer` is the
-/// result of an alpm version comparison (remote vs local).
+// Whether a package needs an update/install. `remote_newer` is alpm vercmp.
 fn shouldUpdate(name: []const u8, local: []const u8, remote: []const u8, remote_newer: bool) bool {
     // A -git package is rebuilt whenever its AUR pkgver matches the installed
     // one: the version string rarely changes, but the upstream source may have
@@ -128,10 +120,8 @@ fn shouldUpdate(name: []const u8, local: []const u8, remote: []const u8, remote_
     return remote_newer;
 }
 
-/// True if `name` refers to package `want` as a full leading component, so
-/// "foo" doesn't also match "foobar-...". Used when deciding which built
-/// artifacts belong to a package (for removal/keeps and for the "already
-/// built" fast-path).
+// True if `name` refers to package `want` as a full leading component, so
+// "foo" doesn't also match "foobar-...".
 fn artifactNameForPkg(name: []const u8, want: []const u8) bool {
     if (name.len < want.len) return false;
     if (!mem.startsWith(u8, name, want)) return false;
@@ -139,13 +129,9 @@ fn artifactNameForPkg(name: []const u8, want: []const u8) bool {
     return name[want.len] == '-'; // next component boundary
 }
 
-/// Turn a dependency string from an AUR info `Depends`/`MakeDepends` entry
-/// into a bare package name, resolving the common forms AUR packages use:
-///   "foo"        -> "foo"
-///   "foo>=1.2.3" -> "foo"   (version constraint)
-///   "foo|bar"    -> "foo"   (first OR-alternative)
-///   "$pkgname"   -> error  (self-reference, unresolvable via AUR)
-/// The caller owns the returned slice.
+// Bare package name from an AUR Depends/MakeDepends string.
+// "foo>=1.2.3" -> "foo", "foo|bar" -> "foo", "$pkgname" -> error.
+// The caller owns the returned slice.
 fn normalizeDepName(allocator: Allocator, dep: []const u8) ![]const u8 {
     const trimmed = mem.trim(u8, dep, " \t");
     if (trimmed.len == 0) return error.EmptyDependency;
@@ -171,9 +157,7 @@ fn normalizeDepName(allocator: Allocator, dep: []const u8) ![]const u8 {
     return try allocator.dupe(u8, name);
 }
 
-/// Decompress a gzip-compressed tar archive `archive_name` located in
-/// `dest_dir` and extract it into the same directory, stripping the single
-/// top-level directory that AUR snapshots are wrapped in.
+// Extract `archive_name` in `dest_dir`, stripping the AUR snapshot top dir.
 fn extractTarGz(io: Io, dest_dir: Io.Dir, archive_name: []const u8) !void {
     const file = try dest_dir.openFile(io, archive_name, .{});
     defer file.close(io);
@@ -195,6 +179,7 @@ fn extractTarGz(io: Io, dest_dir: Io.Dir, archive_name: []const u8) !void {
     try dest_dir.deleteFile(io, archive_name);
 }
 
+/// Create `~/.zur/.pkg` and an empty package set. `allocator` should outlive the run.
 pub fn init(allocator: Allocator, io: Io, environ_map: *const std.process.Environ.Map) Error!Pacman {
     const home = environ_map.get("HOME") orelse return error.NoHomeEnvVarFound;
     const zur_dir = ".zur";
@@ -214,6 +199,7 @@ pub fn init(allocator: Allocator, io: Io, environ_map: *const std.process.Enviro
     };
 }
 
+/// Free owned packages, maps, alpm, and the HTTP client.
 pub fn deinit(self: *Pacman) void {
     self.flushStdout();
     if (self.pacman_output) |out| self.allocator.free(out);
@@ -231,7 +217,7 @@ pub fn deinit(self: *Pacman) void {
     self.* = undefined;
 }
 
-/// The shared libalpm handle, initializing it once on first use.
+// The shared libalpm handle, initializing it once on first use.
 fn getAlpm(self: *Pacman) !*Alpm {
     if (self.alpm_state == null) {
         self.alpm_state = try Alpm.init(self.allocator);
@@ -239,7 +225,7 @@ fn getAlpm(self: *Pacman) !*Alpm {
     return &self.alpm_state.?;
 }
 
-/// The shared HTTP client, initializing it once on first use.
+// The shared HTTP client, initializing it once on first use.
 fn getRequest(self: *Pacman) *Request {
     if (self.request_state == null) {
         self.request_state = Request.init(self.allocator, self.io);
@@ -266,18 +252,13 @@ fn print(self: *Pacman, comptime format: []const u8, args: anytype) !void {
     try w.print(format, args);
 }
 
-/// Flush buffered stdout at the points where visibility/ordering matters:
-/// before interactive prompts, before spawning a child that inherits
-/// stdout, and on teardown. This lets `print` batch output instead of
-/// doing a write syscall per line.
+// Flush before prompts, before a child inherits stdout, and on teardown.
 fn flushStdout(self: *Pacman) void {
     const w = self.stdout();
     w.flush() catch {};
 }
 
-/// Enumerate installed AUR packages directly through libalpm instead of
-/// spawning `pacman -Qm`. (This used to be blocked on ziglang/zig#1499,
-/// translate-c not handling libalpm's bitfields; that's resolved now.)
+/// Load installed foreign (AUR) packages from libalpm into `pkgs`.
 pub fn fetchLocalPackages(self: *Pacman) Error!void {
     if (self.pkgs.count() != 0) {
         return error.BadInitialPkgsState;
@@ -295,6 +276,7 @@ pub fn fetchLocalPackages(self: *Pacman) Error!void {
     }
 }
 
+/// Queue `pkg_list` for install using the version-`"0"` sentinel.
 pub fn setInstallPackages(self: *Pacman, pkg_list: std.ArrayList([]const u8)) Error!void {
     if (self.pkgs.count() != 0) {
         return error.BadInitialPkgsState;
@@ -311,6 +293,7 @@ pub fn setInstallPackages(self: *Pacman, pkg_list: std.ArrayList([]const u8)) Er
     }
 }
 
+/// Fill each tracked package's `aur_version` (and `base_name` if split).
 pub fn fetchRemoteAurVersions(self: *Pacman) Error!void {
     self.aur_resp = try aur.queryAll(self.allocator, self.getRequest(), self.pkgs);
     if (self.aur_resp.?.resultcount == 0) {
@@ -332,6 +315,7 @@ pub fn fetchRemoteAurVersions(self: *Pacman) Error!void {
     }
 }
 
+/// Mark packages that need install/update and print the list.
 pub fn compareVersions(self: *Pacman) Error!void {
     var pkgs_iter = self.pkgs.iterator();
     while (pkgs_iter.next()) |pkg| {
@@ -368,6 +352,7 @@ pub fn compareVersions(self: *Pacman) Error!void {
     }
 }
 
+/// Download, review, build, and install every package marked for update.
 pub fn processOutOfDate(self: *Pacman) Error!void {
     if (self.updates == 0) {
         try self.print("{s}::{s} {s}All AUR packages are up-to-date.{s}\n", .{
@@ -455,19 +440,14 @@ pub fn processOutOfDate(self: *Pacman) Error!void {
     }
 }
 
-/// Install `pkg` (download snapshot, build, install), first resolving and
-/// building any AUR-only dependencies it needs. Official/repo deps are
-/// left for `makepkg -s` to satisfy during the build; only deps that exist
-/// in the AUR and aren't already installed need zur to build them first.
+// Install `pkg` after building any AUR-only deps. Official deps go to makepkg -s.
 fn installWithDeps(self: *Pacman, pkg_name: []const u8, pkg: *Package) !void {
     try self.ensureAurDepsInstalled(pkg_name);
     try self.downloadAndExtractPackage(pkg_name, pkg);
     try self.compareUpdateAndInstall(pkg_name, pkg);
 }
 
-/// Recursively ensure that every AUR-only dependency of `pkg_name` is
-/// built and installed before the package itself. `pkg_name` is marked
-/// handled up front so dependency cycles and repeated packages terminate.
+// Recursively build AUR-only deps of `pkg_name`. Marked handled first to stop cycles.
 fn ensureAurDepsInstalled(self: *Pacman, pkg_name: []const u8) !void {
     if (self.aur_deps_done.contains(pkg_name)) return;
     try self.aur_deps_done.put(self.allocator, pkg_name, {});
@@ -505,9 +485,7 @@ fn ensureAurDepsInstalled(self: *Pacman, pkg_name: []const u8) !void {
     }
 }
 
-/// The full AUR info for `name`: from the already-fetched response if
-/// present, otherwise a fresh single-name query. Returns null when `name`
-/// isn't an AUR package (so it's an official/repo dependency).
+// Full AUR info for `name`, or null if it is an official/repo dependency.
 fn getAurInfo(self: *Pacman, name: []const u8) !?aur.Info {
     if (self.aurInfoFor(name)) |info| return info;
     return try aur.queryName(self.allocator, self.getRequest(), name);
@@ -1081,6 +1059,7 @@ fn stdinReadByte(self: *Pacman) !u8 {
     return line[0];
 }
 
+/// Search the AUR by name and print hits, marking already-installed packages.
 pub fn search(
     allocator: Allocator,
     io: Io,

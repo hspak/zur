@@ -11,6 +11,7 @@ pub const Error = Allocator.Error || std.http.Client.FetchError;
 client: std.http.Client,
 allocator: Allocator,
 
+/// Wrap a new `std.http.Client`. Reuse one instance across requests.
 pub fn init(allocator: Allocator, io: Io) Request {
     return .{
         .client = .{
@@ -21,6 +22,7 @@ pub fn init(allocator: Allocator, io: Io) Request {
     };
 }
 
+/// Tear down the HTTP client.
 pub fn deinit(self: *Request) void {
     self.client.deinit();
     self.* = undefined;

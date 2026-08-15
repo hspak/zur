@@ -25,12 +25,13 @@ pub const ForeignPackage = struct {
     version: []const u8,
 };
 
-/// The sync repos zur knows about. Hardcoded to the standard core/extra/multilib
-/// set, which covers the default Arch installation zur targets.
+// The sync repos zur knows about. Hardcoded to the standard core/extra/multilib
+// set, which covers the default Arch installation zur targets.
 const repos = [_][*:0]const u8{ "core", "extra", "multilib" };
 
 const sig_level = alpm.ALPM_SIG_PACKAGE_OPTIONAL | alpm.ALPM_SIG_DATABASE_OPTIONAL;
 
+/// Open a libalpm handle and register the sync repos. Expensive; reuse one instance.
 pub fn init(allocator: std.mem.Allocator) Error!Alpm {
     var err: alpm.alpm_errno_t = 0;
     const handle = alpm.alpm_initialize("/", "/var/lib/pacman/", &err) orelse {
@@ -55,6 +56,7 @@ pub fn init(allocator: std.mem.Allocator) Error!Alpm {
     };
 }
 
+/// Release the libalpm handle.
 pub fn deinit(self: *Alpm) void {
     _ = alpm.alpm_release(self.handle);
     self.* = undefined;
@@ -102,12 +104,9 @@ pub fn isInstalled(self: *Alpm, name: []const u8) Error!bool {
     return alpm.alpm_db_get_pkg(self.local_db, @ptrCast(name_cstr.ptr)) != null;
 }
 
-/// True if `name` appears in any of the registered sync database caches.
-///
-/// `alpm_db_get_pkg` expects a null-terminated C string, but `name` is a
-/// plain slice, so a sentinel-terminated copy is handed to alpm (mirroring
-/// isInstalled) rather than trusting that `name` points at an existing C
-/// string.
+// True if `name` appears in any of the registered sync database caches.
+// alpm_db_get_pkg wants a C string, so this makes a sentinel copy (like
+// isInstalled) rather than trusting that `name` is already terminated.
 fn isInSyncDbs(self: *Alpm, name: []const u8) !bool {
     const name_cstr = try std.mem.concatWithSentinel(self.allocator, u8, &.{name}, 0);
     defer self.allocator.free(name_cstr);
@@ -121,6 +120,7 @@ fn isInSyncDbs(self: *Alpm, name: []const u8) !bool {
     return false;
 }
 
+/// True if `ver_a` is a newer alpm version than `ver_b`.
 pub fn isNewerThan(allocator: std.mem.Allocator, ver_a: []const u8, ver_b: []const u8) Error!bool {
     const ver_a_sentinel = try std.mem.concatWithSentinel(allocator, u8, &.{ver_a}, 0);
     defer allocator.free(ver_a_sentinel);
