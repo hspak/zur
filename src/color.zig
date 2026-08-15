@@ -1,17 +1,17 @@
-pub const Esc = "\x1B";
-pub const Csi = Esc ++ "[";
-pub const Reset = Csi ++ "0m";
+pub const esc = "\x1B";
+pub const csi = esc ++ "[";
+pub const reset = csi ++ "0m";
 
-pub const Bold = Csi ++ "1m";
-pub const ForegroundGreen = Csi ++ "32m";
-pub const ForegroundRed = Csi ++ "31m";
-pub const ForegroundYellow = Csi ++ "33m";
-pub const ForegroundBlue = Csi ++ "34m";
-pub const ForegroundMagenta = Csi ++ "35m";
-pub const ForegroundCyan = Csi ++ "36m";
+pub const bold = csi ++ "1m";
+pub const foreground_green = csi ++ "32m";
+pub const foreground_red = csi ++ "31m";
+pub const foreground_yellow = csi ++ "33m";
+pub const foreground_blue = csi ++ "34m";
+pub const foreground_magenta = csi ++ "35m";
+pub const foreground_cyan = csi ++ "36m";
 
-pub const BoldForegroundBlue = Bold ++ ForegroundBlue;
-pub const BoldForegroundYellow = Bold ++ ForegroundYellow;
-pub const BoldForegroundGreen = Bold ++ ForegroundGreen;
-pub const BoldForegroundMagenta = Bold ++ ForegroundMagenta;
-pub const BoldForegroundCyan = Bold ++ ForegroundCyan;
+pub const bold_foreground_blue = bold ++ foreground_blue;
+pub const bold_foreground_yellow = bold ++ foreground_yellow;
+pub const bold_foreground_green = bold ++ foreground_green;
+pub const bold_foreground_magenta = bold ++ foreground_magenta;
+pub const bold_foreground_cyan = bold ++ foreground_cyan;

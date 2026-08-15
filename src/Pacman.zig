@@ -318,11 +318,11 @@ pub fn compareVersions(self: *Pacman) !void {
 
         if (pkg.value_ptr.*.aur_version == null) {
             try self.print("{s}warning:{s} {s}{s}{s} was orphaned or non-existant in AUR, skipping\n", .{
-                color.BoldForegroundYellow,
-                color.Reset,
-                color.Bold,
+                color.bold_foreground_yellow,
+                color.reset,
+                color.bold,
                 pkg.key_ptr.*,
-                color.Reset,
+                color.reset,
             });
             continue;
         }
@@ -339,7 +339,7 @@ pub fn compareVersions(self: *Pacman) !void {
         return;
     }
     pkgs_iter = self.pkgs.iterator();
-    try self.print("{s}::{s} Packages to be installed or updated:\n", .{ color.BoldForegroundBlue, color.Reset });
+    try self.print("{s}::{s} Packages to be installed or updated:\n", .{ color.bold_foreground_blue, color.reset });
     while (pkgs_iter.next()) |pkg| {
         if (pkg.value_ptr.*.requires_update) {
             try self.print(" {s}\n", .{pkg.key_ptr.*});
@@ -350,10 +350,10 @@ pub fn compareVersions(self: *Pacman) !void {
 pub fn processOutOfDate(self: *Pacman) !void {
     if (self.updates == 0) {
         try self.print("{s}::{s} {s}All AUR packages are up-to-date.{s}\n", .{
-            color.BoldForegroundBlue,
-            color.Reset,
-            color.Bold,
-            color.Reset,
+            color.bold_foreground_blue,
+            color.reset,
+            color.bold,
+            color.reset,
         });
         return;
     }
@@ -372,14 +372,14 @@ pub fn processOutOfDate(self: *Pacman) !void {
             if (pkg.value_ptr.*.base_name) |base| {
                 if (processed_bases.get(base) != null) {
                     try self.print("{s}::{s} {s}{s}{s} is part of base {s}{s}{s}, already handled\n", .{
-                        color.BoldForegroundBlue,
-                        color.Reset,
-                        color.Bold,
+                        color.bold_foreground_blue,
+                        color.reset,
+                        color.bold,
                         pkg.key_ptr.*,
-                        color.Reset,
-                        color.Bold,
+                        color.reset,
+                        color.bold,
                         base,
-                        color.Reset,
+                        color.reset,
                     });
                     continue;
                 }
@@ -388,12 +388,12 @@ pub fn processOutOfDate(self: *Pacman) !void {
             if (try self.findExistingPackage(pkg.key_ptr.*, pkg.value_ptr.*.aur_version.?)) |full_pkg_name| {
                 defer self.allocator.free(full_pkg_name);
                 try self.print("{s}warning:{s} Found existing up-to-date package: {s}{s}-{s}{s}, deferring to pacman -U...\n", .{
-                    color.BoldForegroundYellow,
-                    color.Reset,
-                    color.Bold,
+                    color.bold_foreground_yellow,
+                    color.reset,
+                    color.bold,
                     pkg.key_ptr.*,
                     pkg.value_ptr.*.aur_version.?,
-                    color.Reset,
+                    color.reset,
                 });
                 try self.installExistingPackage(full_pkg_name);
                 // Keep going: other packages may also be out of date. An
@@ -405,28 +405,28 @@ pub fn processOutOfDate(self: *Pacman) !void {
             // The install hack is bleeding into here.
             if (!mem.eql(u8, pkg.value_ptr.*.version, "0")) {
                 try self.print("{s}::{s} Updating {s}{s}{s}: {s}{s}{s} -> {s}{s}{s}\n", .{
-                    color.BoldForegroundBlue,
-                    color.Reset,
-                    color.Bold,
+                    color.bold_foreground_blue,
+                    color.reset,
+                    color.bold,
                     pkg.key_ptr.*,
-                    color.Reset,
-                    color.ForegroundRed,
+                    color.reset,
+                    color.foreground_red,
                     pkg.value_ptr.*.version,
-                    color.Reset,
-                    color.ForegroundGreen,
+                    color.reset,
+                    color.foreground_green,
                     pkg.value_ptr.*.aur_version.?,
-                    color.Reset,
+                    color.reset,
                 });
             } else {
                 try self.print("{s}::{s} Installing {s}{s}{s} {s}{s}{s}\n", .{
-                    color.BoldForegroundBlue,
-                    color.Reset,
-                    color.Bold,
+                    color.bold_foreground_blue,
+                    color.reset,
+                    color.bold,
                     pkg.key_ptr.*,
-                    color.Reset,
-                    color.ForegroundGreen,
+                    color.reset,
+                    color.foreground_green,
                     pkg.value_ptr.*.aur_version.?,
-                    color.Reset,
+                    color.reset,
                 });
             }
             try self.installWithDeps(pkg.key_ptr.*, pkg.value_ptr.*);
@@ -558,10 +558,10 @@ fn downloadAndExtractPackage(self: *Pacman, pkg_name: []const u8, pkg: *Package)
         }
         d.close(self.io);
         if (is_valid) {
-            try self.print(" skipping download, {s}{s}{s} already exists...\n", .{ color.Bold, full_dir, color.Reset });
+            try self.print(" skipping download, {s}{s}{s} already exists...\n", .{ color.bold, full_dir, color.reset });
             return;
         }
-        try self.print(" removing incomplete snapshot {s}{s}{s}, re-downloading...\n", .{ color.Bold, full_dir, color.Reset });
+        try self.print(" removing incomplete snapshot {s}{s}{s}, re-downloading...\n", .{ color.bold, full_dir, color.reset });
         var zur_dir = try Dir.openDirAbsolute(self.io, self.zur_path, .{});
         defer zur_dir.close(self.io);
         try zur_dir.deleteTree(self.io, dir_name);
@@ -575,9 +575,9 @@ fn downloadAndExtractPackage(self: *Pacman, pkg_name: []const u8, pkg: *Package)
         url = try mem.join(self.allocator, "/", &[_][]const u8{ aur.Snapshot, file_name });
     }
 
-    try self.print(" downloading from: {s}{s}{s}\n", .{ color.Bold, url, color.Reset });
+    try self.print(" downloading from: {s}{s}{s}\n", .{ color.bold, url, color.reset });
     const snapshot = try self.getRequest().getRequest(url);
-    try self.print(" downloaded to: {s}{s}{s}\n", .{ color.Bold, full_file_path, color.Reset });
+    try self.print(" downloaded to: {s}{s}{s}\n", .{ color.bold, full_file_path, color.reset });
 
     try Dir.cwd().createDirPath(self.io, full_dir);
     var dl_dir = try Dir.openDirAbsolute(self.io, full_dir, .{});
@@ -623,11 +623,11 @@ fn compareUpdateAndInstall(self: *Pacman, pkg_name: []const u8, pkg: *Package) !
         if (field.value_ptr.*.updated) {
             at_least_one_diff = true;
             try self.print("{s}::{s} {s}{s}{s} was updated: {s}\n", .{
-                color.BoldForegroundBlue,
-                color.Reset,
-                color.Bold,
+                color.bold_foreground_blue,
+                color.reset,
+                color.bold,
                 field.key_ptr.*,
-                color.Reset,
+                color.reset,
                 field.value_ptr.*.value,
             });
         }
@@ -642,11 +642,11 @@ fn compareUpdateAndInstall(self: *Pacman, pkg_name: []const u8, pkg: *Package) !
                 // One side is missing this file (added or removed in this
                 // update), so there's nothing to compare.
                 try self.print("{s}->{s} {s}{s}{s} only exists in one version; skipping diff\n", .{
-                    color.ForegroundBlue,
-                    color.Reset,
-                    color.Bold,
+                    color.foreground_blue,
+                    color.reset,
+                    color.bold,
                     file.key_ptr.*,
-                    color.Reset,
+                    color.reset,
                 });
                 continue;
             }
@@ -668,7 +668,7 @@ fn compareUpdateAndInstall(self: *Pacman, pkg_name: []const u8, pkg: *Package) !
             try self.print("\n", .{});
         }
     } else {
-        try self.print("{s}::{s} No meaningful diff's found\n", .{ color.ForegroundBlue, color.Reset });
+        try self.print("{s}::{s} No meaningful diff's found\n", .{ color.foreground_blue, color.reset });
     }
     try self.install(pkg_name, pkg);
 }
@@ -713,12 +713,12 @@ fn printDiff(self: *Pacman, name: []const u8, old_content: []const u8, new_conte
     }
 
     try self.print("{s}::{s} {s}{s}{s} was updated:{s}\n", .{
-        color.BoldForegroundBlue,
-        color.Reset,
-        color.Bold,
+        color.bold_foreground_blue,
+        color.reset,
+        color.bold,
         name,
-        color.Reset,
-        color.Reset,
+        color.reset,
+        color.reset,
     });
     i = 0;
     var j: usize = 0;
@@ -727,18 +727,18 @@ fn printDiff(self: *Pacman, name: []const u8, old_content: []const u8, new_conte
             i += 1;
             j += 1;
         } else if (row(dp, m, i + 1)[j] >= row(dp, m, i)[j + 1]) {
-            try self.print("{s}- {s}{s}\n", .{ color.ForegroundRed, old[i], color.Reset });
+            try self.print("{s}- {s}{s}\n", .{ color.foreground_red, old[i], color.reset });
             i += 1;
         } else {
-            try self.print("{s}+ {s}{s}\n", .{ color.ForegroundGreen, new[j], color.Reset });
+            try self.print("{s}+ {s}{s}\n", .{ color.foreground_green, new[j], color.reset });
             j += 1;
         }
     }
     while (i < n) : (i += 1) {
-        try self.print("{s}- {s}{s}\n", .{ color.ForegroundRed, old[i], color.Reset });
+        try self.print("{s}- {s}{s}\n", .{ color.foreground_red, old[i], color.reset });
     }
     while (j < m) : (j += 1) {
-        try self.print("{s}+ {s}{s}\n", .{ color.ForegroundGreen, new[j], color.Reset });
+        try self.print("{s}+ {s}{s}\n", .{ color.foreground_green, new[j], color.reset });
     }
 }
 
@@ -755,12 +755,12 @@ fn bareInstall(self: *Pacman, pkg_name: []const u8, pkg: *Package) !void {
             try pkgbuild.readLines();
             const format = "\n{s}::{s} File: {s}PKGBUILD{s} {s}===================={s}\n";
             try self.print(format, .{
-                color.BoldForegroundBlue,
-                color.Reset,
-                color.Bold,
-                color.Reset,
-                color.BoldForegroundBlue,
-                color.Reset,
+                color.bold_foreground_blue,
+                color.reset,
+                color.bold,
+                color.reset,
+                color.bold_foreground_blue,
+                color.reset,
             });
 
             try pkgbuild.indentValues(2);
@@ -774,13 +774,13 @@ fn bareInstall(self: *Pacman, pkg_name: []const u8, pkg: *Package) !void {
             // display only, so the hot diff path stays copy-free.
             const format = "\n{s}::{s} File: {s}{s}{s} {s}===================={s}\n";
             try self.print(format, .{
-                color.BoldForegroundBlue,
-                color.Reset,
-                color.Bold,
+                color.bold_foreground_blue,
+                color.reset,
+                color.bold,
                 pkg_file.key_ptr.*,
-                color.Reset,
-                color.BoldForegroundBlue,
-                color.Reset,
+                color.reset,
+                color.bold_foreground_blue,
+                color.reset,
             });
             var buf: std.ArrayList(u8) = .empty;
             defer buf.deinit(self.allocator);
@@ -962,8 +962,8 @@ fn removeStaleArtifacts(self: *Pacman, pkg_name: []const u8, dir_path: []const u
         for (marked_for_removal) |artifact| {
             try parent.deleteTree(self.io, artifact.name);
             try self.print("  {s}->{s} deleting stale file or dir: {s}\n", .{
-                color.ForegroundBlue,
-                color.Reset,
+                color.foreground_blue,
+                color.reset,
                 artifact.name,
             });
         }
@@ -982,7 +982,7 @@ fn snapshotFiles(self: *Pacman, pkg_name: []const u8, pkg_version: []const u8) !
         else => return err,
     };
     defer dir.close(self.io);
-    try self.print(" reading files in {s}{s}{s}\n", .{ color.Bold, path, color.Reset });
+    try self.print(" reading files in {s}{s}{s}\n", .{ color.bold, path, color.reset });
 
     var files_map = std.StringHashMap([]u8).init(self.allocator);
     var dir_iter = dir.iterate();
@@ -1003,11 +1003,11 @@ fn snapshotFiles(self: *Pacman, pkg_name: []const u8, pkg_version: []const u8) !
         const file_contents = dir.readFileAlloc(self.io, node.name, self.allocator, .limited(max_snapshot_diff_bytes)) catch |err| switch (err) {
             error.StreamTooLong => {
                 try self.print("  {s}->{s} skipping diff for large file: {s}{s}{s}\n", .{
-                    color.ForegroundBlue,
-                    color.Reset,
-                    color.Bold,
+                    color.foreground_blue,
+                    color.reset,
+                    color.bold,
                     node.name,
-                    color.Reset,
+                    color.reset,
                 });
                 continue;
             },
@@ -1044,20 +1044,20 @@ pub fn search(
     defer pacman.deinit();
     try pacman.fetchLocalPackages();
 
-    const installed = color.BoldForegroundCyan ++ "[Installed]" ++ color.Reset;
+    const installed = color.bold_foreground_cyan ++ "[Installed]" ++ color.reset;
     const resp = try aur.search(allocator, pacman.getRequest(), pkg, .name);
     for (resp.results) |result| {
         const installed_text = if (pacman.pkgs.get(result.Name) == null) "" else installed;
         const desc = result.Description orelse "(missing)";
         try pacman.print("{s}aur/{s}{s}{s}{s} {s}{s}{s} {s} ({d})\n    {s}\n", .{
-            color.BoldForegroundMagenta,
-            color.Reset,
-            color.Bold,
+            color.bold_foreground_magenta,
+            color.reset,
+            color.bold,
             result.Name,
-            color.Reset,
-            color.BoldForegroundGreen,
+            color.reset,
+            color.bold_foreground_green,
             result.Version,
-            color.Reset,
+            color.reset,
             installed_text,
             result.Popularity,
             desc,
