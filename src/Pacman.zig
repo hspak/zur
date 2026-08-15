@@ -1017,8 +1017,8 @@ fn snapshotFiles(self: *Pacman, pkg_name: []const u8, pkg_version: []const u8) !
         // Store raw file contents. Any indentation is applied only at
         // display time (bareInstall), so the update/diff path never copies
         // every snapshot file.
-        const copyName = try self.allocator.dupe(u8, node.name);
-        try files_map.putNoClobber(copyName, file_contents);
+        const copy_name = try self.allocator.dupe(u8, node.name);
+        try files_map.putNoClobber(copy_name, file_contents);
     }
     return files_map;
 }
