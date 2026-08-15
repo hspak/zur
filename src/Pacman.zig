@@ -26,7 +26,7 @@ const Pacman = @This();
 allocator: Allocator,
 io: Io,
 environ_map: *const std.process.Environ.Map,
-pkgs: std.StringHashMap(*Package),
+pkgs: std.StringHashMapUnmanaged(*Package) = .empty,
 aur_resp: ?aur.RPCRespV5 = null,
 pacman_output: ?[]u8 = null,
 zur_path: []const u8,
@@ -34,7 +34,7 @@ zur_pkg_dir: []const u8,
 updates: usize = 0,
 /// Package bases whose AUR dependencies have already been resolved during
 /// this run, so recursive dependency resolution never re-enters or loops.
-aur_deps_done: std.StringHashMap(void),
+aur_deps_done: std.StringHashMapUnmanaged(void) = .empty,
 /// Lazily-initialized libalpm handle, reused for every local-db query so
 /// alpm is only initialized once per run (see getAlpm).
 alpm_state: ?Alpm = null,
@@ -189,10 +189,8 @@ pub fn init(allocator: Allocator, io: Io, environ_map: *const std.process.Enviro
         .allocator = allocator,
         .io = io,
         .environ_map = environ_map,
-        .pkgs = std.StringHashMap(*Package).init(allocator),
         .zur_path = zur_path,
         .zur_pkg_dir = pkg_dir,
-        .aur_deps_done = std.StringHashMap(void).init(allocator),
     };
 }
 
@@ -205,8 +203,8 @@ pub fn deinit(self: *Pacman) void {
     while (it.next()) |e| {
         self.allocator.destroy(e.value_ptr.*);
     }
-    self.pkgs.deinit();
-    self.aur_deps_done.deinit();
+    self.pkgs.deinit(self.allocator);
+    self.aur_deps_done.deinit(self.allocator);
     if (self.alpm_state) |*state| state.deinit();
     if (self.request_state) |*req| req.deinit();
 }
@@ -269,7 +267,7 @@ pub fn fetchLocalPackages(self: *Pacman) !void {
     // borrow them; nothing is freed individually here.
     for (foreign) |pkg_info| {
         const new_pkg = try Package.init(self.allocator, pkg_info.version);
-        try self.pkgs.putNoClobber(pkg_info.name, new_pkg);
+        try self.pkgs.putNoClobber(self.allocator, pkg_info.name, new_pkg);
     }
 }
 
@@ -283,7 +281,7 @@ pub fn setInstallPackages(self: *Pacman, pkg_list: std.ArrayList([]const u8)) !v
         // We're setting an impossible version to initialize the packages to install.
         const new_pkg = try Package.init(self.allocator, "0");
 
-        try self.pkgs.putNoClobber(pkg_name, new_pkg);
+        try self.pkgs.putNoClobber(self.allocator, pkg_name, new_pkg);
     }
 }
 
@@ -360,8 +358,8 @@ pub fn processOutOfDate(self: *Pacman) !void {
     // package base, and installing a base once builds and installs all of
     // its pkgnames. Track bases already handled and skip the rest, so the
     // same base isn't downloaded/built/installed once per pkgname.
-    var processed_bases = std.StringHashMap(void).init(self.allocator);
-    defer processed_bases.deinit();
+    var processed_bases: std.StringHashMapUnmanaged(void) = .empty;
+    defer processed_bases.deinit(self.allocator);
 
     var pkgs_iter = self.pkgs.iterator();
     while (pkgs_iter.next()) |pkg| {
@@ -380,7 +378,7 @@ pub fn processOutOfDate(self: *Pacman) !void {
                     });
                     continue;
                 }
-                try processed_bases.putNoClobber(base, {});
+                try processed_bases.putNoClobber(self.allocator, base, {});
             }
             if (try self.findExistingPackage(pkg.key_ptr.*, pkg.value_ptr.*.aur_version.?)) |full_pkg_name| {
                 defer self.allocator.free(full_pkg_name);
@@ -446,7 +444,7 @@ fn installWithDeps(self: *Pacman, pkg_name: []const u8, pkg: *Package) !void {
 /// handled up front so dependency cycles and repeated packages terminate.
 fn ensureAurDepsInstalled(self: *Pacman, pkg_name: []const u8) !void {
     if (self.aur_deps_done.contains(pkg_name)) return;
-    try self.aur_deps_done.put(pkg_name, {});
+    try self.aur_deps_done.put(self.allocator, pkg_name, {});
 
     const info = (try self.getAurInfo(pkg_name)) orelse return;
     const dep_lists = [_]?[][]const u8{ info.depends, info.make_depends };
@@ -967,7 +965,7 @@ fn removeStaleArtifacts(self: *Pacman, pkg_name: []const u8, dir_path: []const u
     }
 }
 
-fn snapshotFiles(self: *Pacman, pkg_name: []const u8, pkg_version: []const u8) !std.StringHashMap([]u8) {
+fn snapshotFiles(self: *Pacman, pkg_name: []const u8, pkg_version: []const u8) !std.StringHashMapUnmanaged([]u8) {
     const dir_name = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg_version });
     const path = try Dir.path.join(self.allocator, &[_][]const u8{ self.zur_path, dir_name });
 
@@ -975,13 +973,13 @@ fn snapshotFiles(self: *Pacman, pkg_name: []const u8, pkg_version: []const u8) !
         // No snapshot directory yet (e.g. a package that was never
         // downloaded): return an empty map so callers avoid unwrapping
         // an optional.
-        error.FileNotFound => return std.StringHashMap([]u8).init(self.allocator),
+        error.FileNotFound => return .empty,
         else => return err,
     };
     defer dir.close(self.io);
     try self.print(" reading files in {s}{s}{s}\n", .{ color.bold, path, color.reset });
 
-    var files_map = std.StringHashMap([]u8).init(self.allocator);
+    var files_map: std.StringHashMapUnmanaged([]u8) = .empty;
     var dir_iter = dir.iterate();
     while (try dir_iter.next(self.io)) |node| {
         if (mem.eql(u8, node.name, ".SRCINFO")) {
@@ -1015,7 +1013,7 @@ fn snapshotFiles(self: *Pacman, pkg_name: []const u8, pkg_version: []const u8) !
         // display time (bareInstall), so the update/diff path never copies
         // every snapshot file.
         const copy_name = try self.allocator.dupe(u8, node.name);
-        try files_map.putNoClobber(copy_name, file_contents);
+        try files_map.putNoClobber(self.allocator, copy_name, file_contents);
     }
     return files_map;
 }

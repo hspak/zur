@@ -204,7 +204,7 @@ fn mapSearchResp(allocator: std.mem.Allocator, json_resp: RPCResp(SearchJson)) !
     };
 }
 
-pub fn queryAll(allocator: std.mem.Allocator, request: *Request, pkgs: std.StringHashMap(*Pacman.Package)) !RPCRespV5 {
+pub fn queryAll(allocator: std.mem.Allocator, request: *Request, pkgs: std.StringHashMapUnmanaged(*Pacman.Package)) !RPCRespV5 {
     const uri = try buildInfoQuery(allocator, pkgs);
     defer allocator.free(uri);
 
@@ -250,7 +250,7 @@ pub fn search(allocator: std.mem.Allocator, request: *Request, search_name: []co
     return try mapSearchResp(allocator, result.value);
 }
 
-fn buildInfoQuery(allocator: std.mem.Allocator, pkgs: std.StringHashMap(*Pacman.Package)) ![]const u8 {
+fn buildInfoQuery(allocator: std.mem.Allocator, pkgs: std.StringHashMapUnmanaged(*Pacman.Package)) ![]const u8 {
     var uri: std.ArrayList(u8) = .empty;
     errdefer uri.deinit(allocator);
 
@@ -268,12 +268,12 @@ fn buildInfoQuery(allocator: std.mem.Allocator, pkgs: std.StringHashMap(*Pacman.
 const testing = std.testing;
 
 test "buildInfoQuery - builds correct URL with packages" {
-    var pkgs = std.StringHashMap(*Pacman.Package).init(testing.allocator);
-    defer pkgs.deinit();
+    var pkgs: std.StringHashMapUnmanaged(*Pacman.Package) = .empty;
+    defer pkgs.deinit(testing.allocator);
 
     const pkg1 = try Pacman.Package.init(testing.allocator, "1.0.0");
     defer testing.allocator.destroy(pkg1);
-    try pkgs.put("neovim-git", pkg1);
+    try pkgs.put(testing.allocator, "neovim-git", pkg1);
 
     const result = try buildInfoQuery(testing.allocator, pkgs);
     defer testing.allocator.free(result);
@@ -284,16 +284,16 @@ test "buildInfoQuery - builds correct URL with packages" {
 }
 
 test "buildInfoQuery - no memory leaks with testing allocator" {
-    var pkgs = std.StringHashMap(*Pacman.Package).init(testing.allocator);
-    defer pkgs.deinit();
+    var pkgs: std.StringHashMapUnmanaged(*Pacman.Package) = .empty;
+    defer pkgs.deinit(testing.allocator);
 
     const pkg1 = try Pacman.Package.init(testing.allocator, "1.0");
     defer testing.allocator.destroy(pkg1);
     const pkg2 = try Pacman.Package.init(testing.allocator, "2.0");
     defer testing.allocator.destroy(pkg2);
 
-    try pkgs.put("pkg-a", pkg1);
-    try pkgs.put("pkg-b", pkg2);
+    try pkgs.put(testing.allocator, "pkg-a", pkg1);
+    try pkgs.put(testing.allocator, "pkg-b", pkg2);
 
     const result = try buildInfoQuery(testing.allocator, pkgs);
     defer testing.allocator.free(result);

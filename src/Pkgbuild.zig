@@ -34,7 +34,7 @@ const Pkgbuild = @This();
 
 allocator: Allocator,
 file_contents: []const u8,
-fields: std.StringHashMap(*Content),
+fields: std.StringHashMapUnmanaged(*Content) = .empty,
 
 /// Fields compared when reviewing PKGBUILD changes between versions.
 const relevant_fields = &[_][]const u8{
@@ -70,7 +70,7 @@ const Parser = struct {
     src: []const u8,
     pos: usize,
     allocator: Allocator,
-    fields: *std.StringHashMap(*Content),
+    fields: *std.StringHashMapUnmanaged(*Content),
 
     fn parse(self: *Parser) !void {
         while (self.pos < self.src.len) {
@@ -345,7 +345,7 @@ const Parser = struct {
             self.allocator.free(old.key);
             old.value.deinit(self.allocator);
         }
-        try self.fields.put(key, content);
+        try self.fields.put(self.allocator, key, content);
     }
 
     fn scanName(self: *Parser) bool {
@@ -400,7 +400,6 @@ pub fn init(allocator: Allocator, file_contents: []const u8) Pkgbuild {
     return .{
         .allocator = allocator,
         .file_contents = file_contents,
-        .fields = std.StringHashMap(*Content).init(allocator),
     };
 }
 
@@ -410,7 +409,7 @@ pub fn deinit(self: *Pkgbuild) void {
         self.allocator.free(entry.key_ptr.*);
         entry.value_ptr.*.deinit(self.allocator);
     }
-    self.fields.deinit();
+    self.fields.deinit(self.allocator);
 }
 
 pub fn readLines(self: *Pkgbuild) !void {
@@ -434,7 +433,7 @@ pub fn comparePrev(self: *Pkgbuild, prev_pkgbuild: Pkgbuild) !void {
             const content = try Content.init(self.allocator, try self.allocator.dupe(u8, "(removed)"));
             content.updated = true;
             const key_copy = try self.allocator.dupe(u8, field);
-            try self.fields.put(key_copy, content);
+            try self.fields.put(self.allocator, key_copy, content);
         } else if (prev == null and curr == null) {
             continue;
         } else if (prev != null and curr != null and !mem.eql(u8, prev.?.value, curr.?.value)) {
