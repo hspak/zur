@@ -26,6 +26,24 @@ const Request = @import("Request.zig");
 
 const Pacman = @This();
 
+pub const TarExtractError = error{
+    EndOfStream,
+    UnexpectedEndOfStream,
+    TarHeader,
+    TarHeaderChksum,
+    TarNumericValueNegative,
+    TarNumericValueTooBig,
+    TarInsufficientBuffer,
+    PaxNullInKeyword,
+    PaxInvalidAttributeEnd,
+    PaxSizeAttrOverflow,
+    PaxNullInValue,
+    TarHeadersTooBig,
+    TarUnsupportedHeader,
+    TarComponentsOutsideStrippedPrefix,
+    UnableToCreateSymLink,
+};
+
 pub const Error =
     Allocator.Error ||
     Alpm.Error ||
@@ -40,6 +58,10 @@ pub const Error =
     Dir.RenameError ||
     File.OpenError ||
     File.StatError ||
+    std.process.SpawnError ||
+    std.process.Child.WaitError ||
+    TarExtractError ||
+    Io.Reader.DelimiterError ||
     error{
         NoHomeEnvVarFound,
         BadInitialPkgsState,
