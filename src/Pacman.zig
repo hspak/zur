@@ -1072,9 +1072,10 @@ fn removeStaleArtifacts(self: *Pacman, pkg_name: []const u8, dir_path: []const u
         defer parent.close(self.io);
         for (marked_for_removal) |artifact| {
             try parent.deleteTree(self.io, artifact.name);
-            try self.print("  {s}->{s} deleting stale file or dir: {s}\n", .{
+            try self.print("  {s}->{s} deleting stale file or dir: {s}/{s}\n", .{
                 color.foreground_blue,
                 color.reset,
+                dir_path,
                 artifact.name,
             });
         }
