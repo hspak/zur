@@ -1,7 +1,12 @@
 # Zig Coding Style Guide
 
-Shared conventions. `zig fmt` is the last word on whitespace, wrapping, and
-punctuation. This document covers only the choices the formatter cannot make.
+Shared conventions, including the [Zig language reference style
+guide](https://ziglang.org/documentation/master/#Style-Guide). `zig fmt` is the
+last word on indentation, braces, and punctuation. It does not wrap to a column
+limit — aim for 100, use common sense. A list longer than two items goes one
+per line, with a trailing comma.
+
+This document covers the choices the formatter cannot make.
 
 ---
 
@@ -11,16 +16,15 @@ The filename is a visibility signal.
 
 | Kind of file | Name | Shape |
 |---|---|---|
-| The file **is** a type | `PascalCase.zig` | `const Foo = @This();` plus fields at file scope |
+| The file **is** a type | `TitleCase.zig` | `const Foo = @This();` plus fields at file scope |
 | Namespace of functions or peer types | `snake_case.zig` | no file-scope fields |
 | Generic type factory | `snake_case.zig` | `pub fn Name(...) type { return struct { const Self = @This(); ... }; }` |
 
-Do not invent a PascalCase file for a bag of free functions, and do not invent
+Do not invent a TitleCase file for a bag of free functions, and do not invent
 a snake_case file for a primary datatype.
 
-When a named concern outgrows one file, keep a sibling façade and nest
-children under it. Split on the concern, not on file length. Small nested
-types stay in the parent.
+Directory names are `snake_case`. The exception is the sibling folder of a
+TitleCase type file, which keeps the type's name so the path matches the FQN:
 
 ```
 Foo.zig          // the type / façade
@@ -29,7 +33,9 @@ Foo/
   helper.zig     // usually private
 ```
 
-Callers import the parent and write `Foo.Bar`.
+When a named concern outgrows one file, keep that sibling façade and nest
+children under it. Split on the concern, not on file length. Small nested
+types stay in the parent. Callers import the parent and write `Foo.Bar`.
 
 `usingnamespace` does not appear. Re-export names explicitly:
 
@@ -56,14 +62,34 @@ imports in the middle of the file.
 
 | Kind | Style | Examples |
 |---|---|---|
-| Types, structs, unions, enums, error sets | PascalCase | `Widget`, `OpenOptions`, `ResolveError` |
-| Functions | camelCase | `toSlice`, `hasRuntimeBits` |
-| Fields, locals, log scopes | snake_case | `root_src_path`, `io_thread` |
+| Types, type aliases, unions, enums, error sets | TitleCase | `Widget`, `OpenOptions`, `ResolveError` |
+| Namespace: 0-field struct, never instantiated | snake_case | `json`, `mem` |
+| Type function (`fn (...) type`) | TitleCase | `ArrayList`, `ShortList` |
+| Other functions | camelCase | `toSlice`, `hasRuntimeBits` |
+| Fields, locals, log scopes, constants | snake_case | `root_src_path`, `default_quota` |
 | Enum / union tags | snake_case | `.in_progress`, `.out_of_memory` |
-| Constants | snake_case | `default_quota` |
-| Comptime type params | short PascalCase | `T`, `K`, `V`, `Context` |
+| Comptime type params | short TitleCase | `T`, `K`, `V`, `Child` |
+| Comptime value params | snake_case | `fixed_size`, `n` |
 
 Error names describe **why** (`OutOfMemory`, `IndexOutOfBounds`), not `Failed`.
+
+Do not put these words in type names: `Value`, `Data`, `Context`, `Manager`,
+`State`, `utils`, `misc`, or somebody's initials. Everything is a value;
+nothing is communicated. The `Context` parameter on `std.HashMap` is an
+established exception — do not invent more. Declarations tempted toward
+`utils` belong at the root of the module that needs them.
+
+Name from the fully-qualified namespace. Do not repeat a segment:
+`json.Value`, not `json.JsonValue`. Files are part of that namespace.
+
+No underscore prefixes. Zig has no private fields; do not pretend otherwise.
+Name fields by their meaning and document the invariants. Keyword collisions
+use `@"if"` syntax, not `_if`. Prefer a longer name at an outer scope and a
+shorter one inside, rather than `foo` and `_foo`.
+
+Acronyms, initialisms, and proper nouns follow the same case rules as any
+other word: `XmlParser`, `readU32Be`, `xml_document`. Two-letter acronyms
+are not special. Follow an established exception such as `ENOENT`.
 
 ---
 
@@ -183,7 +209,7 @@ Switches are exhaustive. Prefer listing every tag.
 
 | Mechanism | Use |
 |---|---|
-| `assert(cond)` | Cheap internal invariant |
+| `assert(cond)` | Safety-checked internal invariant |
 | `unreachable` | Switch/tag that cannot happen |
 | `return error.X` | Recoverable failure |
 
@@ -224,6 +250,14 @@ Do not invent a vtable when either of those will do.
 | `//` | Why, constraints, the surprising or load-bearing line below |
 
 Explain contract, ownership, and why — not the next three obvious lines.
+
+Omit anything the name already says. Copy a real contract onto each similar
+function — IDEs show one declaration at a time.
+
+In `///` comments:
+
+- **assume** — violating this is unchecked Illegal Behavior
+- **assert** — violating this is safety-checked Illegal Behavior
 
 A comment that a reader already knows from the identifiers and the code
 has no job. If it would still be true as a caption of the next line, delete
@@ -280,16 +314,19 @@ Skip unavailable platforms or features with `return error.SkipZigTest`.
 ## Checklist
 
 1. One primary type? `Name.zig` + `const Name = @This();`. Otherwise `snake_name.zig`.
-2. Cross-package import goes through the parent façade.
-3. `//!` / `///` explain contract and why; `//` is for the surprising line below. Delete comments that add no information.
-4. Unmanaged collections take an allocator on each mutating call and on `deinit`.
-5. `init` / `deinit` for values; poison after `deinit`.
-6. Named error sets composed with `Allocator.Error || error{...}`.
-7. `?T` for absence; errors for invalid / OOM; defaults on fields.
-8. Packed structs have an explicit backing integer and explicit padding.
-9. Generics are `fn(comptime T: type) type`. Prefer comptime or a tagged union over a vtable.
-10. `errdefer` under every acquire; `comptime unreachable` when rollback cannot happen.
-11. Document who frees what.
-12. `[]const u8` unless a sentinel is required.
-13. Tests are in-file, named for `-Dtest-filter`, `defer` immediately.
-14. `zig fmt`.
+2. Directories are `snake_case`, except the sibling folder of a TitleCase type file.
+3. Cross-package import goes through the parent façade.
+4. Names come from the FQN: no repeated segment, no `Value`/`Data`/`Context`/`Manager`/`State`/`utils`, no `_` prefix. Acronyms are ordinary words.
+5. Type functions are TitleCase; namespace structs are snake_case.
+6. `//!` / `///` explain contract and why; `//` is for the surprising line below. Delete comments that add no information. Copy real contracts onto similar functions. **assume** vs **assert** in `///`.
+7. Unmanaged collections take an allocator on each mutating call and on `deinit`.
+8. `init` / `deinit` for values; poison after `deinit`.
+9. Named error sets composed with `Allocator.Error || error{...}`.
+10. `?T` for absence; errors for invalid / OOM; defaults on fields.
+11. Packed structs have an explicit backing integer and explicit padding.
+12. Generics are `fn Name(comptime T: type) type`. Prefer comptime or a tagged union over a vtable.
+13. `errdefer` under every acquire; `comptime unreachable` when rollback cannot happen.
+14. Document who frees what.
+15. `[]const u8` unless a sentinel is required.
+16. Tests are in-file, named for `-Dtest-filter`, `defer` immediately.
+17. Aim for 100 columns; `zig fmt`.

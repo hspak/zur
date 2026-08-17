@@ -7,7 +7,8 @@ const log = std.log.scoped(.aur);
 const Request = @import("Request.zig");
 const Pacman = @import("Pacman.zig");
 
-pub const Error = std.mem.Allocator.Error || Request.Error || std.json.ParseError(std.json.Scanner);
+const ErrorSet = std.mem.Allocator.Error || Request.Error || std.json.ParseError(std.json.Scanner);
+pub const Error = ErrorSet;
 
 const host = "https://aur.archlinux.org/rpc/?v=5";
 
@@ -26,7 +27,7 @@ pub const SearchBy = enum {
     }
 };
 
-fn RPCResp(comptime T: type) type {
+fn RpcResp(comptime T: type) type {
     return struct {
         const Self = @This();
 
@@ -37,8 +38,8 @@ fn RPCResp(comptime T: type) type {
     };
 }
 
-pub const RPCRespV5 = RPCResp(Info);
-pub const RPCSearchRespV5 = RPCResp(Search);
+pub const RpcRespV5 = RpcResp(Info);
+pub const RpcSearchRespV5 = RpcResp(Search);
 
 // Wire names match the AUR RPC JSON object; public Info/Search are snake_case.
 const InfoJson = struct {
@@ -183,7 +184,7 @@ fn searchFromJson(j: SearchJson) Search {
     };
 }
 
-fn mapInfoResp(allocator: std.mem.Allocator, json_resp: RPCResp(InfoJson)) !RPCRespV5 {
+fn mapInfoResp(allocator: std.mem.Allocator, json_resp: RpcResp(InfoJson)) !RpcRespV5 {
     const results = try allocator.alloc(Info, json_resp.results.len);
     for (json_resp.results, results) |item, *out| {
         out.* = infoFromJson(item);
@@ -196,7 +197,7 @@ fn mapInfoResp(allocator: std.mem.Allocator, json_resp: RPCResp(InfoJson)) !RPCR
     };
 }
 
-fn mapSearchResp(allocator: std.mem.Allocator, json_resp: RPCResp(SearchJson)) !RPCSearchRespV5 {
+fn mapSearchResp(allocator: std.mem.Allocator, json_resp: RpcResp(SearchJson)) !RpcSearchRespV5 {
     const results = try allocator.alloc(Search, json_resp.results.len);
     for (json_resp.results, results) |item, *out| {
         out.* = searchFromJson(item);
@@ -215,20 +216,25 @@ fn mapSearchResp(allocator: std.mem.Allocator, json_resp: RPCResp(SearchJson)) !
 /// JSON parse). The caller owns `results` and must free that slice; the
 /// string graph is freed with `allocator` (use an arena, or accept the leak
 /// until the allocator is torn down).
-pub fn queryAll(allocator: std.mem.Allocator, request: *Request, pkgs: std.StringHashMapUnmanaged(*Pacman.Package)) Error!RPCRespV5 {
+pub fn queryAll(
+    allocator: std.mem.Allocator,
+    request: *Request,
+    pkgs: std.StringHashMapUnmanaged(*Pacman.Package),
+) Error!RpcRespV5 {
     const uri = try buildInfoQuery(allocator, pkgs);
     defer allocator.free(uri);
 
-    const body = try request.getRequest(uri);
+    const body = try request.get(uri);
     defer allocator.free(body);
 
-    const json_resp = try std.json.parseFromSliceLeaky(RPCResp(InfoJson), allocator, body, .{
+    const json_resp = try std.json.parseFromSliceLeaky(RpcResp(InfoJson), allocator, body, .{
         .ignore_unknown_fields = true,
         .allocate = .alloc_always,
     });
     log.debug("info query returned {d} results", .{json_resp.resultcount});
 
-    return try mapInfoResp(allocator, json_resp);
+    const response = try mapInfoResp(allocator, json_resp);
+    return response;
 }
 
 /// Query the AUR for a single package's full info (including its Depends /
@@ -245,10 +251,10 @@ pub fn queryName(allocator: std.mem.Allocator, request: *Request, name: []const 
     try uri.appendSlice(allocator, "&type=info&arg[]=");
     try uri.appendSlice(allocator, name);
 
-    const body = try request.getRequest(uri.items);
+    const body = try request.get(uri.items);
     defer allocator.free(body);
 
-    const json_resp = try std.json.parseFromSliceLeaky(RPCResp(InfoJson), allocator, body, .{
+    const json_resp = try std.json.parseFromSliceLeaky(RpcResp(InfoJson), allocator, body, .{
         .ignore_unknown_fields = true,
         .allocate = .alloc_always,
     });
@@ -259,7 +265,12 @@ pub fn queryName(allocator: std.mem.Allocator, request: *Request, name: []const 
 /// Search the AUR. The caller owns `results` and must free that slice.
 /// Strings inside each hit are allocated from `allocator` (same lifetime
 /// as `queryAll`).
-pub fn search(allocator: std.mem.Allocator, request: *Request, search_name: []const u8, by: SearchBy) Error!RPCSearchRespV5 {
+pub fn search(
+    allocator: std.mem.Allocator,
+    request: *Request,
+    search_name: []const u8,
+    by: SearchBy,
+) Error!RpcSearchRespV5 {
     var uri: std.ArrayList(u8) = .empty;
     defer uri.deinit(allocator);
 
@@ -269,18 +280,22 @@ pub fn search(allocator: std.mem.Allocator, request: *Request, search_name: []co
     try uri.appendSlice(allocator, "&arg=");
     try uri.appendSlice(allocator, search_name);
 
-    const body = try request.getRequest(uri.items);
+    const body = try request.get(uri.items);
     defer allocator.free(body);
 
-    const json_resp = try std.json.parseFromSliceLeaky(RPCResp(SearchJson), allocator, body, .{
+    const json_resp = try std.json.parseFromSliceLeaky(RpcResp(SearchJson), allocator, body, .{
         .ignore_unknown_fields = true,
         .allocate = .alloc_always,
     });
 
-    return try mapSearchResp(allocator, json_resp);
+    const response = try mapSearchResp(allocator, json_resp);
+    return response;
 }
 
-fn buildInfoQuery(allocator: std.mem.Allocator, pkgs: std.StringHashMapUnmanaged(*Pacman.Package)) ![]const u8 {
+fn buildInfoQuery(
+    allocator: std.mem.Allocator,
+    pkgs: std.StringHashMapUnmanaged(*Pacman.Package),
+) ![]const u8 {
     var uri: std.ArrayList(u8) = .empty;
     errdefer uri.deinit(allocator);
 
@@ -292,7 +307,8 @@ fn buildInfoQuery(allocator: std.mem.Allocator, pkgs: std.StringHashMapUnmanaged
         try uri.appendSlice(allocator, "&arg[]=");
         try uri.appendSlice(allocator, pkg.key_ptr.*);
     }
-    return try uri.toOwnedSlice(allocator);
+    const value = try uri.toOwnedSlice(allocator);
+    return value;
 }
 
 const testing = std.testing;

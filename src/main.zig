@@ -42,10 +42,20 @@ pub fn main(init: std.process.Init) !void {
         .print_version => {
             try stderr.writeAll("version: " ++ build_version ++ "\n");
         },
-        .search => search(allocator, io, init.environ_map, args.pkgs.items[0]) catch |err| {
+        .search => search(
+            allocator,
+            io,
+            init.environ_map,
+            args.pkgs.items[0],
+        ) catch |err| {
             try printCaughtError(stderr, err);
         },
-        .install_or_upgrade => installOrUpdate(allocator, io, init.environ_map, args.pkgs) catch |err| {
+        .install_or_upgrade => installOrUpdate(
+            allocator,
+            io,
+            init.environ_map,
+            args.pkgs,
+        ) catch |err| {
             try printCaughtError(stderr, err);
         },
         // parse() never leaves action unset; Unset is only the pre-parse default.

@@ -7,7 +7,8 @@ const log = std.log.scoped(.request);
 
 const Request = @This();
 
-pub const Error = Allocator.Error || std.http.Client.FetchError;
+const ErrorSet = Allocator.Error || std.http.Client.FetchError;
+pub const Error = ErrorSet;
 
 client: std.http.Client,
 allocator: Allocator,
@@ -31,7 +32,7 @@ pub fn deinit(self: *Request) void {
 
 /// GET `url` and return the response body. The caller owns the slice and
 /// must free it with `self.allocator`.
-pub fn getRequest(self: *Request, url: []const u8) Error![]u8 {
+pub fn get(self: *Request, url: []const u8) Error![]u8 {
     var body: std.Io.Writer.Allocating = .init(self.allocator);
     errdefer body.deinit();
 
@@ -42,5 +43,6 @@ pub fn getRequest(self: *Request, url: []const u8) Error![]u8 {
         .response_writer = &body.writer,
     });
 
-    return try body.toOwnedSlice();
+    const value = try body.toOwnedSlice();
+    return value;
 }

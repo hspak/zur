@@ -13,11 +13,12 @@ const log = std.log.scoped(.pkgbuild);
 
 const Pkgbuild = @This();
 
-pub const Error = Allocator.Error || error{
-    MalformedPkgbuildFunction,
+const ErrorSet = Allocator.Error || error{
+    MalformedFunction,
     UnterminatedArray,
     UnterminatedFunction,
 };
+pub const Error = ErrorSet;
 
 allocator: Allocator,
 file_contents: []const u8,
@@ -37,11 +38,11 @@ const Content = struct {
     value: []const u8,
     updated: bool = false,
 
-    pub fn init(value: []const u8) Content {
+    fn init(value: []const u8) Content {
         return .{ .value = value };
     }
 
-    pub fn deinit(self: *Content, allocator: Allocator) void {
+    fn deinit(self: *Content, allocator: Allocator) void {
         allocator.free(self.value);
         self.* = undefined;
     }
@@ -96,16 +97,16 @@ const Parser = struct {
     }
 
     fn parseFunction(self: *Parser, name: []const u8) !void {
-        if (self.pos >= self.src.len or self.src[self.pos] != '(') return error.MalformedPkgbuildFunction;
+        if (self.pos >= self.src.len or self.src[self.pos] != '(') return error.MalformedFunction;
         self.pos += 1;
         self.skipSpacesAndTabs();
-        if (self.pos >= self.src.len or self.src[self.pos] != ')') return error.MalformedPkgbuildFunction;
+        if (self.pos >= self.src.len or self.src[self.pos] != ')') return error.MalformedFunction;
         self.pos += 1;
         self.skipSpacesAndTabs();
         // Allow a newline between () and {
         self.skipNewlines();
         self.skipSpacesAndTabs();
-        if (self.pos >= self.src.len or self.src[self.pos] != '{') return error.MalformedPkgbuildFunction;
+        if (self.pos >= self.src.len or self.src[self.pos] != '{') return error.MalformedFunction;
 
         const body = try self.readBraceGroup();
         errdefer self.allocator.free(body);
@@ -177,7 +178,8 @@ const Parser = struct {
                 },
             }
         }
-        return try out.toOwnedSlice(self.allocator);
+        const value = try out.toOwnedSlice(self.allocator);
+        return value;
     }
 
     /// Read array body after the opening '('. Strips unquoted spaces/tabs
@@ -229,7 +231,9 @@ const Parser = struct {
                     // Collapse runs of unquoted whitespace to a single space so
                     // adjacent array elements never get merged together.
                     var saw_ws = false;
-                    while (self.pos < self.src.len and (self.src[self.pos] == ' ' or self.src[self.pos] == '\t')) {
+                    while (self.pos < self.src.len and
+                        (self.src[self.pos] == ' ' or self.src[self.pos] == '\t'))
+                    {
                         saw_ws = true;
                         self.pos += 1;
                     }
@@ -362,7 +366,9 @@ const Parser = struct {
     }
 
     fn skipNewlines(self: *Parser) void {
-        while (self.pos < self.src.len and (self.src[self.pos] == '\n' or self.src[self.pos] == '\r')) {
+        while (self.pos < self.src.len and
+            (self.src[self.pos] == '\n' or self.src[self.pos] == '\r'))
+        {
             self.pos += 1;
         }
     }
@@ -399,7 +405,7 @@ pub fn deinit(self: *Pkgbuild) void {
 
 /// Parse `file_contents` into `fields`. Last assignment of a name wins.
 pub fn readLines(self: *Pkgbuild) Error!void {
-    var parser = Parser{
+    var parser: Parser = .{
         .src = self.file_contents,
         .pos = 0,
         .allocator = self.allocator,

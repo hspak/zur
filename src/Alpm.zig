@@ -8,12 +8,13 @@ const alpm = @cImport({
 
 const Alpm = @This();
 
-pub const Error = std.mem.Allocator.Error || error{
-    AlpmNoHandle,
-    AlpmNoSyncDb,
-    AlpmNoLocalDb,
-    AlpmNoCache,
+const ErrorSet = std.mem.Allocator.Error || error{
+    NoHandle,
+    NoSyncDb,
+    NoLocalDb,
+    NoCache,
 };
+pub const Error = ErrorSet;
 
 allocator: std.mem.Allocator,
 handle: *alpm.alpm_handle_t,
@@ -28,7 +29,11 @@ pub const ForeignPackage = struct {
 
 // The sync repos zur knows about. Hardcoded to the standard core/extra/multilib
 // set, which covers the default Arch installation zur targets.
-const repos = [_][*:0]const u8{ "core", "extra", "multilib" };
+const repos = [_][*:0]const u8{
+    "core",
+    "extra",
+    "multilib",
+};
 
 const sig_level = alpm.ALPM_SIG_PACKAGE_OPTIONAL | alpm.ALPM_SIG_DATABASE_OPTIONAL;
 
@@ -36,7 +41,7 @@ const sig_level = alpm.ALPM_SIG_PACKAGE_OPTIONAL | alpm.ALPM_SIG_DATABASE_OPTION
 pub fn init(allocator: std.mem.Allocator) Error!Alpm {
     var err: alpm.alpm_errno_t = 0;
     const handle = alpm.alpm_initialize("/", "/var/lib/pacman/", &err) orelse {
-        return error.AlpmNoHandle;
+        return error.NoHandle;
     };
     errdefer _ = alpm.alpm_release(handle);
 
@@ -44,11 +49,11 @@ pub fn init(allocator: std.mem.Allocator) Error!Alpm {
     // permissive signature level is fine here.
     for (repos) |repo| {
         if (alpm.alpm_register_syncdb(handle, repo, sig_level) == null) {
-            return error.AlpmNoSyncDb;
+            return error.NoSyncDb;
         }
     }
 
-    const local_db = alpm.alpm_get_localdb(handle) orelse return error.AlpmNoLocalDb;
+    const local_db = alpm.alpm_get_localdb(handle) orelse return error.NoLocalDb;
     log.debug("initialized libalpm", .{});
 
     return .{
@@ -69,7 +74,7 @@ pub fn deinit(self: *Alpm) void {
 /// The returned name/version strings are duped into `self.allocator`; the
 /// caller owns the returned slice.
 pub fn fetchForeignPackages(self: *Alpm) Error![]ForeignPackage {
-    const cache = alpm.alpm_db_get_pkgcache(self.local_db) orelse return error.AlpmNoCache;
+    const cache = alpm.alpm_db_get_pkgcache(self.local_db) orelse return error.NoCache;
 
     var list: std.ArrayList(ForeignPackage) = .empty;
     defer list.deinit(self.allocator);
@@ -88,7 +93,8 @@ pub fn fetchForeignPackages(self: *Alpm) Error![]ForeignPackage {
         if (!try self.isInSyncDbs(name)) {
             const name_copy = try self.allocator.dupe(u8, name);
             errdefer self.allocator.free(name_copy);
-            const version_copy = try self.allocator.dupe(u8, std.mem.span(alpm.alpm_pkg_get_version(@constCast(pkg))));
+            const version = std.mem.span(alpm.alpm_pkg_get_version(@constCast(pkg)));
+            const version_copy = try self.allocator.dupe(u8, version);
             errdefer self.allocator.free(version_copy);
             try list.append(self.allocator, .{
                 .name = name_copy,
@@ -96,7 +102,8 @@ pub fn fetchForeignPackages(self: *Alpm) Error![]ForeignPackage {
             });
         }
     }
-    return try list.toOwnedSlice(self.allocator);
+    const value = try list.toOwnedSlice(self.allocator);
+    return value;
 }
 
 /// True if a package `name` is installed in the local database.

@@ -1,10 +1,11 @@
 //! Install and update AUR packages: version compare, deps, build, and pacman -U.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const log = std.log.scoped(.pacman);
 const mem = std.mem;
-const Allocator = mem.Allocator;
+const Allocator = std.mem.Allocator;
 const Dir = Io.Dir;
 const File = Io.File;
 
@@ -44,7 +45,7 @@ pub const TarExtractError = error{
     UnableToCreateSymLink,
 };
 
-pub const Error =
+const ErrorSet =
     Allocator.Error ||
     Alpm.Error ||
     aur.Error ||
@@ -64,19 +65,20 @@ pub const Error =
     Io.Reader.DelimiterError ||
     error{
         NoHomeEnvVarFound,
-        BadInitialPkgsState,
+        PkgsAlreadyLoaded,
         ZeroResultsFromAurQuery,
         NonzeroStatus,
         EmptyDependency,
         VariableDependency,
         TarCreate,
     };
+pub const Error = ErrorSet;
 
 allocator: Allocator,
 io: Io,
 environ_map: *const std.process.Environ.Map,
 pkgs: std.StringHashMapUnmanaged(*Package) = .empty,
-aur_resp: ?aur.RPCRespV5 = null,
+aur_resp: ?aur.RpcRespV5 = null,
 pacman_output: ?[]u8 = null,
 zur_path: []const u8,
 zur_pkg_dir: []const u8,
@@ -111,7 +113,7 @@ const max_snapshot_diff_bytes: usize = 4096;
 
 // Architecture component in built package filenames (native compile target).
 fn machineArch() []const u8 {
-    return switch (@import("builtin").cpu.arch) {
+    return switch (builtin.cpu.arch) {
         .x86_64 => "x86_64",
         .aarch64 => "aarch64",
         .riscv64 => "riscv64",
@@ -156,13 +158,20 @@ fn normalizeDepName(allocator: Allocator, dep: []const u8) ![]const u8 {
     if (trimmed.len == 0) return error.EmptyDependency;
 
     // Take the first alternative of an OR-list ("a|b" means "a" or "b").
-    const first = if (mem.indexOfScalar(u8, trimmed, '|')) |idx| trimmed[0..idx] else trimmed;
+    const first = if (mem.findScalar(u8, trimmed, '|')) |idx| trimmed[0..idx] else trimmed;
 
     // Strip a version constraint suffix: "foo>=1.0", "foo=1.0", "foo<2".
-    const ops = [_][]const u8{ ">=", "<=", "==", "=", ">", "<" };
+    const ops = [_][]const u8{
+        ">=",
+        "<=",
+        "==",
+        "=",
+        ">",
+        "<",
+    };
     var name = mem.trim(u8, first, " \t");
     for (ops) |op| {
-        if (mem.indexOf(u8, name, op)) |idx| {
+        if (mem.find(u8, name, op)) |idx| {
             name = mem.trim(u8, name[0..idx], " \t");
             break;
         }
@@ -171,9 +180,10 @@ fn normalizeDepName(allocator: Allocator, dep: []const u8) ![]const u8 {
 
     // A literal "$" (e.g. "$pkgname" / "$pkgver") is a self-reference we
     // can't resolve through the AUR; the dependency isn't an external package.
-    if (mem.indexOfScalar(u8, name, '$') != null) return error.VariableDependency;
+    if (mem.findScalar(u8, name, '$') != null) return error.VariableDependency;
 
-    return try allocator.dupe(u8, name);
+    const value = try allocator.dupe(u8, name);
+    return value;
 }
 
 // Extract `archive_name` in `dest_dir`, stripping the AUR snapshot top dir.
@@ -198,13 +208,17 @@ fn extractTarGz(io: Io, dest_dir: Io.Dir, archive_name: []const u8) !void {
 }
 
 /// Create `~/.zur/.pkg` and an empty package set. `allocator` should outlive the run.
-pub fn init(allocator: Allocator, io: Io, environ_map: *const std.process.Environ.Map) Error!Pacman {
+pub fn init(
+    allocator: Allocator,
+    io: Io,
+    environ_map: *const std.process.Environ.Map,
+) Error!Pacman {
     const home = environ_map.get("HOME") orelse return error.NoHomeEnvVarFound;
     const zur_dir = ".zur";
 
-    const zur_path = try Dir.path.join(allocator, &[_][]const u8{ home, zur_dir });
+    const zur_path = try Dir.path.join(allocator, &.{ home, zur_dir });
     errdefer allocator.free(zur_path);
-    const pkg_dir = try Dir.path.join(allocator, &[_][]const u8{ zur_path, ".pkg" });
+    const pkg_dir = try Dir.path.join(allocator, &.{ zur_path, ".pkg" });
     errdefer allocator.free(pkg_dir);
     try Dir.cwd().createDirPath(io, pkg_dir);
     log.debug("zur_path={s}", .{zur_path});
@@ -272,13 +286,13 @@ fn print(self: *Pacman, comptime format: []const u8, args: anytype) !void {
 // Flush before prompts, before a child inherits stdout, and on teardown.
 fn flushStdout(self: *Pacman) void {
     const w = self.stdout();
-    w.flush() catch {};
+    w.flush() catch |err| log.debug("failed to flush stdout: {}", .{err});
 }
 
 /// Load installed foreign (AUR) packages from libalpm into `pkgs`.
 pub fn fetchLocalPackages(self: *Pacman) Error!void {
     if (self.pkgs.count() != 0) {
-        return error.BadInitialPkgsState;
+        return error.PkgsAlreadyLoaded;
     }
 
     const foreign = try (try self.getAlpm()).fetchForeignPackages();
@@ -296,7 +310,7 @@ pub fn fetchLocalPackages(self: *Pacman) Error!void {
 /// Queue `pkg_list` for install using the version-`"0"` sentinel.
 pub fn setInstallPackages(self: *Pacman, pkg_list: std.ArrayList([]const u8)) Error!void {
     if (self.pkgs.count() != 0) {
-        return error.BadInitialPkgsState;
+        return error.PkgsAlreadyLoaded;
     }
 
     for (pkg_list.items) |pkg_name| {
@@ -360,7 +374,10 @@ pub fn compareVersions(self: *Pacman) Error!void {
         return;
     }
     pkgs_iter = self.pkgs.iterator();
-    try self.print("{s}::{s} Packages to be installed or updated:\n", .{ color.bold_foreground_blue, color.reset });
+    try self.print("{s}::{s} Packages to be installed or updated:\n", .{
+        color.bold_foreground_blue,
+        color.reset,
+    });
     while (pkgs_iter.next()) |pkg| {
         if (pkg.value_ptr.*.requires_update) {
             try self.print(" {s}\n", .{pkg.key_ptr.*});
@@ -407,7 +424,11 @@ pub fn processOutOfDate(self: *Pacman) Error!void {
                 }
                 try processed_bases.putNoClobber(self.allocator, base, {});
             }
-            if (try self.findExistingPackage(pkg.key_ptr.*, pkg.value_ptr.*.aur_version.?)) |full_pkg_name| {
+            const existing = try self.findExistingPackage(
+                pkg.key_ptr.*,
+                pkg.value_ptr.*.aur_version.?,
+            );
+            if (existing) |full_pkg_name| {
                 defer self.allocator.free(full_pkg_name);
                 try self.print("{s}warning:{s} Found existing up-to-date package: {s}{s}-{s}{s}, deferring to pacman -U...\n", .{
                     color.bold_foreground_yellow,
@@ -502,7 +523,8 @@ fn ensureAurDepsInstalled(self: *Pacman, pkg_name: []const u8) !void {
 // Full AUR info for `name`, or null if it is an official/repo dependency.
 fn getAurInfo(self: *Pacman, name: []const u8) !?aur.Info {
     if (self.aurInfoFor(name)) |info| return info;
-    return try aur.queryName(self.allocator, self.getRequest(), name);
+    const info = try aur.queryName(self.allocator, self.getRequest(), name);
+    return info;
 }
 
 fn aurInfoFor(self: *Pacman, name: []const u8) ?aur.Info {
@@ -525,8 +547,13 @@ fn findExistingPackage(self: *Pacman, pkg_name: []const u8, version: []const u8)
 
     const archs = [_][]const u8{ machineArch(), "any" };
     for (archs) |arch| {
-        const name = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, version, arch, "pkg.tar.zst" });
-        const full_path = try Dir.path.join(self.allocator, &[_][]const u8{ self.zur_pkg_dir, name });
+        const name = try mem.join(self.allocator, "-", &.{
+            pkg_name,
+            version,
+            arch,
+            "pkg.tar.zst",
+        });
+        const full_path = try Dir.path.join(self.allocator, &.{ self.zur_pkg_dir, name });
         var found = false;
         defer {
             self.allocator.free(full_path);
@@ -549,18 +576,22 @@ fn findExistingPackage(self: *Pacman, pkg_name: []const u8, version: []const u8)
 }
 
 fn downloadAndExtractPackage(self: *Pacman, pkg_name: []const u8, pkg: *Package) !void {
-    const file_name = try mem.join(self.allocator, ".", &[_][]const u8{ pkg_name, "tar.gz" });
-    const dir_name = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg.aur_version.? });
+    const file_name = try mem.join(self.allocator, ".", &.{ pkg_name, "tar.gz" });
+    const dir_name = try mem.join(self.allocator, "-", &.{ pkg_name, pkg.aur_version.? });
 
-    const full_dir = try Dir.path.join(self.allocator, &[_][]const u8{ self.zur_path, dir_name });
-    const full_file_path = try Dir.path.join(self.allocator, &[_][]const u8{ full_dir, file_name });
+    const full_dir = try Dir.path.join(self.allocator, &.{ self.zur_path, dir_name });
+    const full_file_path = try Dir.path.join(self.allocator, &.{ full_dir, file_name });
 
     // Only skip the download if the existing directory is a real,
     // fully-extracted snapshot (it contains a PKGBUILD). A leftover or
     // partially-extracted dir from an interrupted run must be removed and
     // re-downloaded, otherwise a stale or incomplete source could be built
     // and the wrong package version installed.
-    var existing = Dir.openDirAbsolute(self.io, full_dir, .{ .iterate = true }) catch |err| switch (err) {
+    var existing = Dir.openDirAbsolute(
+        self.io,
+        full_dir,
+        .{ .iterate = true },
+    ) catch |err| switch (err) {
         error.FileNotFound => null,
         else => return err,
     };
@@ -576,22 +607,30 @@ fn downloadAndExtractPackage(self: *Pacman, pkg_name: []const u8, pkg: *Package)
         }
         d.close(self.io);
         if (is_valid) {
-            try self.print(" skipping download, {s}{s}{s} already exists...\n", .{ color.bold, full_dir, color.reset });
+            try self.print(" skipping download, {s}{s}{s} already exists...\n", .{
+                color.bold,
+                full_dir,
+                color.reset,
+            });
             return;
         }
-        try self.print(" removing incomplete snapshot {s}{s}{s}, re-downloading...\n", .{ color.bold, full_dir, color.reset });
+        try self.print(" removing incomplete snapshot {s}{s}{s}, re-downloading...\n", .{
+            color.bold,
+            full_dir,
+            color.reset,
+        });
         var zur_dir = try Dir.openDirAbsolute(self.io, self.zur_path, .{});
         defer zur_dir.close(self.io);
         try zur_dir.deleteTree(self.io, dir_name);
     }
 
     const url = if (pkg.base_name) |base_name| url: {
-        const name = try mem.join(self.allocator, ".", &[_][]const u8{ base_name, "tar.gz" });
-        break :url try mem.join(self.allocator, "/", &[_][]const u8{ aur.snapshot, name });
-    } else try mem.join(self.allocator, "/", &[_][]const u8{ aur.snapshot, file_name });
+        const name = try mem.join(self.allocator, ".", &.{ base_name, "tar.gz" });
+        break :url try mem.join(self.allocator, "/", &.{ aur.snapshot, name });
+    } else try mem.join(self.allocator, "/", &.{ aur.snapshot, file_name });
 
     try self.print(" downloading from: {s}{s}{s}\n", .{ color.bold, url, color.reset });
-    const snapshot = try self.getRequest().getRequest(url);
+    const snapshot = try self.getRequest().get(url);
     defer self.allocator.free(snapshot);
     try self.print(" downloaded to: {s}{s}{s}\n", .{ color.bold, full_file_path, color.reset });
 
@@ -606,7 +645,7 @@ fn downloadAndExtractPackage(self: *Pacman, pkg_name: []const u8, pkg: *Package)
 }
 
 fn extractPackage(self: *Pacman, snapshot_path: []const u8, pkg_name: []const u8) !void {
-    const file_name = try mem.join(self.allocator, ".", &[_][]const u8{ pkg_name, "tar.gz" });
+    const file_name = try mem.join(self.allocator, ".", &.{ pkg_name, "tar.gz" });
     var dir = try Dir.openDirAbsolute(self.io, snapshot_path, .{});
     defer dir.close(self.io);
     try extractTarGz(self.io, dir, file_name);
@@ -616,7 +655,10 @@ fn compareUpdateAndInstall(self: *Pacman, pkg_name: []const u8, pkg: *Package) !
     // pkg.version = 0 is the hack to forcibly install manually specified
     // packages. This causes us to read the same dir twice.
     const empty_map: std.StringHashMapUnmanaged([]u8) = .empty;
-    var old_files = if (!std.mem.eql(u8, pkg.version, "0")) try self.snapshotFiles(pkg_name, pkg.version) else empty_map;
+    var old_files = if (!std.mem.eql(u8, pkg.version, "0"))
+        try self.snapshotFiles(pkg_name, pkg.version)
+    else
+        empty_map;
     defer deinitSnapshotFiles(self.allocator, &old_files);
 
     var new_files = try self.snapshotFiles(pkg_name, pkg.aur_version.?);
@@ -659,7 +701,9 @@ fn compareUpdateAndInstall(self: *Pacman, pkg_name: []const u8, pkg: *Package) !
 
     var new_iter = new_files.iterator();
     while (new_iter.next()) |file| {
-        if (mem.endsWith(u8, file.key_ptr.*, ".install") or mem.endsWith(u8, file.key_ptr.*, ".sh")) {
+        const is_script = mem.endsWith(u8, file.key_ptr.*, ".install") or
+            mem.endsWith(u8, file.key_ptr.*, ".sh");
+        if (is_script) {
             const old_content_maybe = old_files.get(file.key_ptr.*);
             const new_content_maybe = new_files.get(file.key_ptr.*);
             if (old_content_maybe == null or new_content_maybe == null) {
@@ -692,14 +736,22 @@ fn compareUpdateAndInstall(self: *Pacman, pkg_name: []const u8, pkg: *Package) !
             try self.print("\n", .{});
         }
     } else {
-        try self.print("{s}::{s} No meaningful diff's found\n", .{ color.foreground_blue, color.reset });
+        try self.print("{s}::{s} No meaningful diff's found\n", .{
+            color.foreground_blue,
+            color.reset,
+        });
     }
     try self.install(pkg_name, pkg.aur_version.?);
 }
 
 // Print a minimal line-based diff between two file contents using an LCS
 // (longest common subsequence) to align unchanged lines.
-fn printDiff(self: *Pacman, name: []const u8, old_content: []const u8, new_content: []const u8) !void {
+fn printDiff(
+    self: *Pacman,
+    name: []const u8,
+    old_content: []const u8,
+    new_content: []const u8,
+) !void {
     var old_list: std.ArrayList([]const u8) = .empty;
     defer old_list.deinit(self.allocator);
     var new_list: std.ArrayList([]const u8) = .empty;
@@ -766,7 +818,11 @@ fn printDiff(self: *Pacman, name: []const u8, old_content: []const u8, new_conte
     }
 }
 
-fn printBarePkgbuildFields(allocator: Allocator, writer: *Io.Writer, file_contents: []const u8) !void {
+fn printBarePkgbuildFields(
+    allocator: Allocator,
+    writer: *Io.Writer,
+    file_contents: []const u8,
+) !void {
     var pkgbuild = Pkgbuild.init(allocator, file_contents);
     defer pkgbuild.deinit();
     try pkgbuild.readLines();
@@ -784,7 +840,12 @@ fn printBarePkgbuildFields(allocator: Allocator, writer: *Io.Writer, file_conten
     }
 }
 
-fn bareInstall(self: *Pacman, pkg_name: []const u8, pkg_files: std.StringHashMapUnmanaged([]u8), update_version: []const u8) !void {
+fn bareInstall(
+    self: *Pacman,
+    pkg_name: []const u8,
+    pkg_files: std.StringHashMapUnmanaged([]u8),
+    update_version: []const u8,
+) !void {
     var pkg_files_iter = pkg_files.iterator();
     while (pkg_files_iter.next()) |pkg_file| {
         if (mem.eql(u8, pkg_file.key_ptr.*, "PKGBUILD")) {
@@ -834,8 +895,8 @@ fn bareInstall(self: *Pacman, pkg_name: []const u8, pkg_files: std.StringHashMap
 }
 
 fn install(self: *Pacman, pkg_name: []const u8, update_version: []const u8) !void {
-    const pkg_dir = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, update_version });
-    const full_pkg_dir = try Dir.path.join(self.allocator, &[_][]const u8{ self.zur_path, pkg_dir });
+    const pkg_dir = try mem.join(self.allocator, "-", &.{ pkg_name, update_version });
+    const full_pkg_dir = try Dir.path.join(self.allocator, &.{ self.zur_path, pkg_dir });
     try std.process.setCurrentPath(self.io, full_pkg_dir);
 
     const argv = &[_][]const u8{ "makepkg", "-sicC" };
@@ -848,7 +909,12 @@ fn install(self: *Pacman, pkg_name: []const u8, update_version: []const u8) !voi
 fn installExistingPackage(self: *Pacman, full_pkg_name: []const u8) !void {
     try std.process.setCurrentPath(self.io, self.zur_pkg_dir);
 
-    const argv = &[_][]const u8{ "sudo", "pacman", "-U", full_pkg_name };
+    const argv = &[_][]const u8{
+        "sudo",
+        "pacman",
+        "-U",
+        full_pkg_name,
+    };
     try self.execCommand(argv);
 }
 
@@ -920,10 +986,14 @@ fn execCommand(self: *Pacman, argv: []const []const u8) !void {
 }
 
 fn moveBuiltPackages(self: *Pacman, pkg_name: []const u8, update_version: []const u8) !void {
-    const pkg_dir = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, update_version });
-    const full_pkg_dir = try Dir.path.join(self.allocator, &[_][]const u8{ self.zur_path, pkg_dir });
+    const pkg_dir = try mem.join(self.allocator, "-", &.{ pkg_name, update_version });
+    const full_pkg_dir = try Dir.path.join(self.allocator, &.{ self.zur_path, pkg_dir });
 
-    var dir = Dir.openDirAbsolute(self.io, full_pkg_dir, .{ .iterate = true, .access_sub_paths = false, .follow_symlinks = false }) catch |err| switch (err) {
+    var dir = Dir.openDirAbsolute(self.io, full_pkg_dir, .{
+        .iterate = true,
+        .access_sub_paths = false,
+        .follow_symlinks = false,
+    }) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
@@ -934,8 +1004,8 @@ fn moveBuiltPackages(self: *Pacman, pkg_name: []const u8, update_version: []cons
         if (!mem.containsAtLeast(u8, node.name, 1, ".pkg.tar.zst")) {
             continue;
         }
-        const full_old_name = try Dir.path.join(self.allocator, &[_][]const u8{ full_pkg_dir, node.name });
-        const full_new_name = try Dir.path.join(self.allocator, &[_][]const u8{ self.zur_pkg_dir, node.name });
+        const full_old_name = try Dir.path.join(self.allocator, &.{ full_pkg_dir, node.name });
+        const full_new_name = try Dir.path.join(self.allocator, &.{ self.zur_pkg_dir, node.name });
         try Dir.renameAbsolute(full_old_name, full_new_name, self.io);
     }
 
@@ -943,7 +1013,11 @@ fn moveBuiltPackages(self: *Pacman, pkg_name: []const u8, update_version: []cons
 }
 
 fn removeStaleArtifacts(self: *Pacman, pkg_name: []const u8, dir_path: []const u8) !void {
-    var dir = Dir.openDirAbsolute(self.io, dir_path, .{ .iterate = true, .access_sub_paths = false, .follow_symlinks = false }) catch |err| switch (err) {
+    var dir = Dir.openDirAbsolute(self.io, dir_path, .{
+        .iterate = true,
+        .access_sub_paths = false,
+        .follow_symlinks = false,
+    }) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
@@ -966,7 +1040,7 @@ fn removeStaleArtifacts(self: *Pacman, pkg_name: []const u8, dir_path: []const u
         if (!artifactNameForPkg(node.name, pkg_name)) {
             continue;
         }
-        const path = try Dir.path.join(self.allocator, &[_][]const u8{ dir_path, node.name });
+        const path = try Dir.path.join(self.allocator, &.{ dir_path, node.name });
         defer self.allocator.free(path);
         var f = try Dir.openFileAbsolute(self.io, path, .{});
         defer f.close(self.io);
@@ -975,17 +1049,20 @@ fn removeStaleArtifacts(self: *Pacman, pkg_name: []const u8, dir_path: []const u
         // reused) so we can delete via a Dir handle after iteration.
         const name_copy = try self.allocator.dupe(u8, node.name);
         errdefer self.allocator.free(name_copy);
-        try artifacts.append(self.allocator, .{ .mtime = stat.mtime.nanoseconds, .name = name_copy });
+        try artifacts.append(self.allocator, .{
+            .mtime = stat.mtime.nanoseconds,
+            .name = name_copy,
+        });
     }
 
     // Keep the last 3 installed versions of the package.
     if (artifacts.items.len > 3) {
-        const LessThan = struct {
+        const less_than = struct {
             fn lessThan(_: void, a: Artifact, b: Artifact) bool {
                 return a.mtime < b.mtime;
             }
         };
-        std.mem.sort(Artifact, artifacts.items, {}, LessThan.lessThan);
+        std.mem.sort(Artifact, artifacts.items, {}, less_than.lessThan);
 
         const marked_for_removal = artifacts.items[0 .. artifacts.items.len - 3];
         // deleteTree is relative to a Dir handle, so open the (absolute)
@@ -1013,11 +1090,19 @@ fn deinitSnapshotFiles(allocator: Allocator, files: *std.StringHashMapUnmanaged(
     files.deinit(allocator);
 }
 
-fn snapshotFiles(self: *Pacman, pkg_name: []const u8, pkg_version: []const u8) !std.StringHashMapUnmanaged([]u8) {
-    const dir_name = try mem.join(self.allocator, "-", &[_][]const u8{ pkg_name, pkg_version });
-    const path = try Dir.path.join(self.allocator, &[_][]const u8{ self.zur_path, dir_name });
+fn snapshotFiles(
+    self: *Pacman,
+    pkg_name: []const u8,
+    pkg_version: []const u8,
+) !std.StringHashMapUnmanaged([]u8) {
+    const dir_name = try mem.join(self.allocator, "-", &.{ pkg_name, pkg_version });
+    const path = try Dir.path.join(self.allocator, &.{ self.zur_path, dir_name });
 
-    var dir = Dir.openDirAbsolute(self.io, path, .{ .iterate = true, .access_sub_paths = false, .follow_symlinks = false }) catch |err| switch (err) {
+    var dir = Dir.openDirAbsolute(self.io, path, .{
+        .iterate = true,
+        .access_sub_paths = false,
+        .follow_symlinks = false,
+    }) catch |err| switch (err) {
         // No snapshot directory yet (e.g. a package that was never
         // downloaded): return an empty map so callers avoid unwrapping
         // an optional.
@@ -1044,7 +1129,12 @@ fn snapshotFiles(self: *Pacman, pkg_name: []const u8, pkg_version: []const u8) !
             continue;
         }
 
-        const file_contents = dir.readFileAlloc(self.io, node.name, self.allocator, .limited(max_snapshot_diff_bytes)) catch |err| switch (err) {
+        const file_contents = dir.readFileAlloc(
+            self.io,
+            node.name,
+            self.allocator,
+            .limited(max_snapshot_diff_bytes),
+        ) catch |err| switch (err) {
             error.StreamTooLong => {
                 @branchHint(.cold);
                 try self.print("  {s}->{s} skipping diff for large file: {s}{s}{s}\n", .{
@@ -1226,7 +1316,13 @@ test "extractTarGz - strips the top-level snapshot directory" {
     const rel_tmp = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     defer allocator.free(rel_tmp);
     const tar_run = try std.process.run(allocator, io, .{
-        .argv = &[_][]const u8{ "sh", "-c", "cd \"$1\" && tar czf pkg.tar.gz pkg-1.0", "sh", rel_tmp },
+        .argv = &.{
+            "sh",
+            "-c",
+            "cd \"$1\" && tar czf pkg.tar.gz pkg-1.0",
+            "sh",
+            rel_tmp,
+        },
     });
     defer allocator.free(tar_run.stdout);
     defer allocator.free(tar_run.stderr);
