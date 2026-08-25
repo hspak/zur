@@ -111,6 +111,59 @@ pub const Package = struct {
 // Files larger than this are skipped when diffing a package snapshot.
 const max_snapshot_diff_bytes: usize = 4096;
 
+// `name` and the slices in `pkg` are borrowed for the `Pacman` lifetime.
+// `existing_artifact` is owned by the queue when non-null.
+const PendingPackage = struct {
+    name: []const u8,
+    pkg: Package,
+    existing_artifact: ?[]u8 = null,
+};
+
+fn deinitPendingPackages(allocator: Allocator, pending: *std.ArrayList(PendingPackage)) void {
+    for (pending.items) |item| {
+        if (item.existing_artifact) |artifact| allocator.free(artifact);
+    }
+    pending.deinit(allocator);
+}
+
+// `existing_artifact` ownership transfers to `pending` on success.
+fn queuePendingPackage(
+    allocator: Allocator,
+    pending: *std.ArrayList(PendingPackage),
+    queued_bases: *std.StringHashMapUnmanaged(usize),
+    pkg_name: []const u8,
+    pkg: Package,
+    existing_artifact: ?[]u8,
+) !void {
+    const base = pkg.base_name orelse pkg_name;
+    if (queued_bases.get(base)) |index| {
+        const item = &pending.items[index];
+        // A root update has its installed version, while a dependency uses
+        // the fresh-install sentinel. Keep the root metadata for review.
+        if (!mem.eql(u8, pkg.version, "0")) {
+            item.name = pkg_name;
+            item.pkg = pkg;
+        }
+        if (existing_artifact) |artifact| {
+            if (item.existing_artifact) |old| allocator.free(old);
+            item.existing_artifact = artifact;
+            item.name = pkg_name;
+            item.pkg = pkg;
+        }
+        return;
+    }
+
+    try pending.ensureUnusedCapacity(allocator, 1);
+    try queued_bases.ensureUnusedCapacity(allocator, 1);
+    const index = pending.items.len;
+    pending.appendAssumeCapacity(.{
+        .name = pkg_name,
+        .pkg = pkg,
+        .existing_artifact = existing_artifact,
+    });
+    queued_bases.putAssumeCapacityNoClobber(base, index);
+}
+
 // Architecture component in built package filenames (native compile target).
 fn machineArch() []const u8 {
     return switch (builtin.cpu.arch) {
@@ -405,6 +458,13 @@ pub fn processOutOfDate(self: *Pacman) Error!void {
     var processed_bases: std.StringHashMapUnmanaged(void) = .empty;
     defer processed_bases.deinit(self.allocator);
 
+    // Collect missing AUR dependencies in postorder so the build phase remains
+    // dependency-first even though every snapshot is downloaded up front.
+    var pending: std.ArrayList(PendingPackage) = .empty;
+    defer deinitPendingPackages(self.allocator, &pending);
+    var queued_bases: std.StringHashMapUnmanaged(usize) = .empty;
+    defer queued_bases.deinit(self.allocator);
+
     var pkgs_iter = self.pkgs.iterator();
     while (pkgs_iter.next()) |pkg| {
         if (pkg.value_ptr.*.requires_update) {
@@ -429,7 +489,7 @@ pub fn processOutOfDate(self: *Pacman) Error!void {
                 pkg.value_ptr.*.aur_version.?,
             );
             if (existing) |full_pkg_name| {
-                defer self.allocator.free(full_pkg_name);
+                errdefer self.allocator.free(full_pkg_name);
                 try self.print("{s}warning:{s} Found existing up-to-date package: {s}{s}-{s}{s}, deferring to pacman -U...\n", .{
                     color.bold_foreground_yellow,
                     color.reset,
@@ -438,10 +498,15 @@ pub fn processOutOfDate(self: *Pacman) Error!void {
                     pkg.value_ptr.*.aur_version.?,
                     color.reset,
                 });
-                try self.installExistingPackage(full_pkg_name);
-                // Keep going: other packages may also be out of date. An
-                // early return here would skip the rest of the loop and
-                // leave them uninstalled.
+                try self.aur_deps_done.put(self.allocator, pkg.key_ptr.*, {});
+                try queuePendingPackage(
+                    self.allocator,
+                    &pending,
+                    &queued_bases,
+                    pkg.key_ptr.*,
+                    pkg.value_ptr.*.*,
+                    full_pkg_name,
+                );
                 continue;
             }
 
@@ -472,52 +537,80 @@ pub fn processOutOfDate(self: *Pacman) Error!void {
                     color.reset,
                 });
             }
-            try self.installWithDeps(pkg.key_ptr.*, pkg.value_ptr.*);
+            try self.queuePackageWithDeps(
+                &pending,
+                &queued_bases,
+                pkg.key_ptr.*,
+                pkg.value_ptr.*.*,
+            );
+        }
+    }
+
+    // Keep the AUR connection active by finishing all network work before a
+    // potentially long-running package build.
+    for (pending.items) |*item| {
+        if (item.existing_artifact == null) {
+            try self.downloadAndExtractPackage(item.name, &item.pkg);
+        }
+    }
+
+    // Missing AUR dependencies were appended before their dependents.
+    for (pending.items) |*item| {
+        if (item.existing_artifact) |artifact| {
+            try self.installExistingPackage(artifact);
+        } else {
+            try self.compareUpdateAndInstall(item.name, &item.pkg);
         }
     }
 }
 
-// Official/repo deps are left for `makepkg -s`.
-fn installWithDeps(self: *Pacman, pkg_name: []const u8, pkg: *Package) !void {
-    try self.ensureAurDepsInstalled(pkg_name);
-    try self.downloadAndExtractPackage(pkg_name, pkg);
-    try self.compareUpdateAndInstall(pkg_name, pkg);
-}
-
-// Mark `pkg_name` handled first so cycles and repeats terminate.
-fn ensureAurDepsInstalled(self: *Pacman, pkg_name: []const u8) !void {
-    if (self.aur_deps_done.contains(pkg_name)) return;
+// Official/repo deps are left for `makepkg -s`. Mark `pkg_name` before
+// recursion so dependency cycles terminate.
+fn queuePackageWithDeps(
+    self: *Pacman,
+    pending: *std.ArrayList(PendingPackage),
+    queued_bases: *std.StringHashMapUnmanaged(usize),
+    pkg_name: []const u8,
+    pkg: Package,
+) !void {
+    if (self.aur_deps_done.contains(pkg_name)) {
+        try queuePendingPackage(self.allocator, pending, queued_bases, pkg_name, pkg, null);
+        return;
+    }
     try self.aur_deps_done.put(self.allocator, pkg_name, {});
 
-    const info = (try self.getAurInfo(pkg_name)) orelse return;
-    const dep_lists = [_]?[][]const u8{ info.depends, info.make_depends };
-    for (dep_lists) |maybe_list| {
-        const list = maybe_list orelse continue;
-        for (list) |dep| {
-            const dep_name = normalizeDepName(self.allocator, dep) catch continue;
-            defer self.allocator.free(dep_name);
-            if (dep_name.len == 0) continue;
+    if (try self.getAurInfo(pkg_name)) |info| {
+        const dep_lists = [_]?[][]const u8{ info.depends, info.make_depends };
+        for (dep_lists) |maybe_list| {
+            const list = maybe_list orelse continue;
+            for (list) |dep| {
+                const dep_name = normalizeDepName(self.allocator, dep) catch continue;
+                defer self.allocator.free(dep_name);
+                if (dep_name.len == 0) continue;
 
-            if (self.aur_deps_done.contains(dep_name)) continue;
-            if (try (try self.getAlpm()).isInstalled(dep_name)) continue;
-            const dep_info = (try self.getAurInfo(dep_name)) orelse continue;
+                if (self.aur_deps_done.contains(dep_name)) continue;
+                if (try (try self.getAlpm()).isInstalled(dep_name)) continue;
+                const dep_info = (try self.getAurInfo(dep_name)) orelse continue;
 
-            try self.ensureAurDepsInstalled(dep_name);
-
-            const dep_pkg = try self.allocator.create(Package);
-            defer self.allocator.destroy(dep_pkg);
-            dep_pkg.* = .init("0");
-            dep_pkg.aur_version = dep_info.version;
-            // A split-package dep shares its base's snapshot; set base_name
-            // (mirroring fetchRemoteAurVersions) so the right archive and
-            // directory are used.
-            if (!mem.eql(u8, dep_info.name, dep_info.package_base)) {
-                dep_pkg.base_name = dep_info.package_base;
+                var dep_pkg = Package.init("0");
+                dep_pkg.aur_version = dep_info.version;
+                // A split-package dep shares its base's snapshot; set base_name
+                // (mirroring fetchRemoteAurVersions) so the right archive and
+                // directory are used.
+                if (!mem.eql(u8, dep_info.name, dep_info.package_base)) {
+                    dep_pkg.base_name = dep_info.package_base;
+                }
+                try self.queuePackageWithDeps(
+                    pending,
+                    queued_bases,
+                    dep_info.name,
+                    dep_pkg,
+                );
             }
-            try self.downloadAndExtractPackage(dep_name, dep_pkg);
-            try self.compareUpdateAndInstall(dep_name, dep_pkg);
         }
     }
+
+    try queuePendingPackage(self.allocator, pending, queued_bases, pkg_name, pkg, null);
 }
 
 // Full AUR info for `name`, or null if it is an official/repo dependency.
@@ -1271,6 +1364,76 @@ test "artifactNameForPkg - matches only full leading components" {
     try testing.expect(!artifactNameForPkg("foo", "foobar"));
     try testing.expect(artifactNameForPkg("neovim-git-r100.abc-x86_64.pkg.tar.zst", "neovim-git"));
     try testing.expect(!artifactNameForPkg("foo-lib-1.0-1-x86_64.pkg.tar.zst", "foo-l"));
+}
+
+test "queuePendingPackage preserves dependency-first insertion order" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var pending: std.ArrayList(PendingPackage) = .empty;
+    defer deinitPendingPackages(allocator, &pending);
+    var queued_bases: std.StringHashMapUnmanaged(usize) = .empty;
+    defer queued_bases.deinit(allocator);
+
+    var dependency = Package.init("0");
+    dependency.aur_version = "2.0";
+    try queuePendingPackage(allocator, &pending, &queued_bases, "dependency", dependency, null);
+
+    var root = Package.init("1.0");
+    root.aur_version = "2.0";
+    try queuePendingPackage(allocator, &pending, &queued_bases, "root", root, null);
+
+    try testing.expectEqual(@as(usize, 2), pending.items.len);
+    try testing.expectEqualStrings("dependency", pending.items[0].name);
+    try testing.expectEqualStrings("root", pending.items[1].name);
+}
+
+test "queuePendingPackage deduplicates bases and promotes root metadata" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var pending: std.ArrayList(PendingPackage) = .empty;
+    defer deinitPendingPackages(allocator, &pending);
+    var queued_bases: std.StringHashMapUnmanaged(usize) = .empty;
+    defer queued_bases.deinit(allocator);
+
+    var dependency = Package.init("0");
+    dependency.aur_version = "2.0";
+    dependency.base_name = "shared-base";
+    try queuePendingPackage(allocator, &pending, &queued_bases, "shared-lib", dependency, null);
+
+    var root = Package.init("1.0");
+    root.aur_version = "2.0";
+    root.base_name = "shared-base";
+    try queuePendingPackage(allocator, &pending, &queued_bases, "shared-cli", root, null);
+
+    try testing.expectEqual(@as(usize, 1), pending.items.len);
+    try testing.expectEqualStrings("shared-cli", pending.items[0].name);
+    try testing.expectEqualStrings("1.0", pending.items[0].pkg.version);
+}
+
+test "queuePendingPackage replaces a queued build with an existing artifact" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var pending: std.ArrayList(PendingPackage) = .empty;
+    defer deinitPendingPackages(allocator, &pending);
+    var queued_bases: std.StringHashMapUnmanaged(usize) = .empty;
+    defer queued_bases.deinit(allocator);
+
+    var dependency = Package.init("0");
+    dependency.aur_version = "2.0";
+    try queuePendingPackage(allocator, &pending, &queued_bases, "shared", dependency, null);
+
+    var root = Package.init("1.0");
+    root.aur_version = "2.0";
+    const artifact = artifact: {
+        const value = try allocator.dupe(u8, "shared-2.0-x86_64.pkg.tar.zst");
+        errdefer allocator.free(value);
+        try queuePendingPackage(allocator, &pending, &queued_bases, "shared", root, value);
+        break :artifact value;
+    };
+
+    try testing.expectEqual(@as(usize, 1), pending.items.len);
+    try testing.expectEqualStrings(artifact, pending.items[0].existing_artifact.?);
+    try testing.expectEqualStrings("1.0", pending.items[0].pkg.version);
 }
 
 test "printBarePkgbuildFields includes reviewed assignments and functions" {
