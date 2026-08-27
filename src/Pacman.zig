@@ -776,6 +776,7 @@ fn compareUpdateAndInstall(self: *Pacman, pkg_name: []const u8, pkg: *Package) !
 
     var at_least_one_diff = false;
     try new_pkgbuild.comparePrev(old_pkgbuild);
+    try new_pkgbuild.compareArchSource(old_pkgbuild, machineArch());
     try new_pkgbuild.indentValues(2);
     var new_pkgbuild_iter = new_pkgbuild.fields.iterator();
     while (new_pkgbuild_iter.next()) |field| {
@@ -921,8 +922,25 @@ fn printBarePkgbuildFields(
     try pkgbuild.readLines();
     try pkgbuild.indentValues(2);
 
+    var printed_source = false;
     if (pkgbuild.fields.get("source")) |source| {
-        try writer.print("  source {s}\n\n", .{source.value});
+        try writer.print("  source {s}\n", .{source.value});
+        printed_source = true;
+    }
+
+    var source_arch_name_buffer: [32]u8 = undefined;
+    const source_arch_name = try std.fmt.bufPrint(
+        &source_arch_name_buffer,
+        "source_{s}",
+        .{machineArch()},
+    );
+    if (pkgbuild.fields.get(source_arch_name)) |source| {
+        try writer.print("  {s} {s}\n", .{ source_arch_name, source.value });
+        printed_source = true;
+    }
+
+    if (printed_source) {
+        try writer.print("\n", .{});
     }
 
     var fields_iter = pkgbuild.fields.iterator();
@@ -1456,6 +1474,34 @@ test "printBarePkgbuildFields includes reviewed assignments and functions" {
     try testing.expect(mem.indexOf(u8, output, "install testpkg.install") != null);
     try testing.expect(mem.indexOf(u8, output, "install()") != null);
     try testing.expect(mem.indexOf(u8, output, "pkgname") == null);
+}
+
+test "printBarePkgbuildFields includes only the native architecture source" {
+    const testing = std.testing;
+    const pkgbuild_contents =
+        \\pkgname=testpkg
+        \\source_x86_64=('https://example.com/testpkg-x86_64.tar.gz')
+        \\source_aarch64=('https://example.com/testpkg-aarch64.tar.gz')
+        \\source_riscv64=('https://example.com/testpkg-riscv64.tar.gz')
+        \\package() {
+        \\  install -Dm755 testpkg "$pkgdir/usr/bin/testpkg"
+        \\}
+    ;
+
+    var output_buffer: [1024]u8 = undefined;
+    var writer = Io.Writer.fixed(&output_buffer);
+    try printBarePkgbuildFields(testing.allocator, &writer, pkgbuild_contents);
+
+    const output = writer.buffered();
+    var expected_buffer: [160]u8 = undefined;
+    const expected = try std.fmt.bufPrint(
+        &expected_buffer,
+        "  source_{s} 'https://example.com/testpkg-{s}.tar.gz'\n\n",
+        .{ machineArch(), machineArch() },
+    );
+    try testing.expect(mem.startsWith(u8, output, expected));
+    try testing.expectEqual(@as(usize, 1), mem.count(u8, output, "source_"));
+    try testing.expect(mem.indexOf(u8, output, "package()") != null);
 }
 
 test "extractTarGz - strips the top-level snapshot directory" {

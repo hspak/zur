@@ -418,24 +418,40 @@ pub fn readLines(self: *Pkgbuild) Error!void {
 /// Mark relevant fields as `updated` when they differ from `prev_pkgbuild`.
 pub fn comparePrev(self: *Pkgbuild, prev_pkgbuild: Pkgbuild) Error!void {
     for (relevant_fields) |field| {
-        const prev = prev_pkgbuild.fields.get(field);
-        const curr = self.fields.get(field);
-        if (prev == null and curr != null) {
-            curr.?.updated = true;
-        } else if (prev != null and curr == null) {
-            const removed = try self.allocator.dupe(u8, "(removed)");
-            errdefer self.allocator.free(removed);
-            const content = try self.allocator.create(Content);
-            errdefer self.allocator.destroy(content);
-            content.* = .init(removed);
-            content.updated = true;
-            const key_copy = try self.allocator.dupe(u8, field);
-            try self.fields.put(self.allocator, key_copy, content);
-        } else if (prev == null and curr == null) {
-            continue;
-        } else if (prev != null and curr != null and !mem.eql(u8, prev.?.value, curr.?.value)) {
-            curr.?.updated = true;
-        }
+        try self.compareField(prev_pkgbuild, field);
+    }
+}
+
+/// Mark the `source_<architecture>` field as updated when it differs.
+pub fn compareArchSource(
+    self: *Pkgbuild,
+    prev_pkgbuild: Pkgbuild,
+    architecture: []const u8,
+) Error!void {
+    const field = try std.fmt.allocPrint(self.allocator, "source_{s}", .{architecture});
+    defer self.allocator.free(field);
+    try self.compareField(prev_pkgbuild, field);
+}
+
+fn compareField(self: *Pkgbuild, prev_pkgbuild: Pkgbuild, field: []const u8) Error!void {
+    const prev = prev_pkgbuild.fields.get(field);
+    const curr = self.fields.get(field);
+    if (prev == null and curr != null) {
+        curr.?.updated = true;
+    } else if (prev != null and curr == null) {
+        const removed = try self.allocator.dupe(u8, "(removed)");
+        errdefer self.allocator.free(removed);
+        const content = try self.allocator.create(Content);
+        errdefer self.allocator.destroy(content);
+        content.* = .init(removed);
+        content.updated = true;
+        const key_copy = try self.allocator.dupe(u8, field);
+        errdefer self.allocator.free(key_copy);
+        try self.fields.put(self.allocator, key_copy, content);
+    } else if (prev == null and curr == null) {
+        return;
+    } else if (prev != null and curr != null and !mem.eql(u8, prev.?.value, curr.?.value)) {
+        curr.?.updated = true;
     }
 }
 
@@ -784,6 +800,30 @@ test "Pkgbuild - comparePrev - field removed should not crash" {
     try testing.expect(install_field != null);
     try testing.expectEqualStrings("(removed)", install_field.?.value);
     try testing.expect(install_field.?.updated);
+}
+
+test "Pkgbuild - compareArchSource marks only the selected architecture" {
+    const old =
+        \\source_x86_64=('https://example.com/old-x86_64.tar.gz')
+        \\source_aarch64=('https://example.com/old-aarch64.tar.gz')
+    ;
+    const new =
+        \\source_x86_64=('https://example.com/new-x86_64.tar.gz')
+        \\source_aarch64=('https://example.com/new-aarch64.tar.gz')
+    ;
+
+    var pkgbuild_old = Pkgbuild.init(testing.allocator, old);
+    defer pkgbuild_old.deinit();
+    try pkgbuild_old.readLines();
+
+    var pkgbuild_new = Pkgbuild.init(testing.allocator, new);
+    defer pkgbuild_new.deinit();
+    try pkgbuild_new.readLines();
+
+    try pkgbuild_new.compareArchSource(pkgbuild_old, "x86_64");
+
+    try testing.expect(pkgbuild_new.fields.get("source_x86_64").?.updated);
+    try testing.expect(!pkgbuild_new.fields.get("source_aarch64").?.updated);
 }
 
 test "Pkgbuild - indentValues - multiple functions should not accumulate" {
