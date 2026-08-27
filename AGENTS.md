@@ -1,4 +1,11 @@
-# Zig Coding Style Guide
+# This is a AUR (Arch Linux) helper written in Zig.
+
+Goals:
+- All operations scoped within ~/.zur
+- Minimal user input, though always surface key install info for the user to
+review
+
+# Zig Guidelines
 
 Shared conventions, including the [Zig language reference style
 guide](https://ziglang.org/documentation/master/#Style-Guide). `zig fmt` is the
