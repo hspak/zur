@@ -339,6 +339,21 @@ harder to diagnose.
 
 ---
 
+## Commits
+
+Follow Linux kernel commit-message style.
+
+- Use an imperative subject in the form `subsystem: concise summary`. Keep it
+  under 75 characters and do not end it with a period.
+- Separate the subject from the body with a blank line.
+- For a non-trivial change, explain the existing behavior or problem first and
+  why it matters. Then explain how the change resolves it and note important
+  constraints or tradeoffs.
+- Describe the reason for the change instead of restating the diff. Keep each
+  commit to one logical change and wrap body text at about 75 columns.
+
+---
+
 ## Checklist
 
 1. One primary type? `Name.zig` + `const Name = @This();`. Otherwise `snake_name.zig`.
