@@ -495,7 +495,7 @@ fn isNameCont(c: u8) bool {
     return isNameStart(c) or (c >= '0' and c <= '9');
 }
 
-test "Pkgbuild - readLines - neovim-git" {
+test "readLines parses a real neovim-git PKGBUILD" {
     const file_contents =
         \\# Maintainer: Florian Walch <florian+aur@fwalch.com>
         \\# Contributor: Florian Hahn <flo@fhahn.com>
@@ -581,7 +581,7 @@ test "Pkgbuild - readLines - neovim-git" {
     try testing.expect(pkgbuild.get("check()") != null);
 }
 
-test "Pkgbuild - readLines - google-chrome-dev" {
+test "readLines parses a real google-chrome-dev PKGBUILD" {
     const file_contents =
         \\# Maintainer: Knut Ahlers <knut at ahlers dot me>
         \\# Contributor: Det <nimetonmaili g-mail>
@@ -664,7 +664,7 @@ test "Pkgbuild - readLines - google-chrome-dev" {
     try testing.expect(mem.indexOf(u8, package_body, "product_logo_") != null);
 }
 
-test "Pkgbuild - compare" {
+test "comparePrev marks only changed review fields" {
     const old =
         \\pkgname=google-chrome-dev
         \\pkgver=91.0.4464.5
@@ -741,12 +741,14 @@ test "Pkgbuild - compare" {
     try pkgbuild_new.comparePrev(pkgbuild_old);
     try testing.expect(pkgbuild_new.fields.get("install").?.updated);
     try testing.expect(pkgbuild_new.fields.get("pkgver()").?.updated);
+    try testing.expect(!pkgbuild_new.fields.get("pkgver").?.updated);
     try testing.expect(!pkgbuild_new.fields.get("source").?.updated);
     try testing.expect(!pkgbuild_new.fields.get("sha512sums").?.updated);
     try testing.expect(!pkgbuild_new.fields.get("pkgdesc").?.updated);
+    try testing.expect(!pkgbuild_new.fields.get("install()").?.updated);
 }
 
-test "Pkgbuild - indentValue - google-chrome-dev" {
+test "indentValues prefixes every function-body line" {
     const file_contents =
         \\pkgname=google-chrome-dev
         \\package() {
@@ -760,18 +762,15 @@ test "Pkgbuild - indentValue - google-chrome-dev" {
     try pkgbuild.readLines();
     try pkgbuild.indentValues(2);
 
-    const package_val = pkgbuild.get("package()").?;
-    var lines = mem.splitScalar(u8, package_val, '\n');
-    while (lines.next()) |line| {
-        if (line.len == 0) continue;
-        try testing.expect(mem.startsWith(u8, line, "  "));
-    }
-    try testing.expect(mem.indexOf(u8, package_val, "bsdtar") != null);
-    const expected = "  {\n        msg2 \"Extracting the data.tar.xz...\"\n        bsdtar -xf data.tar.xz -C \"$pkgdir/\"\n  }\n";
-    try testing.expectEqualStrings(expected, package_val);
+    const expected =
+        "  {\n" ++
+        "        msg2 \"Extracting the data.tar.xz...\"\n" ++
+        "        bsdtar -xf data.tar.xz -C \"$pkgdir/\"\n" ++
+        "  }\n";
+    try testing.expectEqualStrings(expected, pkgbuild.get("package()").?);
 }
 
-test "Pkgbuild - comparePrev - field removed should not crash" {
+test "comparePrev records a removed review field as updated" {
     const old =
         \\pkgname=testpkg
         \\install=test.install
@@ -802,7 +801,7 @@ test "Pkgbuild - comparePrev - field removed should not crash" {
     try testing.expect(install_field.?.updated);
 }
 
-test "Pkgbuild - compareArchSource marks only the selected architecture" {
+test "compareArchSource marks only the selected architecture" {
     const old =
         \\source_x86_64=('https://example.com/old-x86_64.tar.gz')
         \\source_aarch64=('https://example.com/old-aarch64.tar.gz')
@@ -826,7 +825,7 @@ test "Pkgbuild - compareArchSource marks only the selected architecture" {
     try testing.expect(!pkgbuild_new.fields.get("source_aarch64").?.updated);
 }
 
-test "Pkgbuild - indentValues - multiple functions should not accumulate" {
+test "indentValues keeps multiple function bodies independent" {
     const file_contents =
         \\pkgname=testpkg
         \\build() {
@@ -845,13 +844,11 @@ test "Pkgbuild - indentValues - multiple functions should not accumulate" {
     const build_val = pkgbuild.get("build()").?;
     const package_val = pkgbuild.get("package()").?;
 
-    try testing.expect(mem.indexOf(u8, package_val, "make install") != null);
-    try testing.expect(mem.indexOf(u8, build_val, "make") != null);
-    // Regression: indentValues used to append every function into the last one.
-    try testing.expect(mem.indexOf(u8, package_val, "build()") == null);
+    try testing.expectEqualStrings("  {\n      make\n  }\n", build_val);
+    try testing.expectEqualStrings("  {\n      make install\n  }\n", package_val);
 }
 
-test "Pkgbuild - readLines - minimal function body" {
+test "readLines preserves a minimal function body" {
     const file_contents =
         \\pkgname=testpkg
         \\pkgver() {
@@ -862,14 +859,10 @@ test "Pkgbuild - readLines - minimal function body" {
     defer pkgbuild.deinit();
     try pkgbuild.readLines();
 
-    try testing.expect(pkgbuild.get("pkgver()") != null);
-    // Body preserves interior newline: "{\n}"
-    const body = pkgbuild.get("pkgver()").?;
-    try testing.expect(mem.startsWith(u8, body, "{"));
-    try testing.expect(mem.endsWith(u8, mem.trimEnd(u8, body, " \t\n"), "}"));
+    try testing.expectEqualStrings("{\n}", pkgbuild.get("pkgver()").?);
 }
 
-test "Pkgbuild - readLines - double quotes with parentheses" {
+test "readLines preserves parentheses inside double-quoted array elements" {
     const file_contents =
         \\pkgname=testpkg
         \\source=("http://example.com/file(1).tar.gz" "other.patch")
@@ -881,12 +874,14 @@ test "Pkgbuild - readLines - double quotes with parentheses" {
     defer pkgbuild.deinit();
     try pkgbuild.readLines();
 
-    const source_val = pkgbuild.get("source").?;
-    try testing.expect(mem.indexOf(u8, source_val, "file(1).tar.gz") != null);
-    try testing.expect(mem.indexOf(u8, source_val, "other.patch") != null);
+    try testing.expectEqualStrings(
+        "\"http://example.com/file(1).tar.gz\" \"other.patch\"",
+        pkgbuild.get("source").?,
+    );
+    try testing.expectEqualStrings("'dep1' 'dep2'", pkgbuild.get("depends").?);
 }
 
-test "Pkgbuild - readLines - mixed quotes with parentheses" {
+test "readLines preserves parentheses in mixed-quote array elements" {
     const file_contents =
         \\pkgname=testpkg
         \\optdepends=('pkg1: for feature (optional)' "pkg2: another (thing)")
@@ -897,12 +892,13 @@ test "Pkgbuild - readLines - mixed quotes with parentheses" {
     defer pkgbuild.deinit();
     try pkgbuild.readLines();
 
-    const optdepends_val = pkgbuild.get("optdepends").?;
-    try testing.expect(mem.indexOf(u8, optdepends_val, "(optional)") != null);
-    try testing.expect(mem.indexOf(u8, optdepends_val, "(thing)") != null);
+    try testing.expectEqualStrings(
+        "'pkg1: for feature (optional)' \"pkg2: another (thing)\"",
+        pkgbuild.get("optdepends").?,
+    );
 }
 
-test "Pkgbuild - nested braces in function" {
+test "readLines keeps nested braces inside their function" {
     const file_contents =
         \\pkgname=testpkg
         \\package() {
@@ -913,19 +909,27 @@ test "Pkgbuild - nested braces in function" {
         \\    echo group
         \\  }
         \\}
+        \\pkgrel=1
     ;
 
     var pkgbuild = Pkgbuild.init(testing.allocator, file_contents);
     defer pkgbuild.deinit();
     try pkgbuild.readLines();
 
-    const body = pkgbuild.get("package()").?;
-    try testing.expect(mem.indexOf(u8, body, "echo nested") != null);
-    try testing.expect(mem.indexOf(u8, body, "echo group") != null);
-    try testing.expect(mem.endsWith(u8, mem.trimEnd(u8, body, " \t\n"), "}"));
+    const expected =
+        "{\n" ++
+        "  if true; then\n" ++
+        "    echo nested\n" ++
+        "  fi\n" ++
+        "  {\n" ++
+        "    echo group\n" ++
+        "  }\n" ++
+        "}";
+    try testing.expectEqualStrings(expected, pkgbuild.get("package()").?);
+    try testing.expectEqualStrings("1", pkgbuild.get("pkgrel").?);
 }
 
-test "Pkgbuild - split package function" {
+test "readLines keeps split-package functions independent" {
     const file_contents =
         \\pkgname=('foo' 'bar')
         \\package_foo() {
@@ -941,12 +945,14 @@ test "Pkgbuild - split package function" {
     defer pkgbuild.deinit();
     try pkgbuild.readLines();
 
-    try testing.expect(pkgbuild.get("package_foo()") != null);
-    try testing.expect(pkgbuild.get("package_bar()") != null);
-    try testing.expect(mem.indexOf(u8, pkgbuild.get("package_foo()").?, "echo foo") != null);
+    try testing.expectEqualStrings(
+        "{\n  depends=('a')\n  echo foo\n}",
+        pkgbuild.get("package_foo()").?,
+    );
+    try testing.expectEqualStrings("{\n  echo bar\n}", pkgbuild.get("package_bar()").?);
 }
 
-test "Pkgbuild - arch-specific arrays and comments in arrays" {
+test "readLines parses architecture arrays without comment text" {
     const file_contents =
         \\pkgname=testpkg
         \\depends_x86_64=('libfoo')
@@ -963,14 +969,14 @@ test "Pkgbuild - arch-specific arrays and comments in arrays" {
     try pkgbuild.readLines();
 
     try testing.expectEqualStrings("'libfoo'", pkgbuild.get("depends_x86_64").?);
-    const source_val = pkgbuild.get("source").?;
-    try testing.expect(mem.indexOf(u8, source_val, "foo.tar.gz") != null);
-    try testing.expect(mem.indexOf(u8, source_val, "local.patch") != null);
-    // Comment text should not appear as a source element
-    try testing.expect(mem.indexOf(u8, source_val, "primary tarball") == null);
+    try testing.expectEqualStrings(
+        "\n\"https://example.com/foo.tar.gz\"\n'local.patch'\n",
+        pkgbuild.get("source").?,
+    );
+    try testing.expectEqualStrings("'abc' 'def'", pkgbuild.get("sha256sums").?);
 }
 
-test "Pkgbuild - quoted hash is not a comment" {
+test "readLines preserves hash characters inside quotes" {
     const file_contents =
         \\pkgname=testpkg
         \\pkgdesc="use #hashtags carefully"
@@ -985,7 +991,7 @@ test "Pkgbuild - quoted hash is not a comment" {
     try testing.expectEqualStrings("'file#1.tar.gz'", pkgbuild.get("source").?);
 }
 
-test "Pkgbuild - last assignment wins" {
+test "readLines uses the final assignment to a field" {
     const file_contents =
         \\pkgname=first
         \\pkgname=second

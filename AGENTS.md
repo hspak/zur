@@ -316,6 +316,27 @@ test "put evicts the oldest" {
 `test { _ = @import("child.zig"); }` pulls a child file into the test binary.
 Skip unavailable platforms or features with `return error.SkipZigTest`.
 
+Tests are durable specifications. Do not delete, weaken, or rewrite an existing
+test merely to make a bug fix or behavior change pass. Change a test only when
+the intended contract changes or a refactor forces a structural change; preserve
+its behavioral coverage and state why the test had to change.
+
+Regression tests are stricter still. A regression test must reproduce the
+reported failure, fail against the code before the fix, and pass after the fix
+without being changed between those runs. Keep it permanently unless the tested
+contract is deliberately removed. If the failure cannot be demonstrated before
+the fix, explain why and test the nearest externally observable invariant.
+
+Every test must distinguish a plausible broken implementation from a correct
+one. Do not add tautological tests, assertions derived by repeating the production
+logic, or checks equivalent to proving `1 + 1 == 2`. Assert meaningful behavior,
+state transitions, side effects, error handling, or boundary conditions.
+
+Use the highest practical test level: prefer end-to-end tests over integration
+tests, and integration tests over unit tests. Use a lower level when the higher
+level cannot exercise the behavior reliably or would make the failure materially
+harder to diagnose.
+
 ---
 
 ## Checklist

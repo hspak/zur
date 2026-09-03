@@ -313,37 +313,37 @@ fn buildInfoQuery(
 
 const testing = std.testing;
 
-test "buildInfoQuery - builds correct URL with packages" {
+test "buildInfoQuery builds the complete single-package URL" {
     var pkgs: std.StringHashMapUnmanaged(*Pacman.Package) = .empty;
     defer pkgs.deinit(testing.allocator);
 
-    const pkg1 = try testing.allocator.create(Pacman.Package);
-    defer testing.allocator.destroy(pkg1);
-    pkg1.* = .init("1.0.0");
-    try pkgs.put(testing.allocator, "neovim-git", pkg1);
+    var pkg = Pacman.Package.init("1.0.0");
+    try pkgs.put(testing.allocator, "neovim-git", &pkg);
 
     const result = try buildInfoQuery(testing.allocator, pkgs);
     defer testing.allocator.free(result);
 
-    try testing.expect(std.mem.containsAtLeast(u8, result, 1, host));
-    try testing.expect(std.mem.containsAtLeast(u8, result, 1, "&type=info"));
-    try testing.expect(std.mem.containsAtLeast(u8, result, 1, "&arg[]=neovim-git"));
+    try testing.expectEqualStrings(
+        "https://aur.archlinux.org/rpc/?v=5&type=info&arg[]=neovim-git",
+        result,
+    );
 }
 
-test "buildInfoQuery - no memory leaks with testing allocator" {
+test "buildInfoQuery includes every package exactly once" {
     var pkgs: std.StringHashMapUnmanaged(*Pacman.Package) = .empty;
     defer pkgs.deinit(testing.allocator);
 
-    const pkg1 = try testing.allocator.create(Pacman.Package);
-    defer testing.allocator.destroy(pkg1);
-    pkg1.* = .init("1.0");
-    const pkg2 = try testing.allocator.create(Pacman.Package);
-    defer testing.allocator.destroy(pkg2);
-    pkg2.* = .init("2.0");
+    var pkg_a = Pacman.Package.init("1.0");
+    var pkg_b = Pacman.Package.init("2.0");
 
-    try pkgs.put(testing.allocator, "pkg-a", pkg1);
-    try pkgs.put(testing.allocator, "pkg-b", pkg2);
+    try pkgs.put(testing.allocator, "pkg-a", &pkg_a);
+    try pkgs.put(testing.allocator, "pkg-b", &pkg_b);
 
     const result = try buildInfoQuery(testing.allocator, pkgs);
     defer testing.allocator.free(result);
+
+    try testing.expect(std.mem.startsWith(u8, result, host ++ "&type=info"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, result, "&arg[]=pkg-a"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, result, "&arg[]=pkg-b"));
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, result, "&arg[]="));
 }

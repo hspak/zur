@@ -1315,31 +1315,28 @@ pub fn search(
     }
 }
 
-test "shouldUpdate - fresh install sentinel version 0" {
+test "shouldUpdate always selects a fresh install" {
     const testing = std.testing;
     try testing.expect(shouldUpdate("foo", "0", "1.0.0", true));
     try testing.expect(shouldUpdate("foo", "0", "0.0.0", false));
 }
 
-test "shouldUpdate - normal package only when remote is newer" {
+test "shouldUpdate selects a normal package only when its remote version is newer" {
     const testing = std.testing;
     try testing.expect(shouldUpdate("foo", "1.0", "2.0", true));
     try testing.expect(!shouldUpdate("foo", "1.0", "1.0", false));
     try testing.expect(!shouldUpdate("foo", "2.0", "1.0", false));
 }
 
-test "shouldUpdate - git packages rebuild when pkgver matches" {
+test "shouldUpdate rebuilds a git package when its pkgver still matches" {
     const testing = std.testing;
-    // neovim-git: AUR pkgver equals installed -> rebuild to catch new commits.
     try testing.expect(shouldUpdate("neovim-git", "r100.abc", "r100.abc", false));
-    // AUR pkgver differs from installed -> rely on the version comparison.
     try testing.expect(!shouldUpdate("neovim-git", "r100.abc", "r200.def", false));
     try testing.expect(shouldUpdate("neovim-git", "r100.abc", "r200.def", true));
-    // A non-git package must not rebuild when versions match.
     try testing.expect(!shouldUpdate("neovim", "1.0", "1.0", false));
 }
 
-test "normalizeDepName - resolves common AUR dependency forms" {
+test "normalizeDepName strips alternatives and version constraints" {
     const testing = std.testing;
     const cases = [_]struct { in: []const u8, want: []const u8 }{
         .{ .in = "foo", .want = "foo" },
@@ -1358,26 +1355,33 @@ test "normalizeDepName - resolves common AUR dependency forms" {
     }
 }
 
-test "normalizeDepName - rejects self-references" {
+test "normalizeDepName rejects empty and variable dependencies" {
     const testing = std.testing;
-    try testing.expectError(error.VariableDependency, normalizeDepName(testing.allocator, "$pkgname"));
-    try testing.expectError(error.VariableDependency, normalizeDepName(testing.allocator, "$pkgver"));
+    try testing.expectError(error.EmptyDependency, normalizeDepName(testing.allocator, ""));
+    try testing.expectError(error.EmptyDependency, normalizeDepName(testing.allocator, ">=1.0"));
+    try testing.expectError(
+        error.VariableDependency,
+        normalizeDepName(testing.allocator, "$pkgname"),
+    );
+    try testing.expectError(
+        error.VariableDependency,
+        normalizeDepName(testing.allocator, "$pkgver"),
+    );
 }
 
-test "isGitPkg - only true for a -git suffix" {
+test "isGitPkg requires git to be the final suffix" {
     const testing = std.testing;
     try testing.expect(isGitPkg("neovim-git"));
     try testing.expect(isGitPkg("foo-git"));
     try testing.expect(!isGitPkg("neovim"));
-    try testing.expect(!isGitPkg("foo-git-tools")); // "-git" must be the suffix
+    try testing.expect(!isGitPkg("foo-git-tools"));
     try testing.expect(!isGitPkg(""));
 }
 
-test "artifactNameForPkg - matches only full leading components" {
+test "artifactNameForPkg requires a full leading name component" {
     const testing = std.testing;
     try testing.expect(artifactNameForPkg("foo", "foo"));
     try testing.expect(artifactNameForPkg("foo-2.0-1-x86_64.pkg.tar.zst", "foo"));
-    // "foo" must not also match a different package named "foobar-...".
     try testing.expect(!artifactNameForPkg("foobar-2.0-1-x86_64.pkg.tar.zst", "foo"));
     try testing.expect(!artifactNameForPkg("foo", "foobar"));
     try testing.expect(artifactNameForPkg("neovim-git-r100.abc-x86_64.pkg.tar.zst", "neovim-git"));
@@ -1424,8 +1428,12 @@ test "queuePendingPackage deduplicates bases and promotes root metadata" {
     try queuePendingPackage(allocator, &pending, &queued_bases, "shared-cli", root, null);
 
     try testing.expectEqual(@as(usize, 1), pending.items.len);
+    try testing.expectEqual(@as(usize, 1), queued_bases.count());
+    try testing.expectEqual(@as(usize, 0), queued_bases.get("shared-base").?);
     try testing.expectEqualStrings("shared-cli", pending.items[0].name);
     try testing.expectEqualStrings("1.0", pending.items[0].pkg.version);
+    try testing.expectEqualStrings("2.0", pending.items[0].pkg.aur_version.?);
+    try testing.expectEqualStrings("shared-base", pending.items[0].pkg.base_name.?);
 }
 
 test "queuePendingPackage replaces a queued build with an existing artifact" {
@@ -1454,7 +1462,7 @@ test "queuePendingPackage replaces a queued build with an existing artifact" {
     try testing.expectEqualStrings("1.0", pending.items[0].pkg.version);
 }
 
-test "printBarePkgbuildFields includes reviewed assignments and functions" {
+test "printBarePkgbuildFields prints only fields needed for review" {
     const testing = std.testing;
     const pkgbuild_contents =
         \\pkgname=testpkg
@@ -1470,13 +1478,19 @@ test "printBarePkgbuildFields includes reviewed assignments and functions" {
     try printBarePkgbuildFields(testing.allocator, &writer, pkgbuild_contents);
 
     const output = writer.buffered();
-    try testing.expect(mem.startsWith(u8, output, "  source 'https://example.com/testpkg.tar.gz'\n\n"));
-    try testing.expect(mem.indexOf(u8, output, "install testpkg.install") != null);
-    try testing.expect(mem.indexOf(u8, output, "install()") != null);
-    try testing.expect(mem.indexOf(u8, output, "pkgname") == null);
+    const source_output = "  source 'https://example.com/testpkg.tar.gz'\n\n";
+    const install_output = "  install testpkg.install\n";
+    const function_output =
+        "  install()   {\n" ++
+        "    install -Dm755 testpkg \"$pkgdir/usr/bin/testpkg\"\n" ++
+        "  }\n\n";
+    try testing.expect(mem.startsWith(u8, output, source_output));
+    try testing.expectEqual(@as(usize, 1), mem.count(u8, output, install_output));
+    try testing.expectEqual(@as(usize, 1), mem.count(u8, output, function_output));
+    try testing.expectEqual(source_output.len + install_output.len + function_output.len, output.len);
 }
 
-test "printBarePkgbuildFields includes only the native architecture source" {
+test "printBarePkgbuildFields prints only the native architecture source" {
     const testing = std.testing;
     const pkgbuild_contents =
         \\pkgname=testpkg
@@ -1493,18 +1507,25 @@ test "printBarePkgbuildFields includes only the native architecture source" {
     try printBarePkgbuildFields(testing.allocator, &writer, pkgbuild_contents);
 
     const output = writer.buffered();
-    var expected_buffer: [160]u8 = undefined;
+    const expected_arch = switch (builtin.cpu.arch) {
+        .x86_64 => "x86_64",
+        .aarch64 => "aarch64",
+        .riscv64 => "riscv64",
+        else => @compileError("unsupported test architecture"),
+    };
+    var expected_buffer: [320]u8 = undefined;
     const expected = try std.fmt.bufPrint(
         &expected_buffer,
-        "  source_{s} 'https://example.com/testpkg-{s}.tar.gz'\n\n",
-        .{ machineArch(), machineArch() },
+        "  source_{s} 'https://example.com/testpkg-{s}.tar.gz'\n\n" ++
+            "  package()   {{\n" ++
+            "    install -Dm755 testpkg \"$pkgdir/usr/bin/testpkg\"\n" ++
+            "  }}\n\n",
+        .{ expected_arch, expected_arch },
     );
-    try testing.expect(mem.startsWith(u8, output, expected));
-    try testing.expectEqual(@as(usize, 1), mem.count(u8, output, "source_"));
-    try testing.expect(mem.indexOf(u8, output, "package()") != null);
+    try testing.expectEqualStrings(expected, output);
 }
 
-test "extractTarGz - strips the top-level snapshot directory" {
+test "extractTarGz strips the snapshot root and consumes the archive" {
     const testing = std.testing;
     const io = testing.io;
     const allocator = testing.allocator;
@@ -1512,7 +1533,6 @@ test "extractTarGz - strips the top-level snapshot directory" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    // Build a fake AUR snapshot tree with a single top-level directory.
     try tmp.dir.createDirPath(io, "pkg-1.0/nested");
     var src = try tmp.dir.openDir(io, "pkg-1.0", .{});
     defer src.close(io);
@@ -1538,7 +1558,6 @@ test "extractTarGz - strips the top-level snapshot directory" {
     defer allocator.free(tar_run.stderr);
     if (tar_run.term != .exited or tar_run.term.exited != 0) return error.TarCreate;
 
-    // Remove the source tree so only the archive remains in the dir.
     try tmp.dir.deleteTree(io, "pkg-1.0");
 
     try extractTarGz(io, tmp.dir, "pkg.tar.gz");
@@ -1555,6 +1574,8 @@ test "extractTarGz - strips the top-level snapshot directory" {
         error.FileNotFound => null,
         else => return err,
     };
-    try testing.expect(leftover == null);
-    if (leftover) |f| f.close(io);
+    if (leftover) |file| {
+        defer file.close(io);
+        return error.ArchiveNotConsumed;
+    }
 }

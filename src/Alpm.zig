@@ -148,8 +148,23 @@ pub fn isNewerThan(allocator: std.mem.Allocator, ver_a: []const u8, ver_b: []con
 
 const testing = std.testing;
 
-test "isNewerThan - basic version comparison" {
-    try testing.expect(try isNewerThan(testing.allocator, "2.0.0", "1.0.0"));
-    try testing.expect(!try isNewerThan(testing.allocator, "1.0.0", "2.0.0"));
-    try testing.expect(!try isNewerThan(testing.allocator, "1.0.0", "1.0.0"));
+test "isNewerThan follows libalpm version ordering" {
+    const cases = [_]struct {
+        candidate: []const u8,
+        installed: []const u8,
+        newer: bool,
+    }{
+        .{ .candidate = "2.0.0", .installed = "1.0.0", .newer = true },
+        .{ .candidate = "1.0.0", .installed = "2.0.0", .newer = false },
+        .{ .candidate = "1.0.0", .installed = "1.0.0", .newer = false },
+        .{ .candidate = "2:1.0-1", .installed = "1:9.0-9", .newer = true },
+        .{ .candidate = "1.0-2", .installed = "1.0-1", .newer = true },
+    };
+
+    for (cases) |case| {
+        try testing.expectEqual(
+            case.newer,
+            try isNewerThan(testing.allocator, case.candidate, case.installed),
+        );
+    }
 }
