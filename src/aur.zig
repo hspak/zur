@@ -12,6 +12,7 @@ pub const Error = ErrorSet;
 
 const host = "https://aur.archlinux.org/rpc/?v=5";
 
+pub const packages = "https://aur.archlinux.org/packages";
 pub const snapshot = "https://aur.archlinux.org/cgit/aur.git/snapshot";
 
 /// Which field the RPC `search` endpoint matches against.

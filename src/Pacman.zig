@@ -1344,6 +1344,29 @@ fn stdinReadByte(self: *Pacman) !u8 {
     return line[0];
 }
 
+fn printSearchResult(writer: *Io.Writer, result: aur.Search, is_installed: bool) !void {
+    const installed = color.bold_foreground_cyan ++ "[Installed]" ++ color.reset;
+    const installed_text = if (is_installed) installed else "";
+    const desc = result.description orelse "(missing)";
+    try writer.print("{s}aur/{s}{s}{s}{s} {s}{s}{s} {s} ({d}) {s}{s}/{s}{s}\n    {s}\n", .{
+        color.bold_foreground_magenta,
+        color.reset,
+        color.bold,
+        result.name,
+        color.reset,
+        color.bold_foreground_green,
+        result.version,
+        color.reset,
+        installed_text,
+        result.popularity,
+        color.foreground_blue,
+        aur.packages,
+        result.name,
+        color.reset,
+        desc,
+    });
+}
+
 /// Search the AUR by name and print hits, marking already-installed packages.
 pub fn search(
     allocator: Allocator,
@@ -1355,26 +1378,45 @@ pub fn search(
     defer pacman.deinit();
     try pacman.fetchLocalPackages();
 
-    const installed = color.bold_foreground_cyan ++ "[Installed]" ++ color.reset;
     const resp = try aur.search(allocator, pacman.getRequest(), pkg, .name);
     defer allocator.free(resp.results);
     for (resp.results) |result| {
-        const installed_text = if (pacman.pkgs.get(result.name) == null) "" else installed;
-        const desc = result.description orelse "(missing)";
-        try pacman.print("{s}aur/{s}{s}{s}{s} {s}{s}{s} {s} ({d})\n    {s}\n", .{
-            color.bold_foreground_magenta,
-            color.reset,
-            color.bold,
-            result.name,
-            color.reset,
-            color.bold_foreground_green,
-            result.version,
-            color.reset,
-            installed_text,
-            result.popularity,
-            desc,
-        });
+        try printSearchResult(
+            pacman.stdout(),
+            result,
+            pacman.pkgs.get(result.name) != null,
+        );
     }
+}
+
+test "printSearchResult puts the AUR package link after popularity" {
+    const testing = std.testing;
+    const result: aur.Search = .{
+        .id = 1,
+        .name = "test-package",
+        .package_base_id = 1,
+        .package_base = "test-package",
+        .version = "1.2.3-1",
+        .description = "A package used for testing",
+        .url = null,
+        .num_votes = 42,
+        .popularity = 3.5,
+        .first_submitted = 0,
+        .last_modified = 0,
+        .url_path = "/cgit/aur.git/snapshot/test-package.tar.gz",
+    };
+    var output_buffer: [512]u8 = undefined;
+    var writer = Io.Writer.fixed(&output_buffer);
+    try printSearchResult(&writer, result, false);
+
+    const expected =
+        color.bold_foreground_magenta ++ "aur/" ++ color.reset ++
+        color.bold ++ "test-package" ++ color.reset ++ " " ++
+        color.bold_foreground_green ++ "1.2.3-1" ++ color.reset ++
+        "  (3.5) " ++ color.foreground_blue ++
+        "https://aur.archlinux.org/packages/test-package" ++ color.reset ++ "\n" ++
+        "    A package used for testing\n";
+    try testing.expectEqualStrings(expected, writer.buffered());
 }
 
 test "shouldUpdate always selects a fresh install" {
