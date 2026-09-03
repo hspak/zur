@@ -782,14 +782,11 @@ fn compareUpdateAndInstall(self: *Pacman, pkg_name: []const u8, pkg: *Package) !
     while (new_pkgbuild_iter.next()) |field| {
         if (field.value_ptr.*.updated) {
             at_least_one_diff = true;
-            try self.print("{s}::{s} {s}{s}{s} was updated: {s}\n", .{
-                color.bold_foreground_blue,
-                color.reset,
-                color.bold,
+            try printUpdatedPkgbuildField(
+                self.stdout(),
                 field.key_ptr.*,
-                color.reset,
                 field.value_ptr.*.value,
-            });
+            );
         }
     }
 
@@ -912,6 +909,71 @@ fn printDiff(
     }
 }
 
+fn isSourceField(name: []const u8) bool {
+    return mem.eql(u8, name, "source") or mem.startsWith(u8, name, "source_");
+}
+
+fn printSourceLines(writer: *Io.Writer, value: []const u8, indentation: []const u8) !void {
+    var lines = mem.splitScalar(u8, value, '\n');
+    while (lines.next()) |raw_line| {
+        const line = mem.trim(u8, raw_line, " \t\r");
+        if (line.len == 0) continue;
+        try writer.print("{s}{s}\n", .{ indentation, line });
+    }
+}
+
+fn printUpdatedPkgbuildField(
+    writer: *Io.Writer,
+    name: []const u8,
+    value: []const u8,
+) !void {
+    if (!isSourceField(name)) {
+        return writer.print("{s}::{s} {s}{s}{s} was updated: {s}\n", .{
+            color.bold_foreground_blue,
+            color.reset,
+            color.bold,
+            name,
+            color.reset,
+            value,
+        });
+    }
+
+    const normalized = mem.trim(u8, value, " \t\r\n");
+    if (normalized.len != 0 and mem.indexOfScalar(u8, normalized, '\n') == null) {
+        return writer.print("{s}::{s} {s}{s}{s} was updated: {s}\n", .{
+            color.bold_foreground_blue,
+            color.reset,
+            color.bold,
+            name,
+            color.reset,
+            normalized,
+        });
+    }
+
+    try writer.print("{s}::{s} {s}{s}{s} was updated:\n", .{
+        color.bold_foreground_blue,
+        color.reset,
+        color.bold,
+        name,
+        color.reset,
+    });
+    try printSourceLines(writer, normalized, "  ");
+}
+
+fn printBarePkgbuildSource(
+    writer: *Io.Writer,
+    name: []const u8,
+    value: []const u8,
+) !void {
+    const normalized = mem.trim(u8, value, " \t\r\n");
+    if (normalized.len != 0 and mem.indexOfScalar(u8, normalized, '\n') == null) {
+        return writer.print("  {s} {s}\n", .{ name, normalized });
+    }
+
+    try writer.print("  {s}\n", .{name});
+    try printSourceLines(writer, normalized, "    ");
+}
+
 fn printBarePkgbuildFields(
     allocator: Allocator,
     writer: *Io.Writer,
@@ -924,7 +986,7 @@ fn printBarePkgbuildFields(
 
     var printed_source = false;
     if (pkgbuild.fields.get("source")) |source| {
-        try writer.print("  source {s}\n", .{source.value});
+        try printBarePkgbuildSource(writer, "source", source.value);
         printed_source = true;
     }
 
@@ -935,7 +997,7 @@ fn printBarePkgbuildFields(
         .{machineArch()},
     );
     if (pkgbuild.fields.get(source_arch_name)) |source| {
-        try writer.print("  {s} {s}\n", .{ source_arch_name, source.value });
+        try printBarePkgbuildSource(writer, source_arch_name, source.value);
         printed_source = true;
     }
 
@@ -1490,6 +1552,51 @@ test "printBarePkgbuildFields prints only fields needed for review" {
     try testing.expectEqual(source_output.len + install_output.len + function_output.len, output.len);
 }
 
+test "printBarePkgbuildFields formats multiline sources for review" {
+    const testing = std.testing;
+    const pkgbuild_contents =
+        \\pkgname=testpkg
+        \\source=(
+        \\  "https://example.com/testpkg.tar.gz"
+        \\  'fix-build.patch'
+        \\)
+        \\package() {
+        \\  install -Dm755 testpkg "$pkgdir/usr/bin/testpkg"
+        \\}
+    ;
+
+    var output_buffer: [1024]u8 = undefined;
+    var writer = Io.Writer.fixed(&output_buffer);
+    try printBarePkgbuildFields(testing.allocator, &writer, pkgbuild_contents);
+
+    const expected =
+        "  source\n" ++
+        "    \"https://example.com/testpkg.tar.gz\"\n" ++
+        "    'fix-build.patch'\n\n" ++
+        "  package()   {\n" ++
+        "    install -Dm755 testpkg \"$pkgdir/usr/bin/testpkg\"\n" ++
+        "  }\n\n";
+    try testing.expectEqualStrings(expected, writer.buffered());
+}
+
+test "printUpdatedPkgbuildField formats multiline sources for review" {
+    const testing = std.testing;
+    var output_buffer: [512]u8 = undefined;
+    var writer = Io.Writer.fixed(&output_buffer);
+    try printUpdatedPkgbuildField(
+        &writer,
+        "source_x86_64",
+        "\n\"https://example.com/testpkg.tar.gz\"\n'fix-build.patch'\n",
+    );
+
+    const expected =
+        color.bold_foreground_blue ++ "::" ++ color.reset ++ " " ++
+        color.bold ++ "source_x86_64" ++ color.reset ++ " was updated:\n" ++
+        "  \"https://example.com/testpkg.tar.gz\"\n" ++
+        "  'fix-build.patch'\n";
+    try testing.expectEqualStrings(expected, writer.buffered());
+}
+
 test "printBarePkgbuildFields prints only the native architecture source" {
     const testing = std.testing;
     const pkgbuild_contents =
@@ -1523,6 +1630,45 @@ test "printBarePkgbuildFields prints only the native architecture source" {
         .{ expected_arch, expected_arch },
     );
     try testing.expectEqualStrings(expected, output);
+}
+
+test "printBarePkgbuildFields formats the native architecture multiline source" {
+    const testing = std.testing;
+    const pkgbuild_contents =
+        \\pkgname=testpkg
+        \\source_x86_64=(
+        \\  'https://example.com/testpkg-x86_64.tar.gz'
+        \\  'launcher.sh'
+        \\)
+        \\source_aarch64=(
+        \\  'https://example.com/testpkg-aarch64.tar.gz'
+        \\  'launcher.sh'
+        \\)
+        \\source_riscv64=(
+        \\  'https://example.com/testpkg-riscv64.tar.gz'
+        \\  'launcher.sh'
+        \\)
+    ;
+
+    var output_buffer: [1024]u8 = undefined;
+    var writer = Io.Writer.fixed(&output_buffer);
+    try printBarePkgbuildFields(testing.allocator, &writer, pkgbuild_contents);
+
+    const expected_arch = switch (builtin.cpu.arch) {
+        .x86_64 => "x86_64",
+        .aarch64 => "aarch64",
+        .riscv64 => "riscv64",
+        else => @compileError("unsupported test architecture"),
+    };
+    var expected_buffer: [320]u8 = undefined;
+    const expected = try std.fmt.bufPrint(
+        &expected_buffer,
+        "  source_{s}\n" ++
+            "    'https://example.com/testpkg-{s}.tar.gz'\n" ++
+            "    'launcher.sh'\n\n",
+        .{ expected_arch, expected_arch },
+    );
+    try testing.expectEqualStrings(expected, writer.buffered());
 }
 
 test "extractTarGz strips the snapshot root and consumes the archive" {
