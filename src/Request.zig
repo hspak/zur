@@ -7,7 +7,20 @@ const log = std.log.scoped(.request);
 
 const Request = @This();
 
-const ErrorSet = Allocator.Error || std.http.Client.FetchError;
+pub const HttpError = error{
+    HttpBadRequest,
+    HttpUnauthorized,
+    HttpForbidden,
+    HttpNotFound,
+    HttpRequestTimeout,
+    HttpRateLimited,
+    HttpInternalServerError,
+    HttpBadGateway,
+    HttpServiceUnavailable,
+    HttpGatewayTimeout,
+    HttpUnexpectedStatus,
+};
+const ErrorSet = Allocator.Error || std.http.Client.FetchError || HttpError;
 pub const Error = ErrorSet;
 
 client: std.http.Client,
@@ -60,6 +73,12 @@ fn isRetryable(err: Error) bool {
         error.Timeout,
         error.NameServerFailure,
         error.NoAddressReturned,
+        error.HttpRequestTimeout,
+        error.HttpRateLimited,
+        error.HttpInternalServerError,
+        error.HttpBadGateway,
+        error.HttpServiceUnavailable,
+        error.HttpGatewayTimeout,
         => true,
         else => false,
     };
@@ -87,11 +106,28 @@ fn fetchBody(self: *Request, url: []const u8, fetcher: anytype) Error![]u8 {
     errdefer body.deinit();
 
     log.debug("GET {s}", .{url});
-    _ = try fetcher.fetch(&self.client, .{
+    const result = try fetcher.fetch(&self.client, .{
         .location = .{ .url = url },
         .method = .GET,
         .response_writer = &body.writer,
     });
+    switch (result.status) {
+        .ok => {},
+        .bad_request => return error.HttpBadRequest,
+        .unauthorized => return error.HttpUnauthorized,
+        .forbidden => return error.HttpForbidden,
+        .not_found => return error.HttpNotFound,
+        .request_timeout => return error.HttpRequestTimeout,
+        .too_many_requests => return error.HttpRateLimited,
+        .internal_server_error => return error.HttpInternalServerError,
+        .bad_gateway => return error.HttpBadGateway,
+        .service_unavailable => return error.HttpServiceUnavailable,
+        .gateway_timeout => return error.HttpGatewayTimeout,
+        else => {
+            log.warn("GET {s} returned HTTP {d}", .{ url, @intFromEnum(result.status) });
+            return error.HttpUnexpectedStatus;
+        },
+    }
     return try body.toOwnedSlice();
 }
 
@@ -125,6 +161,8 @@ const FakeFetcher = struct {
     failure: std.http.Client.FetchError = error.HttpConnectionClosing,
     failed_body: []const u8 = "",
     response_body: []const u8 = "snapshot",
+    response_status: std.http.Status = .ok,
+    initial_statuses: []const std.http.Status = &.{},
 
     fn fetch(
         self: *FakeFetcher,
@@ -138,7 +176,7 @@ const FakeFetcher = struct {
             return self.failure;
         }
         try options.response_writer.?.writeAll(self.response_body);
-        return .{ .status = .ok };
+        return .{ .status = if (self.calls <= self.initial_statuses.len) self.initial_statuses[self.calls - 1] else self.response_status };
     }
 };
 
@@ -186,5 +224,37 @@ test "get does not retry permanent HTTP errors" {
         error.HttpHeadersInvalid,
         request.getWithFetcher("https://example.test/snapshot", &fetcher),
     );
+    try std.testing.expectEqual(@as(usize, 1), fetcher.calls);
+}
+
+test "get rejects HTTP service errors after bounded retries" {
+    var request = Request.init(std.testing.allocator, std.testing.io);
+    defer request.deinit();
+    var fetcher: FakeFetcher = .{
+        .response_status = .service_unavailable,
+        .response_body = "temporarily unavailable",
+    };
+    try std.testing.expectError(error.HttpServiceUnavailable, request.getWithFetcher("https://example.test/snapshot", &fetcher));
+    try std.testing.expectEqual(@as(usize, 3), fetcher.calls);
+}
+
+test "get retries rate limits and discards each HTTP error body" {
+    var request = Request.init(std.testing.allocator, std.testing.io);
+    defer request.deinit();
+    var fetcher: FakeFetcher = .{
+        .initial_statuses = &.{ .too_many_requests, .bad_gateway },
+        .response_body = "one body",
+    };
+    const body = try request.getWithFetcher("https://example.test/rpc", &fetcher);
+    defer std.testing.allocator.free(body);
+    try std.testing.expectEqualStrings("one body", body);
+    try std.testing.expectEqual(@as(usize, 3), fetcher.calls);
+}
+
+test "get does not retry a missing HTTP resource" {
+    var request = Request.init(std.testing.allocator, std.testing.io);
+    defer request.deinit();
+    var fetcher: FakeFetcher = .{ .response_status = .not_found };
+    try std.testing.expectError(error.HttpNotFound, request.getWithFetcher("https://example.test/snapshot", &fetcher));
     try std.testing.expectEqual(@as(usize, 1), fetcher.calls);
 }

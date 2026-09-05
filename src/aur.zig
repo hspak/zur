@@ -7,7 +7,8 @@ const log = std.log.scoped(.aur);
 const Request = @import("Request.zig");
 const Pacman = @import("Pacman.zig");
 
-const ErrorSet = std.mem.Allocator.Error || Request.Error || std.json.ParseError(std.json.Scanner);
+const ErrorSet = std.mem.Allocator.Error || Request.Error || std.json.ParseError(std.json.Scanner) ||
+    error{ RpcRejected, InvalidRpcResponse };
 pub const Error = ErrorSet;
 
 const host = "https://aur.archlinux.org/rpc/?v=5";
@@ -36,8 +37,9 @@ fn RpcResp(comptime T: type) type {
 
         version: usize,
         type: []const u8,
-        resultcount: usize,
-        results: []T,
+        resultcount: usize = 0,
+        results: []T = &.{},
+        @"error": ?[]const u8 = null,
     };
 }
 
@@ -213,6 +215,20 @@ fn mapSearchResp(allocator: std.mem.Allocator, json_resp: RpcResp(SearchJson)) !
     };
 }
 
+fn parseResponse(comptime T: type, allocator: std.mem.Allocator, body: []const u8, expected_type: []const u8) Error!RpcResp(T) {
+    const response = try std.json.parseFromSliceLeaky(RpcResp(T), allocator, body, .{
+        .ignore_unknown_fields = true,
+        .allocate = .alloc_always,
+    });
+    if (response.@"error" != null or std.mem.eql(u8, response.type, "error")) {
+        log.warn("AUR rejected the request: {s}", .{response.@"error" orelse "unspecified RPC error"});
+        return error.RpcRejected;
+    }
+    if (response.version != 5 or !std.mem.eql(u8, response.type, expected_type) or
+        response.resultcount != response.results.len) return error.InvalidRpcResponse;
+    return response;
+}
+
 /// Fetch AUR info for every key in `pkgs`.
 ///
 /// Strings inside the returned value are allocated from `allocator` (leaky
@@ -230,10 +246,7 @@ pub fn queryAll(
     const body = try request.get(uri);
     defer allocator.free(body);
 
-    const json_resp = try std.json.parseFromSliceLeaky(RpcResp(InfoJson), allocator, body, .{
-        .ignore_unknown_fields = true,
-        .allocate = .alloc_always,
-    });
+    const json_resp = try parseResponse(InfoJson, allocator, body, "multiinfo");
     log.debug("info query returned {d} results", .{json_resp.resultcount});
 
     const response = try mapInfoResp(allocator, json_resp);
@@ -261,10 +274,7 @@ fn queryNameUsing(allocator: std.mem.Allocator, request: anytype, name: []const 
     const body = try request.get(uri.items);
     defer allocator.free(body);
 
-    const json_resp = try std.json.parseFromSliceLeaky(RpcResp(InfoJson), allocator, body, .{
-        .ignore_unknown_fields = true,
-        .allocate = .alloc_always,
-    });
+    const json_resp = try parseResponse(InfoJson, allocator, body, "multiinfo");
     if (json_resp.resultcount == 0) return null;
     return infoFromJson(json_resp.results[0]);
 }
@@ -294,10 +304,7 @@ fn searchUsing(allocator: std.mem.Allocator, request: anytype, search_name: []co
     const body = try request.get(uri.items);
     defer allocator.free(body);
 
-    const json_resp = try std.json.parseFromSliceLeaky(RpcResp(SearchJson), allocator, body, .{
-        .ignore_unknown_fields = true,
-        .allocate = .alloc_always,
-    });
+    const json_resp = try parseResponse(SearchJson, allocator, body, "search");
 
     const response = try mapSearchResp(allocator, json_resp);
     return response;
@@ -366,10 +373,11 @@ test "buildInfoQuery includes every package exactly once" {
 const TestQueryRequest = struct {
     allocator: std.mem.Allocator,
     expected_url: []const u8,
+    response_type: []const u8 = "multiinfo",
 
     fn get(self: TestQueryRequest, url: []const u8) ![]u8 {
         try testing.expectEqualStrings(self.expected_url, url);
-        return self.allocator.dupe(u8, "{\"version\":5,\"type\":\"multiinfo\",\"resultcount\":0,\"results\":[]}");
+        return std.fmt.allocPrint(self.allocator, "{{\"version\":5,\"type\":\"{s}\",\"resultcount\":0,\"results\":[]}}", .{self.response_type});
     }
 };
 
@@ -385,6 +393,7 @@ test "RPC query values preserve plus signs and reserved search characters" {
     const search_request: TestQueryRequest = .{
         .allocator = allocator,
         .expected_url = host ++ "&type=search&by=name&arg=c%2B%2B%20%26%20%23%25%2F%C3%A9",
+        .response_type = "search",
     };
     _ = try searchUsing(allocator, search_request, "c++ & #%/é", .name);
     var pkgs: std.StringHashMapUnmanaged(*Pacman.Package) = .empty;
@@ -394,4 +403,33 @@ test "RPC query values preserve plus signs and reserved search characters" {
     const url = try buildInfoQuery(allocator, pkgs);
     defer allocator.free(url);
     try testing.expectEqualStrings(name_request.expected_url, url);
+}
+
+const TestRpcRequest = struct {
+    allocator: std.mem.Allocator,
+    body: []const u8,
+
+    fn get(self: TestRpcRequest, _: []const u8) ![]u8 {
+        return self.allocator.dupe(u8, self.body);
+    }
+};
+
+test "RPC errors remain errors instead of empty package results" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const request: TestRpcRequest = .{
+        .allocator = arena.allocator(),
+        .body = "{\"version\":5,\"type\":\"error\",\"resultcount\":0,\"results\":[],\"error\":\"Too many requests\"}",
+    };
+    try testing.expectError(error.RpcRejected, queryNameUsing(arena.allocator(), request, "review-cli"));
+}
+
+test "RPC rejects inconsistent counts before indexing results" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const request: TestRpcRequest = .{
+        .allocator = arena.allocator(),
+        .body = "{\"version\":5,\"type\":\"multiinfo\",\"resultcount\":1,\"results\":[]}",
+    };
+    try testing.expectError(error.InvalidRpcResponse, queryNameUsing(arena.allocator(), request, "review-cli"));
 }
