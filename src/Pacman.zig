@@ -516,9 +516,20 @@ fn processOutOfDate(self: *Pacman) Error!void {
         if (!item.isCached()) try self.downloadAndExtractPackage(item);
     }
     for (pending.items) |*item| {
-        try self.print(":: Selected outputs from {s}:\n", .{item.base()});
+        try self.print("{s}::{s} Packages to install from {s}{s}{s}:\n", .{
+            color.bold_foreground_blue,
+            color.reset,
+            color.bold,
+            item.base(),
+            color.reset,
+        });
         for (item.outputs.keys(), item.outputs.values()) |name, output| {
-            try self.print("  {s} ({t})\n", .{ name, output.reason });
+            try self.print("  {s}{s}{s} ({t})\n", .{
+                color.bold,
+                name,
+                color.reset,
+                output.reason,
+            });
         }
         if (item.isCached()) {
             try self.installArtifacts(item, self);
