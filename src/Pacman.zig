@@ -66,7 +66,6 @@ allocator: Allocator,
 io: Io,
 environ_map: *const std.process.Environ.Map,
 pkgs: std.StringHashMapUnmanaged(Package) = .empty,
-aur_resp: ?aur.RpcRespV5 = null,
 zur_path: []const u8,
 zur_pkg_dir: []const u8,
 // Package bases already resolved this run, so dep recursion cannot loop.
@@ -296,7 +295,8 @@ fn normalizeDepName(allocator: Allocator, dep: []const u8) ![]const u8 {
 
 const extractTarGz = Snapshot.extractTarGz;
 
-/// Create `~/.zur/.pkg` and an empty package set. `allocator` should outlive the run.
+/// Create `~/.zur/.pkg` and an empty package set. Use an arena allocator
+/// released after deinit: RPC metadata and installed-package strings live for the run.
 pub fn init(
     allocator: Allocator,
     io: Io,
@@ -324,7 +324,6 @@ pub fn init(
 /// Free owned packages, maps, alpm, and the HTTP client.
 pub fn deinit(self: *Pacman) void {
     self.flushStdout();
-    if (self.aur_resp) |resp| self.allocator.free(resp.results);
     // Package names and metadata are borrowed from argv, libalpm, or the run arena.
     self.pkgs.deinit(self.allocator);
     self.aur_deps_done.deinit(self.allocator);
@@ -433,12 +432,13 @@ fn fetchRemoteAurVersions(self: *Pacman) Error!void {
     defer names.deinit(self.allocator);
     var keys = self.pkgs.keyIterator();
     while (keys.next()) |name| try names.append(self.allocator, name.*);
-    self.aur_resp = try aur.queryAll(self.allocator, self.getRequest(), names.items);
-    if (self.aur_resp.?.resultcount == 0) {
+    const response = try aur.queryAll(self.allocator, self.getRequest(), names.items);
+    defer self.allocator.free(response.results);
+    try self.cacheAurResponse(names.items, response.results);
+    if (response.resultcount == 0) {
         return error.ZeroResultsFromAurQuery;
     }
-    for (self.aur_resp.?.results) |result| {
-        try self.cacheAurInfo(result.name, result);
+    for (response.results) |result| {
         // Skip results the AUR returns for packages we didn't ask about
         // (e.g. a dependency that also came back) rather than crashing.
         const curr_pkg = self.pkgs.getPtr(result.name) orelse continue;
@@ -584,6 +584,7 @@ fn queuePackageWithDeps(
             info.make_depends,
             info.check_depends,
         };
+        try self.prefetchDependencies(&dep_lists);
         for (dep_lists) |maybe_list| {
             for (maybe_list orelse continue) |dep| {
                 const dep_info = (try self.resolveDependency(dep)) orelse continue;
@@ -692,6 +693,37 @@ fn getProviders(self: *Pacman, name: []const u8) Error![]aur.Info {
     return owned;
 }
 
+fn prefetchDependencies(self: *Pacman, lists: []const ?[][]const u8) Error!void {
+    var missing: std.StringArrayHashMapUnmanaged(void) = .empty;
+    defer {
+        for (missing.keys()) |name| self.allocator.free(name);
+        missing.deinit(self.allocator);
+    }
+    for (lists) |maybe_list| {
+        for (maybe_list orelse continue) |dependency| {
+            const db = try self.getAlpm();
+            if (try db.installedSatisfier(dependency) != null or try db.syncSatisfies(dependency)) continue;
+            const name = try normalizeDepName(self.allocator, dependency);
+            errdefer self.allocator.free(name);
+            if (self.aur_cache.contains(name) or missing.contains(name)) {
+                self.allocator.free(name);
+                continue;
+            }
+            try missing.putNoClobber(self.allocator, name, {});
+        }
+    }
+    if (missing.count() == 0) return;
+    const response = try aur.queryAll(self.allocator, self.getRequest(), missing.keys());
+    defer self.allocator.free(response.results);
+    try self.cacheAurResponse(missing.keys(), response.results);
+}
+
+// Only call after every batch succeeds; outages must not become cached absence.
+fn cacheAurResponse(self: *Pacman, names: []const []const u8, results: []const aur.Info) Error!void {
+    for (names) |name| try self.cacheAurInfo(name, null);
+    for (results) |info| try self.cacheAurInfo(info.name, info);
+}
+
 fn cacheAurInfo(self: *Pacman, name: []const u8, info: ?aur.Info) Error!void {
     if (self.aur_cache.getPtr(name)) |cached| {
         cached.* = info;
@@ -704,17 +736,9 @@ fn cacheAurInfo(self: *Pacman, name: []const u8, info: ?aur.Info) Error!void {
 
 fn getAurInfo(self: *Pacman, name: []const u8) Error!?aur.Info {
     if (self.aur_cache.get(name)) |cached| return cached;
-    const info = self.aurInfoFor(name) orelse try aur.queryName(self.allocator, self.getRequest(), name);
+    const info = try aur.queryName(self.allocator, self.getRequest(), name);
     try self.cacheAurInfo(name, info);
     return info;
-}
-
-fn aurInfoFor(self: *Pacman, name: []const u8) ?aur.Info {
-    const resp = self.aur_resp orelse return null;
-    for (resp.results) |info| {
-        if (mem.eql(u8, info.name, name)) return info;
-    }
-    return null;
 }
 
 // Return an owned absolute path for an exact package/version/native-arch match.
@@ -2062,12 +2086,7 @@ test "dependency planning upgrades an insufficient installed version before its 
         testAurInfo("review-lib", "2"),
     };
     infos[0].depends = &dependencies;
-    fixture.pacman.aur_resp = .{
-        .version = 5,
-        .type = "multiinfo",
-        .resultcount = infos.len,
-        .results = try allocator.dupe(aur.Info, &infos),
-    };
+    for (infos) |info| try fixture.pacman.cacheAurInfo(info.name, info);
     var pending: std.ArrayList(PendingPackage) = .empty;
     defer deinitPendingPackages(allocator, &pending);
     var bases: std.StringHashMapUnmanaged(usize) = .empty;
@@ -2179,12 +2198,7 @@ test "dependency planning retains scheduled upgrade edges and rejects incompatib
         testAurInfo("review-lib", "2"),
     };
     infos[0].depends = &dependencies;
-    fixture.pacman.aur_resp = .{
-        .version = 5,
-        .type = "multiinfo",
-        .resultcount = infos.len,
-        .results = try allocator.dupe(aur.Info, &infos),
-    };
+    for (infos) |info| try fixture.pacman.cacheAurInfo(info.name, info);
     const library: Package = .{ .installed_version = "1", .aur_version = "2", .requires_update = true };
     try fixture.pacman.pkgs.put(allocator, "review-lib", library);
     var pending: std.ArrayList(PendingPackage) = .empty;
@@ -2935,4 +2949,17 @@ test "explicit requests retain installed versions and allow intentional reinstal
     pkg.requested = false;
     try fixture.pacman.compareVersions();
     try testing.expect(!pkg.requires_update);
+}
+
+test "metadata cache indexes both returned and absent package names" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const results = [_]aur.Info{testAurInfo("review-present", "2-1")};
+    try fixture.pacman.cacheAurResponse(&.{ "review-present", "review-absent" }, &results);
+    try testing.expect(fixture.pacman.aur_cache.contains("review-absent"));
+    try testing.expectEqualStrings("2-1", (try fixture.pacman.getAurInfo("review-present")).?.version);
+    try testing.expectEqual(null, try fixture.pacman.getAurInfo("review-absent"));
+    try testing.expect(fixture.pacman.request_state == null);
 }
