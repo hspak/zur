@@ -1229,7 +1229,17 @@ fn printBarePkgbuildFields(
 }
 
 fn printSourceFile(allocator: Allocator, writer: *Io.Writer, name: []const u8, file: SourceFile) !void {
-    try writer.print("\n:: File: {s} ({t}, mode {o})\n", .{ name, file.kind, file.mode });
+    try writer.print("\n{s}::{s} File: {s}{s}{s} ({t}, mode {o}) {s}===================={s}\n", .{
+        color.bold_foreground_blue,
+        color.reset,
+        color.bold,
+        name,
+        color.reset,
+        file.kind,
+        file.mode,
+        color.bold_foreground_blue,
+        color.reset,
+    });
     if (mem.eql(u8, name, "PKGBUILD") and file.kind == .file) {
         try printBarePkgbuildFields(allocator, writer, file.contents);
     } else {
@@ -2906,7 +2916,9 @@ test "source review prints metadata and multiline native architecture sources" {
     defer output.deinit();
     try printSourceFile(std.testing.allocator, &output.writer, "PKGBUILD", .{ .contents = contents });
     for ([_][]const u8{
-        ":: File: PKGBUILD (file, mode 644)",
+        color.bold_foreground_blue ++ "::" ++ color.reset ++ " File: " ++
+            color.bold ++ "PKGBUILD" ++ color.reset ++ " (file, mode 644) " ++
+            color.bold_foreground_blue ++ "====================" ++ color.reset ++ "\n",
         "  pkgname testpkg\n",
         "  pkgver 2\n",
         "  pkgrel 1\n",
