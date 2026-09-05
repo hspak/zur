@@ -185,17 +185,11 @@ fn isGitPkg(name: []const u8) bool {
 }
 
 // Whether a package needs an update/install. `remote_newer` is alpm vercmp.
-fn shouldUpdate(name: []const u8, local: []const u8, remote: []const u8, remote_newer: bool) bool {
-    // A -git package is rebuilt whenever its AUR pkgver matches the installed
-    // one: the version string rarely changes, but the upstream source may have
-    // moved since the last build.
-    if (isGitPkg(name) and mem.eql(u8, remote, local)) {
-        return true;
-    }
-    // Version "0" is the sentinel for a freshly-requested install.
-    if (mem.eql(u8, local, "0")) {
-        return true;
-    }
+fn shouldUpdate(name: []const u8, local: []const u8, _: []const u8, remote_newer: bool) bool {
+    // pkgver() commonly advances the installed version beyond AUR metadata.
+    // The metadata ordering cannot establish whether upstream Git changed.
+    if (isGitPkg(name)) return true;
+    if (mem.eql(u8, local, "0")) return true;
     return remote_newer;
 }
 
@@ -1515,7 +1509,7 @@ test "shouldUpdate selects a normal package only when its remote version is newe
 test "shouldUpdate rebuilds a git package when its pkgver still matches" {
     const testing = std.testing;
     try testing.expect(shouldUpdate("neovim-git", "r100.abc", "r100.abc", false));
-    try testing.expect(!shouldUpdate("neovim-git", "r100.abc", "r200.def", false));
+    try testing.expect(shouldUpdate("neovim-git", "r100.abc", "r200.def", false));
     try testing.expect(shouldUpdate("neovim-git", "r100.abc", "r200.def", true));
     try testing.expect(!shouldUpdate("neovim", "1.0", "1.0", false));
 }
@@ -2179,4 +2173,8 @@ test "dependency planning installs AUR check dependencies before the consumer" {
     try testing.expectEqual(@as(usize, 2), pending.items.len);
     try testing.expectEqualStrings("review-checker", pending.items[0].name);
     try testing.expectEqualStrings("review-app", pending.items[1].name);
+}
+
+test "shouldUpdate rebuilds a git package whose generated version is ahead of AUR" {
+    try std.testing.expect(shouldUpdate("foo-git", "r200.def-1", "r100.abc-1", false));
 }
