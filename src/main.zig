@@ -10,7 +10,7 @@ const search = Pacman.search;
 
 const build_version = @import("build_options").version;
 
-pub const log_level: std.log.Level = .info;
+pub const std_options: std.Options = .{ .log_level = .info };
 
 pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
