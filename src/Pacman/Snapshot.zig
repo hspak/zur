@@ -124,6 +124,7 @@ fn validateArchive(allocator: Allocator, bytes: []const u8) Error!void {
     var input: Io.Reader = .fixed(bytes);
     var gzip_buffer: [std.compress.flate.max_window_len]u8 = undefined;
     var decompress = std.compress.flate.Decompress.init(&input, .gzip, &gzip_buffer);
+    var archive_root: ?[]const u8 = null;
     var names: std.StringHashMapUnmanaged(bool) = .empty;
     defer {
         var keys = names.keyIterator();
@@ -144,10 +145,16 @@ fn validateArchive(allocator: Allocator, bytes: []const u8) Error!void {
             if (component.len == 0 or std.mem.eql(u8, component, ".") or
                 std.mem.eql(u8, component, "..")) return error.InvalidSnapshot;
         }
+        const root_end = std.mem.indexOfScalar(u8, name, '/') orelse name.len;
+        if (archive_root) |root| {
+            // All paths must share the prefix discarded by strip_components.
+            if (!std.mem.eql(u8, root, name[0..root_end])) return error.InvalidSnapshot;
+        }
         const key = try allocator.dupe(u8, name);
         errdefer allocator.free(key);
         if (names.contains(key)) return error.InvalidSnapshot;
         try names.put(allocator, key, entry.kind == .sym_link);
+        if (archive_root == null) archive_root = key[0..root_end];
     }
     var entries = names.keyIterator();
     while (entries.next()) |name| {
@@ -269,4 +276,34 @@ test "snapshot rejects archive writes beneath a symlink before extraction" {
     defer allocator.free(bytes);
     try testing.expectError(error.InvalidSnapshot, create(allocator, testing.io, root, "pkg", bytes));
     try testing.expectError(error.FileNotFound, tmp.dir.openDir(testing.io, ".src", .{}));
+}
+
+test "snapshot rejects multiple archive roots before stripping their prefixes" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(testing.io, &root_buffer)];
+    try tmp.dir.createDirPath(testing.io, "pkg");
+    try tmp.dir.createDirPath(testing.io, "other/link");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "pkg/PKGBUILD", .data = "pkgname=pkg\n" });
+    try tmp.dir.symLink(testing.io, ".", "pkg/link", .{});
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "other/link/payload", .data = "wrong destination\n" });
+    const result = try std.process.run(allocator, testing.io, .{
+        .argv = &.{ "tar", "-czf", "input.tar.gz", "pkg", "other/link/payload" },
+        .cwd = .{ .path = root },
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    if (result.term != .exited or result.term.exited != 0) return error.TarCreate;
+    const bytes = try tmp.dir.readFileAlloc(testing.io, "input.tar.gz", allocator, .unlimited);
+    defer allocator.free(bytes);
+    if (create(allocator, testing.io, root, "pkg", bytes)) |created| {
+        var unexpected = created;
+        unexpected.deinit(allocator);
+        return error.MultipleRootsAccepted;
+    } else |err| {
+        try testing.expectEqual(error.InvalidSnapshot, err);
+    }
 }

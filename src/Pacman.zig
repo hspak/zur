@@ -2735,3 +2735,7 @@ test "review cancellation prompt accepts its advertised default" {
     fixture.pacman.stdin_reader = input.reader(std.testing.io, &buffer);
     try std.testing.expectEqual(@as(u8, 'y'), try fixture.pacman.stdinReadByte());
 }
+
+test {
+    _ = Snapshot;
+}
