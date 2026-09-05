@@ -420,13 +420,12 @@ pub fn setInstallPackages(self: *Pacman, pkg_list: std.ArrayList([]const u8)) Er
     }
 
     for (pkg_list.items) |pkg_name| {
-        // This is the hack:
-        // We're setting an impossible version to initialize the packages to install.
-        const new_pkg = try self.allocator.create(Package);
-        errdefer self.allocator.destroy(new_pkg);
-        new_pkg.* = .init("0");
-
-        try self.pkgs.putNoClobber(self.allocator, pkg_name, new_pkg);
+        const entry = try self.pkgs.getOrPut(self.allocator, pkg_name);
+        if (entry.found_existing) continue;
+        errdefer _ = self.pkgs.remove(pkg_name);
+        const pkg = try self.allocator.create(Package);
+        pkg.* = .init("0");
+        entry.value_ptr.* = pkg;
     }
 }
 
@@ -2651,4 +2650,19 @@ test "snapshot review detects permission and symlink target changes" {
     defer deinitSnapshotFiles(allocator, &relinked);
     try testing.expect(try fixture.pacman.reviewSnapshotChanges(executable, relinked));
     try testing.expectEqualStrings("another-target", relinked.get("link").?.contents);
+}
+
+test "install requests deduplicate repeated package names" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const allocator = fixture.arena.allocator();
+    var names: std.ArrayList([]const u8) = .empty;
+    defer names.deinit(allocator);
+    try names.appendSlice(allocator, &.{ "review-cli", "review-cli", "review-lib", "review-cli" });
+    try fixture.pacman.setInstallPackages(names);
+    try testing.expectEqual(@as(usize, 2), fixture.pacman.pkgs.count());
+    try testing.expect(fixture.pacman.pkgs.contains("review-cli"));
+    try testing.expect(fixture.pacman.pkgs.contains("review-lib"));
 }
