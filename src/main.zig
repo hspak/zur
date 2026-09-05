@@ -56,7 +56,7 @@ pub fn main(init: std.process.Init) !u8 {
             allocator,
             io,
             init.environ_map,
-            args.pkgs,
+            args.pkgs.items,
         ) catch |err| {
             try printCaughtError(stderr, err);
             exit_code = 1;
@@ -85,22 +85,12 @@ fn installOrUpdate(
     allocator: std.mem.Allocator,
     io: Io,
     environ_map: *const std.process.Environ.Map,
-    pkg_list: std.ArrayList([]const u8),
+    pkg_list: []const []const u8,
 ) Pacman.Error!void {
     var pacman = try Pacman.init(allocator, io, environ_map);
     defer pacman.deinit();
 
-    // default to updating all AUR packages
-    if (pkg_list.items.len == 0) {
-        try pacman.fetchLocalPackages();
-    } else {
-        // TODO: This is a slight hack to have the install process share
-        // the same code path as the update process. Remove hack.
-        try pacman.setInstallPackages(pkg_list);
-    }
-    try pacman.fetchRemoteAurVersions();
-    try pacman.compareVersions();
-    try pacman.processOutOfDate();
+    try pacman.installOrUpdate(pkg_list);
 }
 
 test "CLI reports operational failures with a nonzero exit status" {

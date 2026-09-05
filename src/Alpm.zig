@@ -122,6 +122,14 @@ pub fn isInstalled(self: *Alpm, name: []const u8) Error!bool {
 
 pub const InstallReason = enum { explicit, dependency };
 
+/// Return the installed version, borrowed until this handle is released.
+pub fn installedVersion(self: *Alpm, name: []const u8) Error!?[]const u8 {
+    const name_z = try self.allocator.dupeZ(u8, name);
+    defer self.allocator.free(name_z);
+    const pkg = alpm.alpm_db_get_pkg(self.local_db, name_z) orelse return null;
+    return std.mem.span(alpm.alpm_pkg_get_version(pkg));
+}
+
 /// Return the stored install reason, or null if this exact name is not installed.
 pub fn installedReason(self: *Alpm, name: []const u8) Error!?InstallReason {
     const name_z = try self.allocator.dupeZ(u8, name);

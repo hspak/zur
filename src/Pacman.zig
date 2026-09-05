@@ -65,12 +65,10 @@ pub const Error = ErrorSet;
 allocator: Allocator,
 io: Io,
 environ_map: *const std.process.Environ.Map,
-pkgs: std.StringHashMapUnmanaged(*Package) = .empty,
+pkgs: std.StringHashMapUnmanaged(Package) = .empty,
 aur_resp: ?aur.RpcRespV5 = null,
-pacman_output: ?[]u8 = null,
 zur_path: []const u8,
 zur_pkg_dir: []const u8,
-updates: usize = 0,
 // Package bases already resolved this run, so dep recursion cannot loop.
 aur_deps_done: std.StringHashMapUnmanaged(enum { visiting, done }) = .empty,
 aur_cache: std.StringHashMapUnmanaged(?aur.Info) = .empty,
@@ -86,18 +84,12 @@ stdin_buffer: [4096]u8 = undefined,
 stdin_reader: ?File.Reader = null,
 
 /// One local/AUR package tracked for install or update.
-pub const Package = struct {
+const Package = struct {
     base_name: ?[]const u8 = null,
-    version: []const u8,
+    installed_version: ?[]const u8 = null,
+    requested: bool = false,
     aur_version: ?[]const u8 = null,
     requires_update: bool = false,
-    // Owned only by the pending build representative.
-    snapshot: ?Snapshot = null,
-
-    /// `version` is borrowed. `"0"` is the fresh-install sentinel.
-    pub fn init(version: []const u8) Package {
-        return .{ .version = version };
-    }
 };
 
 // Larger diffs use a linear-memory full-file display.
@@ -110,6 +102,7 @@ const PendingPackage = struct {
     pkg: Package,
     outputs: std.StringArrayHashMapUnmanaged(Output) = .empty,
     dependencies: std.StringHashMapUnmanaged(void) = .empty,
+    snapshot: ?Snapshot = null,
 
     const Output = struct {
         pkg: Package,
@@ -134,7 +127,7 @@ const PendingPackage = struct {
         for (self.outputs.values()) |output| {
             if (output.artifact) |artifact| allocator.free(artifact);
         }
-        if (self.pkg.snapshot) |*snapshot| snapshot.deinit(allocator);
+        if (self.snapshot) |*snapshot| snapshot.deinit(allocator);
         self.outputs.deinit(allocator);
         self.dependencies.deinit(allocator);
         self.* = undefined;
@@ -160,7 +153,7 @@ fn queuePendingPackage(
         const item = &pending.items[index];
         const output = try item.outputs.getOrPut(allocator, pkg_name);
         if (!output.found_existing) output.value_ptr.* = .{ .pkg = pkg };
-        if (!mem.eql(u8, pkg.version, "0") or pkg.requires_update) {
+        if (pkg.installed_version != null or pkg.requested or pkg.requires_update) {
             output.value_ptr.pkg = pkg;
             item.name = pkg_name;
             item.pkg = pkg;
@@ -251,12 +244,9 @@ fn isGitPkg(name: []const u8) bool {
 }
 
 // Whether a package needs an update/install. `remote_newer` is alpm vercmp.
-fn shouldUpdate(name: []const u8, local: []const u8, _: []const u8, remote_newer: bool) bool {
-    // pkgver() commonly advances the installed version beyond AUR metadata.
-    // The metadata ordering cannot establish whether upstream Git changed.
-    if (isGitPkg(name)) return true;
-    if (mem.eql(u8, local, "0")) return true;
-    return remote_newer;
+fn shouldUpdate(name: []const u8, installed_version: ?[]const u8, requested: bool, remote_newer: bool) bool {
+    // pkgver() can advance development versions beyond the RPC version.
+    return requested or installed_version == null or isGitPkg(name) or remote_newer;
 }
 
 // True if `name` refers to package `want` as a full leading component, so
@@ -334,14 +324,8 @@ pub fn init(
 /// Free owned packages, maps, alpm, and the HTTP client.
 pub fn deinit(self: *Pacman) void {
     self.flushStdout();
-    if (self.pacman_output) |out| self.allocator.free(out);
     if (self.aur_resp) |resp| self.allocator.free(resp.results);
-    // pkg keys are borrowed slices (into pacman_output or argv), so only
-    // the Package structs themselves are owned here.
-    var it = self.pkgs.iterator();
-    while (it.next()) |e| {
-        self.allocator.destroy(e.value_ptr.*);
-    }
+    // Package names and metadata are borrowed from argv, libalpm, or the run arena.
     self.pkgs.deinit(self.allocator);
     self.aur_deps_done.deinit(self.allocator);
     var cached = self.aur_cache.keyIterator();
@@ -397,8 +381,21 @@ fn flushStdout(self: *Pacman) void {
     w.flush() catch |err| log.debug("failed to flush stdout: {}", .{err});
 }
 
+/// Resolve, review, and install requested names, or update foreign packages
+/// when names is empty. Metadata is allocated for this Pacman run.
+pub fn installOrUpdate(self: *Pacman, names: []const []const u8) Error!void {
+    if (names.len == 0) {
+        try self.fetchLocalPackages();
+    } else {
+        try self.setInstallPackages(names);
+    }
+    try self.fetchRemoteAurVersions();
+    try self.compareVersions();
+    try self.processOutOfDate();
+}
+
 /// Load installed foreign (AUR) packages from libalpm into `pkgs`.
-pub fn fetchLocalPackages(self: *Pacman) Error!void {
+fn fetchLocalPackages(self: *Pacman) Error!void {
     if (self.pkgs.count() != 0) {
         return error.PkgsAlreadyLoaded;
     }
@@ -408,31 +405,29 @@ pub fn fetchLocalPackages(self: *Pacman) Error!void {
     // they stay alive for the whole run and the pkg map keys/versions may
     // borrow them; nothing is freed individually here.
     for (foreign) |pkg_info| {
-        const new_pkg = try self.allocator.create(Package);
-        errdefer self.allocator.destroy(new_pkg);
-        new_pkg.* = .init(pkg_info.version);
-        try self.pkgs.putNoClobber(self.allocator, pkg_info.name, new_pkg);
+        try self.pkgs.putNoClobber(self.allocator, pkg_info.name, .{ .installed_version = pkg_info.version });
     }
 }
 
-/// Queue `pkg_list` for install using the version-`"0"` sentinel.
-pub fn setInstallPackages(self: *Pacman, pkg_list: std.ArrayList([]const u8)) Error!void {
+/// Queue explicit requests while retaining any currently installed version.
+fn setInstallPackages(self: *Pacman, pkg_list: []const []const u8) Error!void {
     if (self.pkgs.count() != 0) {
         return error.PkgsAlreadyLoaded;
     }
 
-    for (pkg_list.items) |pkg_name| {
+    for (pkg_list) |pkg_name| {
         const entry = try self.pkgs.getOrPut(self.allocator, pkg_name);
         if (entry.found_existing) continue;
         errdefer _ = self.pkgs.remove(pkg_name);
-        const pkg = try self.allocator.create(Package);
-        pkg.* = .init("0");
-        entry.value_ptr.* = pkg;
+        entry.value_ptr.* = .{
+            .installed_version = try (try self.getAlpm()).installedVersion(pkg_name),
+            .requested = true,
+        };
     }
 }
 
 /// Fill each tracked package's `aur_version` (and `base_name` if split).
-pub fn fetchRemoteAurVersions(self: *Pacman) Error!void {
+fn fetchRemoteAurVersions(self: *Pacman) Error!void {
     if (self.pkgs.count() == 0) return;
     var names: std.ArrayList([]const u8) = .empty;
     defer names.deinit(self.allocator);
@@ -446,7 +441,7 @@ pub fn fetchRemoteAurVersions(self: *Pacman) Error!void {
         try self.cacheAurInfo(result.name, result);
         // Skip results the AUR returns for packages we didn't ask about
         // (e.g. a dependency that also came back) rather than crashing.
-        const curr_pkg = self.pkgs.get(result.name) orelse continue;
+        const curr_pkg = self.pkgs.getPtr(result.name) orelse continue;
         curr_pkg.aur_version = result.version;
 
         // Null base_name means the pkgname is the base. A non-null base
@@ -459,10 +454,12 @@ pub fn fetchRemoteAurVersions(self: *Pacman) Error!void {
 }
 
 /// Mark packages that need install/update and print the list.
-pub fn compareVersions(self: *Pacman) Error!void {
+fn compareVersions(self: *Pacman) Error!void {
+    var any_updates = false;
     var pkgs_iter = self.pkgs.iterator();
     while (pkgs_iter.next()) |pkg| {
-        const local_version = pkg.value_ptr.*.version;
+        pkg.value_ptr.requires_update = false;
+        const local_version = pkg.value_ptr.installed_version;
 
         if (pkg.value_ptr.*.aur_version == null) {
             try self.print("{s}warning:{s} {s}{s}{s} was orphaned or non-existant in AUR, skipping\n", .{
@@ -476,16 +473,17 @@ pub fn compareVersions(self: *Pacman) Error!void {
         }
 
         const remote_version = pkg.value_ptr.*.aur_version.?;
-        const remote_newer = try Alpm.isNewerThan(self.allocator, remote_version, local_version);
-        if (shouldUpdate(pkg.key_ptr.*, local_version, remote_version, remote_newer)) {
+        const remote_newer = if (local_version) |installed|
+            try Alpm.isNewerThan(self.allocator, remote_version, installed)
+        else
+            false;
+        if (shouldUpdate(pkg.key_ptr.*, local_version, pkg.value_ptr.requested, remote_newer)) {
             pkg.value_ptr.*.requires_update = true;
-            self.updates += 1;
+            any_updates = true;
         }
     }
 
-    if (self.updates == 0) {
-        return;
-    }
+    if (!any_updates) return;
     pkgs_iter = self.pkgs.iterator();
     try self.print("{s}::{s} Packages to be installed or updated:\n", .{
         color.bold_foreground_blue,
@@ -499,16 +497,7 @@ pub fn compareVersions(self: *Pacman) Error!void {
 }
 
 /// Download, review, build, and install every package marked for update.
-pub fn processOutOfDate(self: *Pacman) Error!void {
-    if (self.updates == 0) {
-        try self.print("{s}::{s} {s}All AUR packages are up-to-date.{s}\n", .{
-            color.bold_foreground_blue,
-            color.reset,
-            color.bold,
-            color.reset,
-        });
-        return;
-    }
+fn processOutOfDate(self: *Pacman) Error!void {
     try Dir.cwd().createDirPath(self.io, self.zur_path);
 
     // Collect missing AUR dependencies in postorder so the build phase remains
@@ -519,12 +508,21 @@ pub fn processOutOfDate(self: *Pacman) Error!void {
     defer queued_bases.deinit(self.allocator);
 
     try self.planPackages(&pending, &queued_bases);
+    if (pending.items.len == 0) {
+        try self.print("{s}::{s} {s}All AUR packages are up-to-date.{s}\n", .{
+            color.bold_foreground_blue,
+            color.reset,
+            color.bold,
+            color.reset,
+        });
+        return;
+    }
 
     for (pending.items) |*item| {
         for (item.outputs.keys(), item.outputs.values()) |name, *output| {
             output.artifact = try self.findExistingPackage(name, output.pkg.aur_version.?);
         }
-        if (!item.isCached()) try self.downloadAndExtractPackage(item.name, &item.pkg);
+        if (!item.isCached()) try self.downloadAndExtractPackage(item);
     }
     for (pending.items) |*item| {
         try self.print(":: Selected outputs from {s}:\n", .{item.base()});
@@ -547,7 +545,7 @@ fn planPackages(
     var roots = self.pkgs.iterator();
     while (roots.next()) |pkg| {
         if (!pkg.value_ptr.*.requires_update) continue;
-        try self.queuePackageWithDeps(pending, queued_bases, pkg.key_ptr.*, pkg.value_ptr.*.*);
+        try self.queuePackageWithDeps(pending, queued_bases, pkg.key_ptr.*, pkg.value_ptr.*);
     }
     // Additional outputs may introduce dependencies after their base was first
     // queued. Sort the merged base graph only after visiting every root.
@@ -590,9 +588,9 @@ fn queuePackageWithDeps(
             for (maybe_list orelse continue) |dep| {
                 const dep_info = (try self.resolveDependency(dep)) orelse continue;
                 var dep_pkg = if (self.pkgs.get(dep_info.name)) |tracked|
-                    tracked.*
+                    tracked
                 else
-                    Package.init("0");
+                    Package{ .installed_version = try (try self.getAlpm()).installedVersion(dep_info.name) };
                 dep_pkg.aur_version = dep_info.version;
                 if (!mem.eql(u8, dep_info.name, dep_info.package_base)) {
                     dep_pkg.base_name = dep_info.package_base;
@@ -785,18 +783,18 @@ fn snapshotPath(self: *Pacman, base: []const u8, version: []const u8) Allocator.
     return Dir.path.join(self.allocator, &.{ self.zur_path, ".src", base, version });
 }
 
-fn downloadAndExtractPackage(self: *Pacman, pkg_name: []const u8, pkg: *Package) !void {
-    return self.downloadAndExtractPackageUsing(pkg_name, pkg, self.getRequest());
+fn downloadAndExtractPackage(self: *Pacman, item: *PendingPackage) !void {
+    item.snapshot = try self.downloadAndExtractPackageUsing(item.name, &item.pkg, self.getRequest());
 }
 
-fn downloadAndExtractPackageUsing(self: *Pacman, pkg_name: []const u8, pkg: *Package, request: anytype) !void {
+fn downloadAndExtractPackageUsing(self: *Pacman, pkg_name: []const u8, pkg: *const Package, request: anytype) !Snapshot {
     const base = pkg.base_name orelse pkg_name;
     const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}.tar.gz", .{ aur.snapshot, base });
     defer self.allocator.free(url);
     try self.print(" downloading from: {s}{s}{s}\n", .{ color.bold, url, color.reset });
     const bytes = try request.get(url);
     defer self.allocator.free(bytes);
-    pkg.snapshot = try Snapshot.create(self.allocator, self.io, self.zur_path, base, bytes);
+    return Snapshot.create(self.allocator, self.io, self.zur_path, base, bytes);
 }
 
 const InstalledSnapshot = struct {
@@ -811,7 +809,7 @@ fn installedSnapshotPath(self: *Pacman, base: []const u8, name: []const u8) ![]u
 }
 
 fn loadInstalledSnapshot(self: *Pacman, item: *const PendingPackage) !?Snapshot {
-    if (mem.eql(u8, item.pkg.version, "0")) return null;
+    const installed_version = item.pkg.installed_version orelse return null;
     const path = try self.installedSnapshotPath(item.base(), item.name);
     defer self.allocator.free(path);
     const bytes = Dir.cwd().readFileAlloc(self.io, path, self.allocator, .unlimited) catch |err| switch (err) {
@@ -824,7 +822,7 @@ fn loadInstalledSnapshot(self: *Pacman, item: *const PendingPackage) !?Snapshot 
         else => return null,
     };
     defer parsed.deinit();
-    if (!mem.eql(u8, parsed.value.version, item.pkg.version)) return null;
+    if (!mem.eql(u8, parsed.value.version, installed_version)) return null;
     const name = parsed.value.archive;
     if (name.len != 71 or !mem.endsWith(u8, name, ".tar.gz")) return null;
     for (name[0..64]) |char| if (!std.ascii.isHex(char)) return null;
@@ -842,7 +840,7 @@ fn loadInstalledSnapshot(self: *Pacman, item: *const PendingPackage) !?Snapshot 
 }
 
 fn recordInstalledSnapshot(self: *Pacman, item: *const PendingPackage) !void {
-    const snapshot = item.pkg.snapshot orelse return;
+    const snapshot = item.snapshot orelse return;
     for (item.outputs.keys(), item.outputs.values()) |name, output| {
         var archive = try (try self.getAlpm()).readArchive(output.artifact.?);
         defer archive.deinit(self.allocator);
@@ -870,7 +868,7 @@ fn compareUpdateAndInstall(self: *Pacman, item: *PendingPackage) !void {
     else
         SourceFiles.empty;
     defer deinitSnapshotFiles(self.allocator, &old_files);
-    var new_files = try self.readSnapshotFiles(item.pkg.snapshot.?.source_path);
+    var new_files = try self.readSnapshotFiles(item.snapshot.?.source_path);
     defer deinitSnapshotFiles(self.allocator, &new_files);
 
     // A diff needs both the old and new snapshots present, each with a
@@ -1167,7 +1165,7 @@ fn install(self: *Pacman, item: *PendingPackage) !void {
 }
 
 fn installUsing(self: *Pacman, item: *PendingPackage, runner: anytype) !void {
-    const full_pkg_dir = (item.pkg.snapshot orelse return error.InvalidSnapshot).source_path;
+    const full_pkg_dir = (item.snapshot orelse return error.InvalidSnapshot).source_path;
     try runner.execCommand(&.{ "makepkg", "-scC" }, full_pkg_dir);
     const listing = try runner.captureCommand(&.{ "makepkg", "--packagelist" }, full_pkg_dir);
     defer self.allocator.free(listing);
@@ -1596,23 +1594,23 @@ test "printSearchResult puts the AUR package link after popularity" {
 
 test "shouldUpdate always selects a fresh install" {
     const testing = std.testing;
-    try testing.expect(shouldUpdate("foo", "0", "1.0.0", true));
-    try testing.expect(shouldUpdate("foo", "0", "0.0.0", false));
+    try testing.expect(shouldUpdate("foo", null, false, true));
+    try testing.expect(shouldUpdate("foo", null, false, false));
 }
 
 test "shouldUpdate selects a normal package only when its remote version is newer" {
     const testing = std.testing;
-    try testing.expect(shouldUpdate("foo", "1.0", "2.0", true));
-    try testing.expect(!shouldUpdate("foo", "1.0", "1.0", false));
-    try testing.expect(!shouldUpdate("foo", "2.0", "1.0", false));
+    try testing.expect(shouldUpdate("foo", "1.0", false, true));
+    try testing.expect(!shouldUpdate("foo", "1.0", false, false));
+    try testing.expect(!shouldUpdate("foo", "2.0", false, false));
 }
 
 test "shouldUpdate rebuilds a git package when its pkgver still matches" {
     const testing = std.testing;
-    try testing.expect(shouldUpdate("neovim-git", "r100.abc", "r100.abc", false));
-    try testing.expect(shouldUpdate("neovim-git", "r100.abc", "r200.def", false));
-    try testing.expect(shouldUpdate("neovim-git", "r100.abc", "r200.def", true));
-    try testing.expect(!shouldUpdate("neovim", "1.0", "1.0", false));
+    try testing.expect(shouldUpdate("neovim-git", "r100.abc", false, false));
+    try testing.expect(shouldUpdate("neovim-git", "r100.abc", false, false));
+    try testing.expect(shouldUpdate("neovim-git", "r100.abc", false, true));
+    try testing.expect(!shouldUpdate("neovim", "1.0", false, false));
 }
 
 test "normalizeDepName strips alternatives and version constraints" {
@@ -1675,11 +1673,11 @@ test "queuePendingPackage preserves dependency-first insertion order" {
     var queued_bases: std.StringHashMapUnmanaged(usize) = .empty;
     defer queued_bases.deinit(allocator);
 
-    var dependency = Package.init("0");
+    var dependency: Package = .{};
     dependency.aur_version = "2.0";
     try queuePendingPackage(allocator, &pending, &queued_bases, "dependency", dependency, null);
 
-    var root = Package.init("1.0");
+    var root: Package = .{ .installed_version = "1.0" };
     root.aur_version = "2.0";
     try queuePendingPackage(allocator, &pending, &queued_bases, "root", root, null);
 
@@ -1696,12 +1694,12 @@ test "queuePendingPackage deduplicates bases and promotes root metadata" {
     var queued_bases: std.StringHashMapUnmanaged(usize) = .empty;
     defer queued_bases.deinit(allocator);
 
-    var dependency = Package.init("0");
+    var dependency: Package = .{};
     dependency.aur_version = "2.0";
     dependency.base_name = "shared-base";
     try queuePendingPackage(allocator, &pending, &queued_bases, "shared-lib", dependency, null);
 
-    var root = Package.init("1.0");
+    var root: Package = .{ .installed_version = "1.0" };
     root.aur_version = "2.0";
     root.base_name = "shared-base";
     try queuePendingPackage(allocator, &pending, &queued_bases, "shared-cli", root, null);
@@ -1710,7 +1708,7 @@ test "queuePendingPackage deduplicates bases and promotes root metadata" {
     try testing.expectEqual(@as(usize, 1), queued_bases.count());
     try testing.expectEqual(@as(usize, 0), queued_bases.get("shared-base").?);
     try testing.expectEqualStrings("shared-cli", pending.items[0].name);
-    try testing.expectEqualStrings("1.0", pending.items[0].pkg.version);
+    try testing.expectEqualStrings("1.0", pending.items[0].pkg.installed_version.?);
     try testing.expectEqualStrings("2.0", pending.items[0].pkg.aur_version.?);
     try testing.expectEqualStrings("shared-base", pending.items[0].pkg.base_name.?);
 }
@@ -1723,11 +1721,11 @@ test "queuePendingPackage replaces a queued build with an existing artifact" {
     var queued_bases: std.StringHashMapUnmanaged(usize) = .empty;
     defer queued_bases.deinit(allocator);
 
-    var dependency = Package.init("0");
+    var dependency: Package = .{};
     dependency.aur_version = "2.0";
     try queuePendingPackage(allocator, &pending, &queued_bases, "shared", dependency, null);
 
-    var root = Package.init("1.0");
+    var root: Package = .{ .installed_version = "1.0" };
     root.aur_version = "2.0";
     const artifact = artifact: {
         const value = try allocator.dupe(u8, "shared-2.0-x86_64.pkg.tar.zst");
@@ -1738,7 +1736,7 @@ test "queuePendingPackage replaces a queued build with an existing artifact" {
 
     try testing.expectEqual(@as(usize, 1), pending.items.len);
     try testing.expectEqualStrings(artifact, pending.items[0].outputs.get("shared").?.artifact.?);
-    try testing.expectEqualStrings("1.0", pending.items[0].pkg.version);
+    try testing.expectEqualStrings("1.0", pending.items[0].pkg.installed_version.?);
 }
 
 test "printBarePkgbuildFields prints only fields needed for review" {
@@ -2075,7 +2073,7 @@ test "dependency planning upgrades an insufficient installed version before its 
     var bases: std.StringHashMapUnmanaged(usize) = .empty;
     defer bases.deinit(allocator);
     try fixture.pacman.queuePackageWithDeps(&pending, &bases, "review-app", .{
-        .version = "1",
+        .installed_version = "1",
         .aur_version = "2",
     });
     try testing.expectEqual(@as(usize, 2), pending.items.len);
@@ -2187,20 +2185,19 @@ test "dependency planning retains scheduled upgrade edges and rejects incompatib
         .resultcount = infos.len,
         .results = try allocator.dupe(aur.Info, &infos),
     };
-    const library = try allocator.create(Package);
-    library.* = .{ .version = "1", .aur_version = "2", .requires_update = true };
+    const library: Package = .{ .installed_version = "1", .aur_version = "2", .requires_update = true };
     try fixture.pacman.pkgs.put(allocator, "review-lib", library);
     var pending: std.ArrayList(PendingPackage) = .empty;
     defer deinitPendingPackages(allocator, &pending);
     var bases: std.StringHashMapUnmanaged(usize) = .empty;
     defer bases.deinit(allocator);
     try fixture.pacman.queuePackageWithDeps(&pending, &bases, "review-app", .{
-        .version = "1",
+        .installed_version = "1",
         .aur_version = "2",
     });
     try testing.expectEqual(@as(usize, 2), pending.items.len);
     try testing.expectEqualStrings("review-lib", pending.items[0].name);
-    try testing.expectEqualStrings("1", pending.items[0].pkg.version);
+    try testing.expectEqualStrings("1", pending.items[0].pkg.installed_version.?);
     try testing.expectError(error.DependencyConflict, fixture.pacman.resolveDependency("review-lib=1"));
 }
 
@@ -2252,7 +2249,7 @@ test "dependency planning rejects a build cycle before installing anything" {
         &pending,
         &bases,
         first.name,
-        .{ .version = "0", .aur_version = "1" },
+        .{ .installed_version = null, .aur_version = "1" },
     ));
     try testing.expectEqual(@as(usize, 0), pending.items.len);
 }
@@ -2273,7 +2270,7 @@ test "dependency planning installs AUR check dependencies before the consumer" {
     var bases: std.StringHashMapUnmanaged(usize) = .empty;
     defer bases.deinit(allocator);
     try fixture.pacman.queuePackageWithDeps(&pending, &bases, root.name, .{
-        .version = "0",
+        .installed_version = null,
         .aur_version = "1",
     });
     try testing.expectEqual(@as(usize, 2), pending.items.len);
@@ -2282,7 +2279,7 @@ test "dependency planning installs AUR check dependencies before the consumer" {
 }
 
 test "shouldUpdate rebuilds a git package whose generated version is ahead of AUR" {
-    try std.testing.expect(shouldUpdate("foo-git", "r200.def-1", "r100.abc-1", false));
+    try std.testing.expect(shouldUpdate("foo-git", "r200.def-1", false, false));
 }
 
 test "split planning retains dependencies of every selected output before their shared build" {
@@ -2301,8 +2298,7 @@ test "split planning retains dependencies of every selected output before their 
     second.depends = &second_deps;
     for ([_]aur.Info{ first, second }) |info| {
         try fixture.pacman.cacheAurInfo(info.name, info);
-        const pkg = try allocator.create(Package);
-        pkg.* = .{ .version = "1", .aur_version = "2", .requires_update = true, .base_name = info.package_base };
+        const pkg: Package = .{ .installed_version = "1", .aur_version = "2", .requires_update = true, .base_name = info.package_base };
         try fixture.pacman.pkgs.put(allocator, info.name, pkg);
     }
     try fixture.pacman.cacheAurInfo(first_deps[0], testAurInfo(first_deps[0], "1"));
@@ -2343,11 +2339,11 @@ test "split builds install only selected archive identities" {
     var bases: std.StringHashMapUnmanaged(usize) = .empty;
     defer bases.deinit(allocator);
     try queuePendingPackage(allocator, &pending, &bases, "review-cli", .{
-        .version = "0",
+        .installed_version = null,
         .aur_version = "2",
         .base_name = "review-base",
     }, null);
-    pending.items[0].pkg.snapshot = try testSnapshot(&fixture, "review-base");
+    pending.items[0].snapshot = try testSnapshot(&fixture, "review-base");
     try fixture.pacman.installUsing(&pending.items[0], &runner);
     try testing.expectEqual(@as(usize, 1), runner.builds);
     try testing.expectEqual(@as(usize, 1), runner.installs);
@@ -2373,11 +2369,11 @@ test "split builds reject missing selected output before installing" {
     var bases: std.StringHashMapUnmanaged(usize) = .empty;
     defer bases.deinit(allocator);
     try queuePendingPackage(allocator, &pending, &bases, "review-cli", .{
-        .version = "0",
+        .installed_version = null,
         .aur_version = "2",
         .base_name = "review-base",
     }, null);
-    pending.items[0].pkg.snapshot = try testSnapshot(&fixture, "review-base");
+    pending.items[0].snapshot = try testSnapshot(&fixture, "review-base");
     try testing.expectError(error.MissingPackageOutput, fixture.pacman.installUsing(&pending.items[0], &runner));
     try testing.expectEqual(@as(usize, 0), runner.installs);
     const unselected = try Dir.openFileAbsolute(testing.io, gui, .{});
@@ -2394,7 +2390,7 @@ test "split cache requires every selected output and installs them together" {
     defer deinitPendingPackages(allocator, &pending);
     var bases: std.StringHashMapUnmanaged(usize) = .empty;
     defer bases.deinit(allocator);
-    const pkg: Package = .{ .version = "0", .aur_version = "2", .base_name = "review-base" };
+    const pkg: Package = .{ .installed_version = null, .aur_version = "2", .base_name = "review-base" };
     try queuePendingPackage(allocator, &pending, &bases, "review-cli", pkg, try allocator.dupe(u8, "/cache/cli.pkg.tar"));
     try queuePendingPackage(allocator, &pending, &bases, "review-lib", pkg, null);
     try testing.expectEqual(@as(usize, 1), pending.items.len);
@@ -2489,8 +2485,7 @@ test "split runtime dependencies retain required siblings and their external dep
     try fixture.pacman.cacheAurInfo(cli.name, cli);
     try fixture.pacman.cacheAurInfo(sibling.name, sibling);
     try fixture.pacman.cacheAurInfo("review-external", testAurInfo("review-external", "1"));
-    const pkg = try allocator.create(Package);
-    pkg.* = .{ .version = "0", .aur_version = "2", .requires_update = true, .base_name = "review-base" };
+    const pkg: Package = .{ .installed_version = null, .aur_version = "2", .requires_update = true, .base_name = "review-base" };
     try fixture.pacman.pkgs.put(allocator, cli.name, pkg);
     var pending: std.ArrayList(PendingPackage) = .empty;
     defer deinitPendingPackages(allocator, &pending);
@@ -2571,7 +2566,7 @@ test "archive caching preserves detached signatures in the package directory" {
     defer deinitPendingPackages(allocator, &pending);
     var bases: std.StringHashMapUnmanaged(usize) = .empty;
     defer bases.deinit(allocator);
-    try queuePendingPackage(allocator, &pending, &bases, "review-cli", .{ .version = "0", .aur_version = "2-1" }, null);
+    try queuePendingPackage(allocator, &pending, &bases, "review-cli", .{ .installed_version = null, .aur_version = "2-1" }, null);
     try fixture.pacman.selectBuiltArtifacts(&pending.items[0], fixture.pacman.zur_path, path);
     const signature = try fixture.tmp.dir.readFileAlloc(testing.io, "review-cli/produced.pkg.tar.sig", allocator, .unlimited);
     defer allocator.free(signature);
@@ -2655,7 +2650,7 @@ test "snapshot download retries a legacy extraction containing only PKGBUILD" {
         .sub_path = ".src/review-base/2/PKGBUILD",
         .data = "source=(missing.patch)\n",
     });
-    var pkg: Package = .{ .version = "1", .aur_version = "2", .base_name = "review-base" };
+    var pkg: Package = .{ .installed_version = "1", .aur_version = "2", .base_name = "review-base" };
     var request: TestSnapshotRequest = .{};
     try std.testing.expectError(error.TestDownloadRequired, fixture.pacman.downloadAndExtractPackageUsing("review-cli", &pkg, &request));
 }
@@ -2685,15 +2680,15 @@ test "installed snapshot records survive build mutations and use actual output v
     const allocator = fixture.arena.allocator();
     var item: PendingPackage = .{
         .name = "review-cli",
-        .pkg = .{ .version = "2-1", .aur_version = "2", .base_name = "review-base" },
+        .pkg = .{ .installed_version = "2-1", .aur_version = "2", .base_name = "review-base" },
     };
     defer item.deinit(allocator);
-    item.pkg.snapshot = try testSnapshot(&fixture, item.base());
+    item.snapshot = try testSnapshot(&fixture, item.base());
     const produced = try testPackageArchive(&fixture, "produced.pkg.tar", item.name);
     try item.outputs.put(allocator, item.name, .{ .pkg = item.pkg, .artifact = try allocator.dupe(u8, produced) });
     try testing.expectEqual(null, try fixture.pacman.loadInstalledSnapshot(&item));
     try fixture.pacman.recordInstalledSnapshot(&item);
-    var build = try Dir.openDirAbsolute(testing.io, item.pkg.snapshot.?.source_path, .{});
+    var build = try Dir.openDirAbsolute(testing.io, item.snapshot.?.source_path, .{});
     defer build.close(testing.io);
     try build.writeFile(testing.io, .{ .sub_path = "PKGBUILD", .data = "mutated by makepkg\n" });
     var previous = (try fixture.pacman.loadInstalledSnapshot(&item)).?;
@@ -2702,7 +2697,7 @@ test "installed snapshot records survive build mutations and use actual output v
     defer deinitSnapshotFiles(allocator, &files);
     try testing.expectEqualStrings("pkgname=review-cli\npkgver=2\npkgrel=1\n", files.get("PKGBUILD").?.contents);
     try testing.expectEqualStrings("echo original\n", files.get("nested/hook.sh").?.contents);
-    item.pkg.version = "9-1";
+    item.pkg.installed_version = "9-1";
     try testing.expectEqual(null, try fixture.pacman.loadInstalledSnapshot(&item));
 }
 
@@ -2739,7 +2734,7 @@ test "install requests deduplicate repeated package names" {
     var names: std.ArrayList([]const u8) = .empty;
     defer names.deinit(allocator);
     try names.appendSlice(allocator, &.{ "review-cli", "review-cli", "review-lib", "review-cli" });
-    try fixture.pacman.setInstallPackages(names);
+    try fixture.pacman.setInstallPackages(names.items);
     try testing.expectEqual(@as(usize, 2), fixture.pacman.pkgs.count());
     try testing.expect(fixture.pacman.pkgs.contains("review-cli"));
     try testing.expect(fixture.pacman.pkgs.contains("review-lib"));
@@ -2753,7 +2748,7 @@ test "update skips remote initialization when no foreign packages are installed"
     try fixture.pacman.compareVersions();
     try fixture.pacman.processOutOfDate();
     try std.testing.expect(fixture.pacman.request_state == null);
-    try std.testing.expectEqual(@as(usize, 0), fixture.pacman.updates);
+    try std.testing.expectEqual(@as(usize, 0), fixture.pacman.pkgs.count());
 }
 
 const TestReasonRunner = struct {
@@ -2786,8 +2781,8 @@ test "planned AUR dependencies are installed with dependency reasons" {
     var names: std.ArrayList([]const u8) = .empty;
     defer names.deinit(allocator);
     try names.append(allocator, "review-cli");
-    try fixture.pacman.setInstallPackages(names);
-    const root_pkg = fixture.pacman.pkgs.get("review-cli").?;
+    try fixture.pacman.setInstallPackages(names.items);
+    const root_pkg = fixture.pacman.pkgs.getPtr("review-cli").?;
     root_pkg.aur_version = "2-1";
     root_pkg.requires_update = true;
     var dependencies = [_][]const u8{"review-new-dep"};
@@ -2822,14 +2817,14 @@ test "mixed split outputs preserve existing reasons and mark only new dependenci
     var names: std.ArrayList([]const u8) = .empty;
     defer names.deinit(allocator);
     try names.appendSlice(allocator, &.{ "review-cli", "review-lib" });
-    try fixture.pacman.setInstallPackages(names);
+    try fixture.pacman.setInstallPackages(names.items);
     var deps = [_][]const u8{ "review-sibling", "review-lib>=2", "review-explicit>=2" };
     for ([_][]const u8{ "review-cli", "review-sibling", "review-lib", "review-explicit" }) |name| {
         var info = testAurInfo(name, "2-1");
         info.package_base = "review-base";
         if (mem.eql(u8, name, "review-cli")) info.depends = &deps;
         try fixture.pacman.cacheAurInfo(name, info);
-        if (fixture.pacman.pkgs.get(name)) |pkg| {
+        if (fixture.pacman.pkgs.getPtr(name)) |pkg| {
             pkg.aur_version = "2-1";
             pkg.base_name = info.package_base;
             pkg.requires_update = true;
@@ -2923,4 +2918,21 @@ test "makepkg child paths stay managed despite environment and configuration ove
     defer allocator.free(listing_report);
     try testing.expectEqualStrings(build_report, listing_report);
     try testing.expectEqualStrings("/external/environment", fixture.environ.get("PKGDEST").?);
+}
+
+test "explicit requests retain installed versions and allow intentional reinstalls" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.pacman.setInstallPackages(&.{"review-lib"});
+    const pkg = fixture.pacman.pkgs.getPtr("review-lib").?;
+    try testing.expectEqualStrings("1-1", pkg.installed_version.?);
+    try testing.expect(pkg.requested);
+    pkg.aur_version = "1-1";
+    try fixture.pacman.compareVersions();
+    try testing.expect(pkg.requires_update);
+    pkg.requested = false;
+    try fixture.pacman.compareVersions();
+    try testing.expect(!pkg.requires_update);
 }
