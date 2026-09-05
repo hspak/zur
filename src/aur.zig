@@ -247,12 +247,16 @@ pub fn queryAll(
 /// Strings inside the returned `Info` are allocated from `allocator` and are
 /// not freed here (same lifetime as `queryAll`).
 pub fn queryName(allocator: std.mem.Allocator, request: *Request, name: []const u8) Error!?Info {
+    return queryNameUsing(allocator, request, name);
+}
+
+fn queryNameUsing(allocator: std.mem.Allocator, request: anytype, name: []const u8) !?Info {
     var uri: std.ArrayList(u8) = .empty;
     defer uri.deinit(allocator);
 
     try uri.appendSlice(allocator, host);
     try uri.appendSlice(allocator, "&type=info&arg[]=");
-    try uri.appendSlice(allocator, name);
+    try appendQueryValue(allocator, &uri, name);
 
     const body = try request.get(uri.items);
     defer allocator.free(body);
@@ -274,6 +278,10 @@ pub fn search(
     search_name: []const u8,
     by: SearchBy,
 ) Error!RpcSearchRespV5 {
+    return searchUsing(allocator, request, search_name, by);
+}
+
+fn searchUsing(allocator: std.mem.Allocator, request: anytype, search_name: []const u8, by: SearchBy) !RpcSearchRespV5 {
     var uri: std.ArrayList(u8) = .empty;
     defer uri.deinit(allocator);
 
@@ -281,7 +289,7 @@ pub fn search(
     try uri.appendSlice(allocator, "&type=search&by=");
     try uri.appendSlice(allocator, by.field());
     try uri.appendSlice(allocator, "&arg=");
-    try uri.appendSlice(allocator, search_name);
+    try appendQueryValue(allocator, &uri, search_name);
 
     const body = try request.get(uri.items);
     defer allocator.free(body);
@@ -293,6 +301,10 @@ pub fn search(
 
     const response = try mapSearchResp(allocator, json_resp);
     return response;
+}
+
+fn appendQueryValue(allocator: std.mem.Allocator, uri: *std.ArrayList(u8), raw: []const u8) !void {
+    try uri.print(allocator, "{f}", .{std.fmt.alt(std.Uri.Component{ .raw = raw }, .formatEscaped)});
 }
 
 fn buildInfoQuery(
@@ -308,7 +320,7 @@ fn buildInfoQuery(
     var pkgs_iter = pkgs.iterator();
     while (pkgs_iter.next()) |pkg| {
         try uri.appendSlice(allocator, "&arg[]=");
-        try uri.appendSlice(allocator, pkg.key_ptr.*);
+        try appendQueryValue(allocator, &uri, pkg.key_ptr.*);
     }
     const value = try uri.toOwnedSlice(allocator);
     return value;
@@ -349,4 +361,37 @@ test "buildInfoQuery includes every package exactly once" {
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, result, "&arg[]=pkg-a"));
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, result, "&arg[]=pkg-b"));
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, result, "&arg[]="));
+}
+
+const TestQueryRequest = struct {
+    allocator: std.mem.Allocator,
+    expected_url: []const u8,
+
+    fn get(self: TestQueryRequest, url: []const u8) ![]u8 {
+        try testing.expectEqualStrings(self.expected_url, url);
+        return self.allocator.dupe(u8, "{\"version\":5,\"type\":\"multiinfo\",\"resultcount\":0,\"results\":[]}");
+    }
+};
+
+test "RPC query values preserve plus signs and reserved search characters" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const name_request: TestQueryRequest = .{
+        .allocator = allocator,
+        .expected_url = host ++ "&type=info&arg[]=libstdc%2B%2B5",
+    };
+    try testing.expectEqual(null, try queryNameUsing(allocator, name_request, "libstdc++5"));
+    const search_request: TestQueryRequest = .{
+        .allocator = allocator,
+        .expected_url = host ++ "&type=search&by=name&arg=c%2B%2B%20%26%20%23%25%2F%C3%A9",
+    };
+    _ = try searchUsing(allocator, search_request, "c++ & #%/é", .name);
+    var pkgs: std.StringHashMapUnmanaged(*Pacman.Package) = .empty;
+    defer pkgs.deinit(allocator);
+    var pkg = Pacman.Package.init("1");
+    try pkgs.put(allocator, "libstdc++5", &pkg);
+    const url = try buildInfoQuery(allocator, pkgs);
+    defer allocator.free(url);
+    try testing.expectEqualStrings(name_request.expected_url, url);
 }
