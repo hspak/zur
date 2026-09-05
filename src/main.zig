@@ -70,6 +70,7 @@ pub fn main(init: std.process.Init) !u8 {
 
 fn printCaughtError(stderr: *Io.Writer, err: Pacman.Error) !void {
     switch (err) {
+        error.UserDeclined => try stderr.writeAll("Installation cancelled\n"),
         error.ZeroResultsFromAurQuery => try stderr.print("No aur packages found\n", .{}),
         // These are the DNS/connect failures std.http actually returns.
         error.UnknownHostName,

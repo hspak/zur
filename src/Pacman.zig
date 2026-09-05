@@ -57,6 +57,7 @@ const ErrorSet =
         DependencyConflict,
         MissingPackageOutput,
         DuplicatePackageOutput,
+        UserDeclined,
     };
 pub const Error = ErrorSet;
 
@@ -896,13 +897,7 @@ fn compareUpdateAndInstall(self: *Pacman, item: *PendingPackage) !void {
 
     const at_least_one_diff = try self.reviewSnapshotChanges(old_files, new_files);
     if (at_least_one_diff) {
-        try self.print("\nContinue? [Y/n]: ", .{});
-        const input = try self.stdinReadByte();
-        if (input != 'y' and input != 'Y') {
-            return;
-        } else {
-            try self.print("\n", .{});
-        }
+        try self.confirmInstall("\nContinue? [Y/n]: ");
     } else {
         try self.print("{s}::{s} No snapshot changes found\n", .{
             color.foreground_blue,
@@ -1054,13 +1049,15 @@ fn bareInstall(
         try printSourceFile(self.stdout(), file.key_ptr.*, file.value_ptr.*);
     }
 
-    try self.print("Install? [Y/n]: ", .{});
+    try self.confirmInstall("Install? [Y/n]: ");
+    try self.install(item);
+}
+
+fn confirmInstall(self: *Pacman, prompt: []const u8) !void {
+    try self.print("{s}", .{prompt});
     const input = try self.stdinReadByte();
-    if (input == 'y' or input == 'Y') {
-        try self.install(item);
-    } else {
-        try self.print("\n", .{});
-    }
+    try self.print("\n", .{});
+    if (input != 'y' and input != 'Y') return error.UserDeclined;
 }
 
 fn install(self: *Pacman, item: *PendingPackage) !void {
@@ -1416,8 +1413,8 @@ fn stdinReadByte(self: *Pacman) !u8 {
     // that inherits stdin.
     const reader = self.stdin();
     const line = try reader.interface.takeDelimiterInclusive('\n');
-    if (line.len == 0) return 0;
-    return line[0];
+    const answer = mem.trim(u8, line, " \t\r\n");
+    return if (answer.len == 0) 'y' else answer[0];
 }
 
 fn printSearchResult(writer: *Io.Writer, result: aur.Search, is_installed: bool) !void {
@@ -2709,4 +2706,30 @@ test "source review prints complete metadata and multiline architecture sources"
     defer output.deinit();
     try printSourceFile(&output.writer, "PKGBUILD", .{ .contents = contents });
     try std.testing.expectEqualStrings("\n:: File: PKGBUILD (file, mode 644)\n" ++ contents ++ "\n", output.written());
+}
+
+test "review cancellation stops the install pipeline" {
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "input", .data = "n\n" });
+    const input = try fixture.tmp.dir.openFile(std.testing.io, "input", .{});
+    defer input.close(std.testing.io);
+    var buffer: [128]u8 = undefined;
+    fixture.pacman.stdin_reader = input.reader(std.testing.io, &buffer);
+    var item: PendingPackage = .{ .name = "review-dependency", .pkg = .{} };
+    defer item.deinit(fixture.arena.allocator());
+    try std.testing.expectError(error.UserDeclined, fixture.pacman.bareInstall(&item, .empty));
+}
+
+test "review cancellation prompt accepts its advertised default" {
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "input", .data = "\n" });
+    const input = try fixture.tmp.dir.openFile(std.testing.io, "input", .{});
+    defer input.close(std.testing.io);
+    var buffer: [128]u8 = undefined;
+    fixture.pacman.stdin_reader = input.reader(std.testing.io, &buffer);
+    try std.testing.expectEqual(@as(u8, 'y'), try fixture.pacman.stdinReadByte());
 }
