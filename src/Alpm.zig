@@ -13,6 +13,7 @@ const ErrorSet = std.mem.Allocator.Error || error{
     NoSyncDb,
     NoLocalDb,
     NoCache,
+    InvalidPackageArchive,
 };
 pub const Error = ErrorSet;
 
@@ -203,6 +204,34 @@ fn isInSyncDbs(self: *Alpm, name: []const u8) !bool {
         if (alpm.alpm_db_get_pkg(@constCast(sync_db), @ptrCast(name_cstr.ptr)) != null) return true;
     }
     return false;
+}
+
+/// Metadata copied from a package archive. The caller owns both strings.
+pub const Archive = struct {
+    name: []const u8,
+    version: []const u8,
+
+    pub fn deinit(self: *Archive, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.version);
+        self.* = undefined;
+    }
+};
+
+/// Inspect a package file without installing it. The caller must deinit the result.
+pub fn readArchive(self: *Alpm, path: []const u8) Error!Archive {
+    const path_z = try self.allocator.dupeZ(u8, path);
+    defer self.allocator.free(path_z);
+    var pkg: ?*alpm.alpm_pkg_t = null;
+    if (alpm.alpm_pkg_load(self.handle, path_z, 0, 0, &pkg) != 0) {
+        if (alpm.alpm_errno(self.handle) == alpm.ALPM_ERR_MEMORY) return error.OutOfMemory;
+        return error.InvalidPackageArchive;
+    }
+    defer _ = alpm.alpm_pkg_free(pkg);
+    const name = try self.allocator.dupe(u8, std.mem.span(alpm.alpm_pkg_get_name(pkg)));
+    errdefer self.allocator.free(name);
+    const version = try self.allocator.dupe(u8, std.mem.span(alpm.alpm_pkg_get_version(pkg)));
+    return .{ .name = name, .version = version };
 }
 
 /// True if `ver_a` is a newer alpm version than `ver_b`.
