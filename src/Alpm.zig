@@ -206,14 +206,16 @@ fn isInSyncDbs(self: *Alpm, name: []const u8) !bool {
     return false;
 }
 
-/// Metadata copied from a package archive. The caller owns both strings.
+/// Metadata copied from a package archive. The caller owns all strings.
 pub const Archive = struct {
     name: []const u8,
     version: []const u8,
+    arch: []const u8,
 
     pub fn deinit(self: *Archive, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
         allocator.free(self.version);
+        allocator.free(self.arch);
         self.* = undefined;
     }
 };
@@ -231,7 +233,11 @@ pub fn readArchive(self: *Alpm, path: []const u8) Error!Archive {
     const name = try self.allocator.dupe(u8, std.mem.span(alpm.alpm_pkg_get_name(pkg)));
     errdefer self.allocator.free(name);
     const version = try self.allocator.dupe(u8, std.mem.span(alpm.alpm_pkg_get_version(pkg)));
-    return .{ .name = name, .version = version };
+    errdefer self.allocator.free(version);
+    const archive_arch = alpm.alpm_pkg_get_arch(pkg);
+    if (archive_arch == null) return error.InvalidPackageArchive;
+    const arch = try self.allocator.dupe(u8, std.mem.span(archive_arch));
+    return .{ .name = name, .version = version, .arch = arch };
 }
 
 /// True if `ver_a` is a newer alpm version than `ver_b`.

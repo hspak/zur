@@ -550,11 +550,7 @@ pub fn processOutOfDate(self: *Pacman) Error!void {
 
     for (pending.items) |*item| {
         for (item.outputs.keys(), item.outputs.values()) |name, *output| {
-            const filename = try self.findExistingPackage(name, output.pkg.aur_version.?);
-            if (filename) |cached| {
-                defer self.allocator.free(cached);
-                output.artifact = try Dir.path.join(self.allocator, &.{ self.zur_pkg_dir, name, cached });
-            }
+            output.artifact = try self.findExistingPackage(name, output.pkg.aur_version.?);
         }
         if (!item.isCached()) try self.downloadAndExtractPackage(item.name, &item.pkg);
     }
@@ -741,44 +737,66 @@ fn aurInfoFor(self: *Pacman, name: []const u8) ?aur.Info {
     return null;
 }
 
-// Returns the filename of an already-built package for (pkg_name, version)
-// in zur_pkg_dir, considering both the machine arch and "any" packages.
-// The caller owns the returned slice.
+// Return an owned absolute path for an exact package/version/native-arch match.
+// Archive metadata is authoritative; PKGEXT and filename spelling may vary.
 fn findExistingPackage(self: *Pacman, pkg_name: []const u8, version: []const u8) !?[]u8 {
-    // For -git packages we always force an install (we don't know if
-    // there's been a source update), so don't treat them as existing.
-    if (isGitPkg(pkg_name)) {
-        return null;
-    }
+    if (isGitPkg(pkg_name)) return null;
+    const directory = try Dir.path.join(self.allocator, &.{ self.zur_pkg_dir, pkg_name });
+    defer self.allocator.free(directory);
+    if (try self.findCachedInDir(directory, pkg_name, version)) |path| return path;
+    // Migrate only a verified requested artifact from the former flat cache.
+    const legacy = (try self.findCachedInDir(self.zur_pkg_dir, pkg_name, version)) orelse return null;
+    defer self.allocator.free(legacy);
+    return try self.moveArchiveToCache(pkg_name, legacy);
+}
 
-    const archs = [_][]const u8{ machineArch(), "any" };
-    for (archs) |arch| {
-        const name = try mem.join(self.allocator, "-", &.{
-            pkg_name,
-            version,
-            arch,
-            "pkg.tar.zst",
-        });
-        const full_path = try Dir.path.join(self.allocator, &.{ self.zur_pkg_dir, pkg_name, name });
-        var found = false;
-        defer {
-            self.allocator.free(full_path);
-            if (!found) self.allocator.free(name);
-        }
-        const f = Dir.openFileAbsolute(self.io, full_path, .{}) catch |err| switch (err) {
-            error.FileNotFound => null,
-            else => {
-                @branchHint(.cold);
-                return err;
-            },
+fn findCachedInDir(self: *Pacman, directory: []const u8, name: []const u8, version: []const u8) !?[]u8 {
+    var dir = Dir.openDirAbsolute(self.io, directory, .{ .iterate = true, .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    defer dir.close(self.io);
+    var entries = dir.iterate();
+    while (try entries.next(self.io)) |entry| {
+        if (entry.kind != .file or mem.endsWith(u8, entry.name, ".sig") or
+            mem.indexOf(u8, entry.name, ".pkg.tar") == null) continue;
+        const path = try Dir.path.join(self.allocator, &.{ directory, entry.name });
+        var keep = false;
+        defer if (!keep) self.allocator.free(path);
+        var archive = (try self.getAlpm()).readArchive(path) catch |err| switch (err) {
+            error.InvalidPackageArchive => continue,
+            else => return err,
         };
-        if (f) |file| {
-            file.close(self.io);
-            found = true;
-            return name;
-        }
+        defer archive.deinit(self.allocator);
+        if (!mem.eql(u8, archive.name, name) or !mem.eql(u8, archive.version, version)) continue;
+        if (!mem.eql(u8, archive.arch, "any") and !mem.eql(u8, archive.arch, machineArch())) continue;
+        keep = true;
+        return path;
     }
     return null;
+}
+
+fn moveArchiveToCache(self: *Pacman, name: []const u8, source: []const u8) ![]u8 {
+    const parent = try Dir.path.join(self.allocator, &.{ self.zur_pkg_dir, name });
+    defer self.allocator.free(parent);
+    try Dir.cwd().createDirPath(self.io, parent);
+    const dest = try Dir.path.join(self.allocator, &.{ parent, Dir.path.basename(source) });
+    errdefer self.allocator.free(dest);
+    const source_sig = try std.fmt.allocPrint(self.allocator, "{s}.sig", .{source});
+    defer self.allocator.free(source_sig);
+    const dest_sig = try std.fmt.allocPrint(self.allocator, "{s}.sig", .{dest});
+    defer self.allocator.free(dest_sig);
+    Dir.renameAbsolute(source_sig, dest_sig, self.io) catch |err| switch (err) {
+        error.FileNotFound => {
+            Dir.cwd().deleteFile(self.io, dest_sig) catch |delete_err| switch (delete_err) {
+                error.FileNotFound => {},
+                else => return delete_err,
+            };
+        },
+        else => return err,
+    };
+    try Dir.renameAbsolute(source, dest, self.io);
+    return dest;
 }
 
 fn snapshotPath(self: *Pacman, base: []const u8, version: []const u8) Allocator.Error![]u8 {
@@ -1228,22 +1246,8 @@ fn selectBuiltArtifacts(self: *Pacman, item: *PendingPackage, build_dir: []const
     // Validate the entire selected set before moving anything into the cache.
     for (item.outputs.keys(), item.outputs.values()) |name, *output| {
         const source = output.artifact.?;
-        const parent = try Dir.path.join(self.allocator, &.{ self.zur_pkg_dir, name });
-        defer self.allocator.free(parent);
-        try Dir.cwd().createDirPath(self.io, parent);
-        const dest = try Dir.path.join(self.allocator, &.{ parent, Dir.path.basename(source) });
-        errdefer self.allocator.free(dest);
-        const source_sig = try std.fmt.allocPrint(self.allocator, "{s}.sig", .{source});
-        defer self.allocator.free(source_sig);
-        const dest_sig = try std.fmt.allocPrint(self.allocator, "{s}.sig", .{dest});
-        defer self.allocator.free(dest_sig);
-        Dir.renameAbsolute(source_sig, dest_sig, self.io) catch |err| switch (err) {
-            error.FileNotFound => {},
-            else => return err,
-        };
-        try Dir.renameAbsolute(source, dest, self.io);
+        output.artifact = try self.moveArchiveToCache(name, source);
         self.allocator.free(source);
-        output.artifact = dest;
     }
 }
 
@@ -2382,12 +2386,16 @@ test "split cache requires every selected output and installs them together" {
 }
 
 fn testPackageArchive(fixture: *TestDependencies, filename: []const u8, name: []const u8) ![]const u8 {
+    return testPackageArchiveFor(fixture, filename, name, "any");
+}
+
+fn testPackageArchiveFor(fixture: *TestDependencies, filename: []const u8, name: []const u8, arch: []const u8) ![]const u8 {
     const allocator = fixture.arena.allocator();
     const io = std.testing.io;
     const metadata = try std.fmt.allocPrint(
         allocator,
-        "pkgname = {s}\npkgver = 2-1\npkgdesc = Test fixture\narch = any\nbuilddate = 1\nsize = 0\n",
-        .{name},
+        "pkgname = {s}\npkgver = 2-1\npkgdesc = Test fixture\narch = {s}\nbuilddate = 1\nsize = 0\n",
+        .{ name, arch },
     );
     try fixture.tmp.dir.writeFile(io, .{ .sub_path = ".PKGINFO", .data = metadata });
     const path = try Dir.path.join(allocator, &.{ fixture.pacman.zur_path, filename });
@@ -2542,4 +2550,66 @@ test "archive caching preserves detached signatures in the package directory" {
     const signature = try fixture.tmp.dir.readFileAlloc(testing.io, "review-cli/produced.pkg.tar.sig", allocator, .unlimited);
     defer allocator.free(signature);
     try testing.expectEqualStrings("signature fixture", signature);
+}
+
+test "cache lookup finds the filename produced by makepkg" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const allocator = fixture.arena.allocator();
+    try fixture.tmp.dir.createDirPath(testing.io, "review-cli");
+    const path = try testPackageArchive(&fixture, "review-cli/review-cli-2-1-any.pkg.tar.zst", "review-cli");
+    const found = try fixture.pacman.findExistingPackage("review-cli", "2-1");
+    defer if (found) |artifact| allocator.free(artifact);
+    try testing.expect(found != null);
+    try testing.expectEqualStrings(path, found.?);
+}
+
+test "cache lookup uses archive identity and supports alternate extensions" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const allocator = fixture.arena.allocator();
+    try fixture.tmp.dir.createDirPath(testing.io, "review-cli");
+    _ = try testPackageArchive(&fixture, "review-cli/review-cli-2-1-any.pkg.tar.zst", "another-package");
+    _ = try testPackageArchiveFor(&fixture, "review-cli/foreign-arch.pkg.tar", "review-cli", "wrong_arch");
+    try fixture.tmp.dir.writeFile(testing.io, .{ .sub_path = "review-cli/broken.pkg.tar", .data = "not an archive" });
+    try testing.expectEqual(null, try fixture.pacman.findExistingPackage("review-cli", "2-1"));
+    const archive = try testPackageArchive(&fixture, "review-cli/custom.pkg.tar.xz", "review-cli");
+    const found = try fixture.pacman.findExistingPackage("review-cli", "2-1");
+    defer if (found) |path| allocator.free(path);
+    try testing.expect(found != null);
+    try testing.expectEqualStrings(archive, found.?);
+    try testing.expectEqual(null, try fixture.pacman.findExistingPackage("review-cli", "3-1"));
+}
+
+test "cache lookup migrates verified legacy archives with their signatures" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const allocator = fixture.arena.allocator();
+    _ = try testPackageArchive(&fixture, "legacy.pkg.tar", "review-cli");
+    try fixture.tmp.dir.writeFile(testing.io, .{ .sub_path = "legacy.pkg.tar.sig", .data = "signature" });
+    const found = try fixture.pacman.findExistingPackage("review-cli", "2-1");
+    defer if (found) |path| allocator.free(path);
+    try testing.expect(found != null);
+    try testing.expect(mem.endsWith(u8, found.?, "/review-cli/legacy.pkg.tar"));
+    const signature = try fixture.tmp.dir.readFileAlloc(testing.io, "review-cli/legacy.pkg.tar.sig", allocator, .unlimited);
+    defer allocator.free(signature);
+    try testing.expectEqualStrings("signature", signature);
+    try testing.expectError(error.FileNotFound, fixture.tmp.dir.openFile(testing.io, "legacy.pkg.tar", .{}));
+    try testing.expectError(error.FileNotFound, fixture.tmp.dir.openFile(testing.io, "legacy.pkg.tar.sig", .{}));
+}
+
+test "cache lookup never reuses development package archives" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.tmp.dir.createDirPath(testing.io, "review-git");
+    _ = try testPackageArchive(&fixture, "review-git/review-git-2-1-any.pkg.tar.zst", "review-git");
+    try testing.expectEqual(null, try fixture.pacman.findExistingPackage("review-git", "2-1"));
 }
