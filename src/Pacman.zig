@@ -601,7 +601,11 @@ fn queuePackageWithDeps(
     errdefer _ = self.aur_deps_done.remove(pkg_name);
 
     if (try self.getAurInfo(pkg_name)) |info| {
-        const dep_lists = [_]?[][]const u8{ info.depends, info.make_depends };
+        const dep_lists = [_]?[][]const u8{
+            info.depends,
+            info.make_depends,
+            info.check_depends,
+        };
         for (dep_lists) |maybe_list| {
             for (maybe_list orelse continue) |dep| {
                 const dep_info = (try self.resolveDependency(dep)) orelse continue;
@@ -2151,4 +2155,28 @@ test "dependency planning rejects a build cycle before installing anything" {
         .{ .version = "0", .aur_version = "1" },
     ));
     try testing.expectEqual(@as(usize, 0), pending.items.len);
+}
+
+test "dependency planning installs AUR check dependencies before the consumer" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const allocator = fixture.arena.allocator();
+    var dependencies = [_][]const u8{"review-checker>=2"};
+    var root = testAurInfo("review-app", "1");
+    root.check_depends = &dependencies;
+    try fixture.pacman.cacheAurInfo(root.name, root);
+    try fixture.pacman.cacheAurInfo("review-checker", testAurInfo("review-checker", "2"));
+    var pending: std.ArrayList(PendingPackage) = .empty;
+    defer deinitPendingPackages(allocator, &pending);
+    var bases: std.StringHashMapUnmanaged(usize) = .empty;
+    defer bases.deinit(allocator);
+    try fixture.pacman.queuePackageWithDeps(&pending, &bases, root.name, .{
+        .version = "0",
+        .aur_version = "1",
+    });
+    try testing.expectEqual(@as(usize, 2), pending.items.len);
+    try testing.expectEqualStrings("review-checker", pending.items[0].name);
+    try testing.expectEqualStrings("review-app", pending.items[1].name);
 }
