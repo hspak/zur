@@ -19,7 +19,6 @@ const c = @cImport({
 const Alpm = @import("Alpm.zig");
 const aur = @import("aur.zig");
 const color = @import("color.zig");
-const Pkgbuild = @import("Pkgbuild.zig");
 const Request = @import("Request.zig");
 const Snapshot = @import("Pacman/Snapshot.zig");
 
@@ -29,7 +28,6 @@ const ErrorSet =
     Allocator.Error ||
     Alpm.Error ||
     aur.Error ||
-    Pkgbuild.Error ||
     Dir.OpenError ||
     Dir.CreateDirPathError ||
     Dir.DeleteTreeError ||
@@ -246,15 +244,6 @@ fn isGitPkg(name: []const u8) bool {
 fn shouldUpdate(name: []const u8, installed_version: ?[]const u8, requested: bool, remote_newer: bool) bool {
     // pkgver() can advance development versions beyond the RPC version.
     return requested or installed_version == null or isGitPkg(name) or remote_newer;
-}
-
-// True if `name` refers to package `want` as a full leading component, so
-// "foo" doesn't also match "foobar-...".
-fn artifactNameForPkg(name: []const u8, want: []const u8) bool {
-    if (name.len < want.len) return false;
-    if (!mem.startsWith(u8, name, want)) return false;
-    if (name.len == want.len) return true;
-    return name[want.len] == '-'; // next component boundary
 }
 
 // Bare package name from an AUR Depends/MakeDepends string.
@@ -1046,118 +1035,13 @@ fn printDiff(
     }
 }
 
-fn isSourceField(name: []const u8) bool {
-    return mem.eql(u8, name, "source") or mem.startsWith(u8, name, "source_");
-}
-
-fn printSourceLines(writer: *Io.Writer, value: []const u8, indentation: []const u8) !void {
-    var lines = mem.splitScalar(u8, value, '\n');
-    while (lines.next()) |raw_line| {
-        const line = mem.trim(u8, raw_line, " \t\r");
-        if (line.len == 0) continue;
-        try writer.print("{s}{s}\n", .{ indentation, line });
-    }
-}
-
-fn printUpdatedPkgbuildField(
-    writer: *Io.Writer,
-    name: []const u8,
-    value: []const u8,
-) !void {
-    if (!isSourceField(name)) {
-        return writer.print("{s}::{s} {s}{s}{s} was updated: {s}\n", .{
-            color.bold_foreground_blue,
-            color.reset,
-            color.bold,
-            name,
-            color.reset,
-            value,
-        });
-    }
-
-    const normalized = mem.trim(u8, value, " \t\r\n");
-    if (normalized.len != 0 and mem.indexOfScalar(u8, normalized, '\n') == null) {
-        return writer.print("{s}::{s} {s}{s}{s} was updated: {s}\n", .{
-            color.bold_foreground_blue,
-            color.reset,
-            color.bold,
-            name,
-            color.reset,
-            normalized,
-        });
-    }
-
-    try writer.print("{s}::{s} {s}{s}{s} was updated:\n", .{
-        color.bold_foreground_blue,
-        color.reset,
-        color.bold,
+fn printSourceFile(writer: *Io.Writer, name: []const u8, file: SourceFile) Io.Writer.Error!void {
+    try writer.print("\n:: File: {s} ({t}, mode {o})\n{s}\n", .{
         name,
-        color.reset,
+        file.kind,
+        file.mode,
+        file.contents,
     });
-    try printSourceLines(writer, normalized, "  ");
-}
-
-fn printBarePkgbuildSource(
-    writer: *Io.Writer,
-    name: []const u8,
-    value: []const u8,
-) !void {
-    const normalized = mem.trim(u8, value, " \t\r\n");
-    if (normalized.len != 0 and mem.indexOfScalar(u8, normalized, '\n') == null) {
-        return writer.print("  {s} {s}\n", .{ name, normalized });
-    }
-
-    try writer.print("  {s}\n", .{name});
-    try printSourceLines(writer, normalized, "    ");
-}
-
-fn printBarePkgbuildFields(
-    allocator: Allocator,
-    writer: *Io.Writer,
-    file_contents: []const u8,
-) !void {
-    var pkgbuild = Pkgbuild.init(allocator, file_contents);
-    defer pkgbuild.deinit();
-    pkgbuild.readLines() catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        error.MalformedFunction, error.UnterminatedArray, error.UnterminatedFunction => {
-            try writer.writeAll(file_contents);
-            return;
-        },
-    };
-    if (pkgbuild.unparsed) {
-        try writer.writeAll(file_contents);
-        return;
-    }
-    try pkgbuild.indentValues(2);
-
-    var printed_source = false;
-    if (pkgbuild.fields.get("source")) |source| {
-        try printBarePkgbuildSource(writer, "source", source.value);
-        printed_source = true;
-    }
-
-    var source_arch_name_buffer: [32]u8 = undefined;
-    const source_arch_name = try std.fmt.bufPrint(
-        &source_arch_name_buffer,
-        "source_{s}",
-        .{machineArch()},
-    );
-    if (pkgbuild.fields.get(source_arch_name)) |source| {
-        try printBarePkgbuildSource(writer, source_arch_name, source.value);
-        printed_source = true;
-    }
-
-    if (printed_source) {
-        try writer.print("\n", .{});
-    }
-
-    var fields_iter = pkgbuild.fields.iterator();
-    while (fields_iter.next()) |field| {
-        const name = field.key_ptr.*;
-        if (!mem.eql(u8, name, "install") and !mem.endsWith(u8, name, "()")) continue;
-        try writer.print("  {s} {s}\n", .{ field.key_ptr.*, field.value_ptr.*.value });
-    }
 }
 
 fn bareInstall(
@@ -1167,12 +1051,7 @@ fn bareInstall(
 ) !void {
     var files = pkg_files.iterator();
     while (files.next()) |file| {
-        try self.print("\n:: File: {s} ({t}, mode {o})\n{s}\n", .{
-            file.key_ptr.*,
-            file.value_ptr.kind,
-            file.value_ptr.mode,
-            file.value_ptr.contents,
-        });
+        try printSourceFile(self.stdout(), file.key_ptr.*, file.value_ptr.*);
     }
 
     try self.print("Install? [Y/n]: ", .{});
@@ -1679,16 +1558,6 @@ test "isGitPkg requires git to be the final suffix" {
     try testing.expect(!isGitPkg(""));
 }
 
-test "artifactNameForPkg requires a full leading name component" {
-    const testing = std.testing;
-    try testing.expect(artifactNameForPkg("foo", "foo"));
-    try testing.expect(artifactNameForPkg("foo-2.0-1-x86_64.pkg.tar.zst", "foo"));
-    try testing.expect(!artifactNameForPkg("foobar-2.0-1-x86_64.pkg.tar.zst", "foo"));
-    try testing.expect(!artifactNameForPkg("foo", "foobar"));
-    try testing.expect(artifactNameForPkg("neovim-git-r100.abc-x86_64.pkg.tar.zst", "neovim-git"));
-    try testing.expect(!artifactNameForPkg("foo-lib-1.0-1-x86_64.pkg.tar.zst", "foo-l"));
-}
-
 test "queuePendingPackage preserves dependency-first insertion order" {
     const testing = std.testing;
     const allocator = testing.allocator;
@@ -1761,153 +1630,6 @@ test "queuePendingPackage replaces a queued build with an existing artifact" {
     try testing.expectEqual(@as(usize, 1), pending.items.len);
     try testing.expectEqualStrings(artifact, pending.items[0].outputs.get("shared").?.artifact.?);
     try testing.expectEqualStrings("1.0", pending.items[0].pkg.installed_version.?);
-}
-
-test "printBarePkgbuildFields prints only fields needed for review" {
-    const testing = std.testing;
-    const pkgbuild_contents =
-        \\pkgname=testpkg
-        \\source=('https://example.com/testpkg.tar.gz')
-        \\install=testpkg.install
-        \\install() {
-        \\  install -Dm755 testpkg "$pkgdir/usr/bin/testpkg"
-        \\}
-    ;
-
-    var output_buffer: [1024]u8 = undefined;
-    var writer = Io.Writer.fixed(&output_buffer);
-    try printBarePkgbuildFields(testing.allocator, &writer, pkgbuild_contents);
-
-    const output = writer.buffered();
-    const source_output = "  source 'https://example.com/testpkg.tar.gz'\n\n";
-    const install_output = "  install testpkg.install\n";
-    const function_output =
-        "  install()   {\n" ++
-        "    install -Dm755 testpkg \"$pkgdir/usr/bin/testpkg\"\n" ++
-        "  }\n\n";
-    try testing.expect(mem.startsWith(u8, output, source_output));
-    try testing.expectEqual(@as(usize, 1), mem.count(u8, output, install_output));
-    try testing.expectEqual(@as(usize, 1), mem.count(u8, output, function_output));
-    try testing.expectEqual(source_output.len + install_output.len + function_output.len, output.len);
-}
-
-test "printBarePkgbuildFields formats multiline sources for review" {
-    const testing = std.testing;
-    const pkgbuild_contents =
-        \\pkgname=testpkg
-        \\source=(
-        \\  "https://example.com/testpkg.tar.gz"
-        \\  'fix-build.patch'
-        \\)
-        \\package() {
-        \\  install -Dm755 testpkg "$pkgdir/usr/bin/testpkg"
-        \\}
-    ;
-
-    var output_buffer: [1024]u8 = undefined;
-    var writer = Io.Writer.fixed(&output_buffer);
-    try printBarePkgbuildFields(testing.allocator, &writer, pkgbuild_contents);
-
-    const expected =
-        "  source\n" ++
-        "    \"https://example.com/testpkg.tar.gz\"\n" ++
-        "    'fix-build.patch'\n\n" ++
-        "  package()   {\n" ++
-        "    install -Dm755 testpkg \"$pkgdir/usr/bin/testpkg\"\n" ++
-        "  }\n\n";
-    try testing.expectEqualStrings(expected, writer.buffered());
-}
-
-test "printUpdatedPkgbuildField formats multiline sources for review" {
-    const testing = std.testing;
-    var output_buffer: [512]u8 = undefined;
-    var writer = Io.Writer.fixed(&output_buffer);
-    try printUpdatedPkgbuildField(
-        &writer,
-        "source_x86_64",
-        "\n\"https://example.com/testpkg.tar.gz\"\n'fix-build.patch'\n",
-    );
-
-    const expected =
-        color.bold_foreground_blue ++ "::" ++ color.reset ++ " " ++
-        color.bold ++ "source_x86_64" ++ color.reset ++ " was updated:\n" ++
-        "  \"https://example.com/testpkg.tar.gz\"\n" ++
-        "  'fix-build.patch'\n";
-    try testing.expectEqualStrings(expected, writer.buffered());
-}
-
-test "printBarePkgbuildFields prints only the native architecture source" {
-    const testing = std.testing;
-    const pkgbuild_contents =
-        \\pkgname=testpkg
-        \\source_x86_64=('https://example.com/testpkg-x86_64.tar.gz')
-        \\source_aarch64=('https://example.com/testpkg-aarch64.tar.gz')
-        \\source_riscv64=('https://example.com/testpkg-riscv64.tar.gz')
-        \\package() {
-        \\  install -Dm755 testpkg "$pkgdir/usr/bin/testpkg"
-        \\}
-    ;
-
-    var output_buffer: [1024]u8 = undefined;
-    var writer = Io.Writer.fixed(&output_buffer);
-    try printBarePkgbuildFields(testing.allocator, &writer, pkgbuild_contents);
-
-    const output = writer.buffered();
-    const expected_arch = switch (builtin.cpu.arch) {
-        .x86_64 => "x86_64",
-        .aarch64 => "aarch64",
-        .riscv64 => "riscv64",
-        else => @compileError("unsupported test architecture"),
-    };
-    var expected_buffer: [320]u8 = undefined;
-    const expected = try std.fmt.bufPrint(
-        &expected_buffer,
-        "  source_{s} 'https://example.com/testpkg-{s}.tar.gz'\n\n" ++
-            "  package()   {{\n" ++
-            "    install -Dm755 testpkg \"$pkgdir/usr/bin/testpkg\"\n" ++
-            "  }}\n\n",
-        .{ expected_arch, expected_arch },
-    );
-    try testing.expectEqualStrings(expected, output);
-}
-
-test "printBarePkgbuildFields formats the native architecture multiline source" {
-    const testing = std.testing;
-    const pkgbuild_contents =
-        \\pkgname=testpkg
-        \\source_x86_64=(
-        \\  'https://example.com/testpkg-x86_64.tar.gz'
-        \\  'launcher.sh'
-        \\)
-        \\source_aarch64=(
-        \\  'https://example.com/testpkg-aarch64.tar.gz'
-        \\  'launcher.sh'
-        \\)
-        \\source_riscv64=(
-        \\  'https://example.com/testpkg-riscv64.tar.gz'
-        \\  'launcher.sh'
-        \\)
-    ;
-
-    var output_buffer: [1024]u8 = undefined;
-    var writer = Io.Writer.fixed(&output_buffer);
-    try printBarePkgbuildFields(testing.allocator, &writer, pkgbuild_contents);
-
-    const expected_arch = switch (builtin.cpu.arch) {
-        .x86_64 => "x86_64",
-        .aarch64 => "aarch64",
-        .riscv64 => "riscv64",
-        else => @compileError("unsupported test architecture"),
-    };
-    var expected_buffer: [320]u8 = undefined;
-    const expected = try std.fmt.bufPrint(
-        &expected_buffer,
-        "  source_{s}\n" ++
-            "    'https://example.com/testpkg-{s}.tar.gz'\n" ++
-            "    'launcher.sh'\n\n",
-        .{ expected_arch, expected_arch },
-    );
-    try testing.expectEqualStrings(expected, writer.buffered());
 }
 
 test "extractTarGz strips the snapshot root and consumes the archive" {
@@ -2068,7 +1790,7 @@ test "PKGBUILD review preserves valid Bash and unsupported statements" {
     for (cases) |case| {
         var output: Io.Writer.Allocating = .init(testing.allocator);
         defer output.deinit();
-        try printBarePkgbuildFields(testing.allocator, &output.writer, case.contents);
+        try printSourceFile(&output.writer, "PKGBUILD", .{ .contents = case.contents });
         try testing.expect(mem.indexOf(u8, output.written(), case.visible) != null);
     }
 }
@@ -2962,4 +2684,29 @@ test "metadata cache indexes both returned and absent package names" {
     try testing.expectEqualStrings("2-1", (try fixture.pacman.getAurInfo("review-present")).?.version);
     try testing.expectEqual(null, try fixture.pacman.getAurInfo("review-absent"));
     try testing.expect(fixture.pacman.request_state == null);
+}
+
+test "source review prints complete metadata and multiline architecture sources" {
+    const contents =
+        \\pkgname=testpkg
+        \\pkgver=2
+        \\pkgrel=1
+        \\source=(
+        \\  "https://example.test/source.tar.gz"
+        \\  'fix.patch'
+        \\)
+        \\source_x86_64=('x86-source')
+        \\source_aarch64=('arm-source')
+        \\source_riscv64=('riscv-source')
+        \\build() {
+        \\  make
+        \\}
+        \\package_testpkg() {
+        \\  install -Dm755 program "$pkgdir/usr/bin/program"
+        \\}
+    ;
+    var output: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    try printSourceFile(&output.writer, "PKGBUILD", .{ .contents = contents });
+    try std.testing.expectEqualStrings("\n:: File: PKGBUILD (file, mode 644)\n" ++ contents ++ "\n", output.written());
 }
