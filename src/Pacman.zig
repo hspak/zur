@@ -553,7 +553,7 @@ pub fn processOutOfDate(self: *Pacman) Error!void {
             const filename = try self.findExistingPackage(name, output.pkg.aur_version.?);
             if (filename) |cached| {
                 defer self.allocator.free(cached);
-                output.artifact = try Dir.path.join(self.allocator, &.{ self.zur_pkg_dir, cached });
+                output.artifact = try Dir.path.join(self.allocator, &.{ self.zur_pkg_dir, name, cached });
             }
         }
         if (!item.isCached()) try self.downloadAndExtractPackage(item.name, &item.pkg);
@@ -759,7 +759,7 @@ fn findExistingPackage(self: *Pacman, pkg_name: []const u8, version: []const u8)
             arch,
             "pkg.tar.zst",
         });
-        const full_path = try Dir.path.join(self.allocator, &.{ self.zur_pkg_dir, name });
+        const full_path = try Dir.path.join(self.allocator, &.{ self.zur_pkg_dir, pkg_name, name });
         var found = false;
         defer {
             self.allocator.free(full_path);
@@ -781,12 +781,17 @@ fn findExistingPackage(self: *Pacman, pkg_name: []const u8, version: []const u8)
     return null;
 }
 
+fn snapshotPath(self: *Pacman, base: []const u8, version: []const u8) Allocator.Error![]u8 {
+    return Dir.path.join(self.allocator, &.{ self.zur_path, ".src", base, version });
+}
+
 fn downloadAndExtractPackage(self: *Pacman, pkg_name: []const u8, pkg: *Package) !void {
     const file_name = try mem.join(self.allocator, ".", &.{ pkg_name, "tar.gz" });
-    const dir_name = try mem.join(self.allocator, "-", &.{ pkg_name, pkg.aur_version.? });
-
-    const full_dir = try Dir.path.join(self.allocator, &.{ self.zur_path, dir_name });
+    defer self.allocator.free(file_name);
+    const full_dir = try self.snapshotPath(pkg.base_name orelse pkg_name, pkg.aur_version.?);
+    defer self.allocator.free(full_dir);
     const full_file_path = try Dir.path.join(self.allocator, &.{ full_dir, file_name });
+    defer self.allocator.free(full_file_path);
 
     // Only skip the download if the existing directory is a real,
     // fully-extracted snapshot (it contains a PKGBUILD). A leftover or
@@ -825,9 +830,9 @@ fn downloadAndExtractPackage(self: *Pacman, pkg_name: []const u8, pkg: *Package)
             full_dir,
             color.reset,
         });
-        var zur_dir = try Dir.openDirAbsolute(self.io, self.zur_path, .{});
-        defer zur_dir.close(self.io);
-        try zur_dir.deleteTree(self.io, dir_name);
+        var parent = try Dir.openDirAbsolute(self.io, Dir.path.dirname(full_dir).?, .{});
+        defer parent.close(self.io);
+        try parent.deleteTree(self.io, Dir.path.basename(full_dir));
     }
 
     const url = if (pkg.base_name) |base_name| url: {
@@ -858,18 +863,17 @@ fn extractPackage(self: *Pacman, snapshot_path: []const u8, pkg_name: []const u8
 }
 
 fn compareUpdateAndInstall(self: *Pacman, item: *PendingPackage) !void {
-    const pkg_name = item.name;
     const pkg = &item.pkg;
     // pkg.version = 0 is the hack to forcibly install manually specified
     // packages. This causes us to read the same dir twice.
     const empty_map: std.StringHashMapUnmanaged([]u8) = .empty;
     var old_files = if (!std.mem.eql(u8, pkg.version, "0"))
-        try self.snapshotFiles(pkg_name, pkg.version)
+        try self.snapshotFiles(item.base(), pkg.version)
     else
         empty_map;
     defer deinitSnapshotFiles(self.allocator, &old_files);
 
-    var new_files = try self.snapshotFiles(pkg_name, pkg.aur_version.?);
+    var new_files = try self.snapshotFiles(item.base(), pkg.aur_version.?);
     defer deinitSnapshotFiles(self.allocator, &new_files);
 
     // A diff needs both the old and new snapshots present, each with a
@@ -1177,9 +1181,7 @@ fn install(self: *Pacman, item: *PendingPackage) !void {
 }
 
 fn installUsing(self: *Pacman, item: *PendingPackage, runner: anytype) !void {
-    const pkg_dir = try mem.join(self.allocator, "-", &.{ item.name, item.pkg.aur_version.? });
-    defer self.allocator.free(pkg_dir);
-    const full_pkg_dir = try Dir.path.join(self.allocator, &.{ self.zur_path, pkg_dir });
+    const full_pkg_dir = try self.snapshotPath(item.base(), item.pkg.aur_version.?);
     defer self.allocator.free(full_pkg_dir);
     try runner.execCommand(&.{ "makepkg", "-scC" }, full_pkg_dir);
     const listing = try runner.captureCommand(&.{ "makepkg", "--packagelist" }, full_pkg_dir);
@@ -1187,7 +1189,9 @@ fn installUsing(self: *Pacman, item: *PendingPackage, runner: anytype) !void {
     try self.selectBuiltArtifacts(item, full_pkg_dir, listing);
     try self.installArtifacts(item, runner);
     for (item.outputs.keys()) |name| try self.removeStaleArtifacts(name, self.zur_pkg_dir);
-    try self.removeStaleArtifacts(item.name, self.zur_path);
+    const source_root = try Dir.path.join(self.allocator, &.{ self.zur_path, ".src" });
+    defer self.allocator.free(source_root);
+    try self.removeStaleArtifacts(item.base(), source_root);
 }
 
 fn selectBuiltArtifacts(self: *Pacman, item: *PendingPackage, build_dir: []const u8, listing: []const u8) !void {
@@ -1222,10 +1226,21 @@ fn selectBuiltArtifacts(self: *Pacman, item: *PendingPackage, build_dir: []const
     if (!item.isCached()) return error.MissingPackageOutput;
 
     // Validate the entire selected set before moving anything into the cache.
-    for (item.outputs.values()) |*output| {
+    for (item.outputs.keys(), item.outputs.values()) |name, *output| {
         const source = output.artifact.?;
-        const dest = try Dir.path.join(self.allocator, &.{ self.zur_pkg_dir, Dir.path.basename(source) });
+        const parent = try Dir.path.join(self.allocator, &.{ self.zur_pkg_dir, name });
+        defer self.allocator.free(parent);
+        try Dir.cwd().createDirPath(self.io, parent);
+        const dest = try Dir.path.join(self.allocator, &.{ parent, Dir.path.basename(source) });
         errdefer self.allocator.free(dest);
+        const source_sig = try std.fmt.allocPrint(self.allocator, "{s}.sig", .{source});
+        defer self.allocator.free(source_sig);
+        const dest_sig = try std.fmt.allocPrint(self.allocator, "{s}.sig", .{dest});
+        defer self.allocator.free(dest_sig);
+        Dir.renameAbsolute(source_sig, dest_sig, self.io) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
         try Dir.renameAbsolute(source, dest, self.io);
         self.allocator.free(source);
         output.artifact = dest;
@@ -1329,7 +1344,9 @@ fn execCommand(self: *Pacman, argv: []const []const u8, cwd: []const u8) !void {
 }
 
 fn removeStaleArtifacts(self: *Pacman, pkg_name: []const u8, dir_path: []const u8) !void {
-    var dir = Dir.openDirAbsolute(self.io, dir_path, .{
+    const package_dir = try Dir.path.join(self.allocator, &.{ dir_path, pkg_name });
+    defer self.allocator.free(package_dir);
+    var dir = Dir.openDirAbsolute(self.io, package_dir, .{
         .iterate = true,
         .access_sub_paths = false,
         .follow_symlinks = false,
@@ -1353,10 +1370,9 @@ fn removeStaleArtifacts(self: *Pacman, pkg_name: []const u8, dir_path: []const u
     }
     var dir_iter = dir.iterate();
     while (try dir_iter.next(self.io)) |node| {
-        if (!artifactNameForPkg(node.name, pkg_name)) {
-            continue;
-        }
-        const path = try Dir.path.join(self.allocator, &.{ dir_path, node.name });
+        if (node.kind != .file and node.kind != .directory) continue;
+        if (mem.endsWith(u8, node.name, ".sig") or mem.startsWith(u8, node.name, ".")) continue;
+        const path = try Dir.path.join(self.allocator, &.{ package_dir, node.name });
         defer self.allocator.free(path);
         var f = try Dir.openFileAbsolute(self.io, path, .{});
         defer f.close(self.io);
@@ -1384,14 +1400,20 @@ fn removeStaleArtifacts(self: *Pacman, pkg_name: []const u8, dir_path: []const u
         // deleteTree is relative to a Dir handle, so open the (absolute)
         // parent directory once and delete by entry name rather than
         // resolving an absolute path through cwd.
-        var parent = try Dir.openDirAbsolute(self.io, dir_path, .{});
+        var parent = try Dir.openDirAbsolute(self.io, package_dir, .{});
         defer parent.close(self.io);
         for (marked_for_removal) |artifact| {
             try parent.deleteTree(self.io, artifact.name);
+            const signature = try std.fmt.allocPrint(self.allocator, "{s}.sig", .{artifact.name});
+            defer self.allocator.free(signature);
+            parent.deleteFile(self.io, signature) catch |err| switch (err) {
+                error.FileNotFound => {},
+                else => return err,
+            };
             try self.print("  {s}->{s} deleting stale file or dir: {s}/{s}\n", .{
                 color.foreground_blue,
                 color.reset,
-                dir_path,
+                package_dir,
                 artifact.name,
             });
         }
@@ -1412,8 +1434,8 @@ fn snapshotFiles(
     pkg_name: []const u8,
     pkg_version: []const u8,
 ) !std.StringHashMapUnmanaged([]u8) {
-    const dir_name = try mem.join(self.allocator, "-", &.{ pkg_name, pkg_version });
-    const path = try Dir.path.join(self.allocator, &.{ self.zur_path, dir_name });
+    const path = try self.snapshotPath(pkg_name, pkg_version);
+    defer self.allocator.free(path);
 
     var dir = Dir.openDirAbsolute(self.io, path, .{
         .iterate = true,
@@ -1961,10 +1983,10 @@ test "snapshot review retains scripts larger than four kilobytes" {
     const allocator = arena.allocator();
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.createDirPath(testing.io, "foo-2");
+    try tmp.dir.createDirPath(testing.io, ".src/foo/2");
     const script = "echo reviewed\n" ** 400;
     try tmp.dir.writeFile(testing.io, .{
-        .sub_path = "foo-2/prepare.sh",
+        .sub_path = ".src/foo/2/prepare.sh",
         .data = script,
     });
     var path_buffer: [4096]u8 = undefined;
@@ -2277,7 +2299,7 @@ test "split builds install only selected archive identities" {
     defer fixture.deinit();
     const allocator = fixture.arena.allocator();
     try fixture.tmp.dir.createDirPath(testing.io, "cache");
-    try fixture.tmp.dir.createDirPath(testing.io, "review-cli-2");
+    try fixture.tmp.dir.createDirPath(testing.io, ".src/review-base/2");
     fixture.pacman.zur_pkg_dir = try Dir.path.join(allocator, &.{ fixture.pacman.zur_path, "cache" });
     const cli = try testPackageArchive(&fixture, "cli-produced.pkg.tar", "review-cli");
     const gui = try testPackageArchive(&fixture, "gui-produced.pkg.tar", "review-gui");
@@ -2446,4 +2468,78 @@ test "split runtime dependencies retain required siblings and their external dep
     try testing.expectEqual(@as(usize, 2), pending.items[1].outputs.count());
     try testing.expect(pending.items[1].outputs.contains("review-cli"));
     try testing.expect(pending.items[1].outputs.contains("review-sibling"));
+}
+
+test "cleanup does not delete a different package sharing a name prefix" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const names = [_][]const u8{
+        "foo-bar-1.0-1",
+        "foo-1.0-1",
+        "foo-2.0-1",
+        "foo-3.0-1",
+    };
+    for (names) |name| {
+        try fixture.tmp.dir.writeFile(testing.io, .{ .sub_path = name, .data = "fixture" });
+        try Io.sleep(testing.io, .fromMilliseconds(10), .awake);
+    }
+    try fixture.pacman.removeStaleArtifacts("foo", fixture.pacman.zur_path);
+    const file = try fixture.tmp.dir.openFile(testing.io, names[0], .{});
+    file.close(testing.io);
+}
+
+test "cleanup keeps three versions with their signatures inside the owning package directory" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const allocator = fixture.arena.allocator();
+    try fixture.tmp.dir.createDirPath(testing.io, "foo");
+    try fixture.tmp.dir.createDirPath(testing.io, "foo-bar");
+    try fixture.tmp.dir.writeFile(testing.io, .{ .sub_path = "foo/.review", .data = "marker" });
+    try fixture.tmp.dir.writeFile(testing.io, .{ .sub_path = "foo-bar/old.pkg.tar", .data = "other package" });
+    for (1..5) |version| {
+        const path = try std.fmt.allocPrint(allocator, "foo/{d}.pkg.tar", .{version});
+        const signature = try std.fmt.allocPrint(allocator, "{s}.sig", .{path});
+        try fixture.tmp.dir.writeFile(testing.io, .{ .sub_path = path, .data = "archive" });
+        try fixture.tmp.dir.writeFile(testing.io, .{ .sub_path = signature, .data = "signature" });
+        try Io.sleep(testing.io, .fromMilliseconds(10), .awake);
+    }
+    try fixture.pacman.removeStaleArtifacts("foo", fixture.pacman.zur_path);
+    for ([_][]const u8{ "foo/1.pkg.tar", "foo/1.pkg.tar.sig" }) |path| {
+        try testing.expectError(error.FileNotFound, fixture.tmp.dir.openFile(testing.io, path, .{}));
+    }
+    for (2..5) |version| {
+        const path = try std.fmt.allocPrint(allocator, "foo/{d}.pkg.tar", .{version});
+        const signature = try std.fmt.allocPrint(allocator, "{s}.sig", .{path});
+        const archive_file = try fixture.tmp.dir.openFile(testing.io, path, .{});
+        archive_file.close(testing.io);
+        const signature_file = try fixture.tmp.dir.openFile(testing.io, signature, .{});
+        signature_file.close(testing.io);
+    }
+    for ([_][]const u8{ "foo/.review", "foo-bar/old.pkg.tar" }) |path| {
+        const file = try fixture.tmp.dir.openFile(testing.io, path, .{});
+        file.close(testing.io);
+    }
+}
+
+test "archive caching preserves detached signatures in the package directory" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const allocator = fixture.arena.allocator();
+    const path = try testPackageArchive(&fixture, "produced.pkg.tar", "review-cli");
+    try fixture.tmp.dir.writeFile(testing.io, .{ .sub_path = "produced.pkg.tar.sig", .data = "signature fixture" });
+    var pending: std.ArrayList(PendingPackage) = .empty;
+    defer deinitPendingPackages(allocator, &pending);
+    var bases: std.StringHashMapUnmanaged(usize) = .empty;
+    defer bases.deinit(allocator);
+    try queuePendingPackage(allocator, &pending, &bases, "review-cli", .{ .version = "0", .aur_version = "2-1" }, null);
+    try fixture.pacman.selectBuiltArtifacts(&pending.items[0], fixture.pacman.zur_path, path);
+    const signature = try fixture.tmp.dir.readFileAlloc(testing.io, "review-cli/produced.pkg.tar.sig", allocator, .unlimited);
+    defer allocator.free(signature);
+    try testing.expectEqualStrings("signature fixture", signature);
 }
