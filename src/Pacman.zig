@@ -875,27 +875,27 @@ fn recordInstalledSnapshot(self: *Pacman, item: *const PendingPackage) !void {
 }
 
 fn compareUpdateAndInstall(self: *Pacman, item: *PendingPackage) !void {
+    var scratch: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer scratch.deinit();
+    const allocator = scratch.allocator();
     var previous = try self.loadInstalledSnapshot(item);
     defer if (previous) |*snapshot| snapshot.deinit(self.allocator);
     var old_files = if (previous) |snapshot|
-        try self.readSnapshotFiles(snapshot.source_path)
+        try self.readSnapshotFiles(allocator, snapshot.source_path)
     else
         SourceFiles.empty;
-    defer deinitSnapshotFiles(self.allocator, &old_files);
-    var new_files = try self.readSnapshotFiles(item.snapshot.?.source_path);
-    defer deinitSnapshotFiles(self.allocator, &new_files);
+    defer deinitSnapshotFiles(allocator, &old_files);
+    var new_files = try self.readSnapshotFiles(allocator, item.snapshot.?.source_path);
+    defer deinitSnapshotFiles(allocator, &new_files);
 
-    // A diff needs both the old and new snapshots present, each with a
-    // PKGBUILD to parse. If either is missing (no prior snapshot, or an
-    // unusual snapshot without a PKGBUILD), fall back to a plain install
-    // rather than silently skipping the package.
+    // Without an installed-source baseline, display every new source file.
     if (old_files.count() == 0 or new_files.count() == 0 or
         old_files.get("PKGBUILD") == null or new_files.get("PKGBUILD") == null)
     {
         return self.bareInstall(item, new_files);
     }
 
-    const at_least_one_diff = try self.reviewSnapshotChanges(old_files, new_files);
+    const at_least_one_diff = try self.reviewSnapshotChanges(allocator, old_files, new_files);
     if (at_least_one_diff) {
         try self.confirmInstall("\nContinue? [Y/n]: ");
     } else {
@@ -916,6 +916,7 @@ const SourceFiles = std.StringHashMapUnmanaged(SourceFile);
 
 fn reviewSnapshotChanges(
     self: *Pacman,
+    allocator: Allocator,
     old_files: SourceFiles,
     new_files: SourceFiles,
 ) !bool {
@@ -936,13 +937,13 @@ fn reviewSnapshotChanges(
             try self.print(":: Added {s}: {t} mode {o}\n", .{ file.key_ptr.*, new.kind, new.mode });
         }
         changed = true;
-        try self.printDiff(file.key_ptr.*, if (old) |previous| previous.contents else "", new.contents);
+        try self.printDiff(allocator, file.key_ptr.*, if (old) |previous| previous.contents else "", new.contents);
     }
     var old_iter = old_files.iterator();
     while (old_iter.next()) |file| {
         if (new_files.contains(file.key_ptr.*)) continue;
         changed = true;
-        try self.printDiff(file.key_ptr.*, file.value_ptr.contents, "");
+        try self.printDiff(allocator, file.key_ptr.*, file.value_ptr.contents, "");
     }
     return changed;
 }
@@ -951,18 +952,19 @@ fn reviewSnapshotChanges(
 // (longest common subsequence) to align unchanged lines.
 fn printDiff(
     self: *Pacman,
+    allocator: Allocator,
     name: []const u8,
     old_content: []const u8,
     new_content: []const u8,
 ) !void {
     var old_list: std.ArrayList([]const u8) = .empty;
-    defer old_list.deinit(self.allocator);
+    defer old_list.deinit(allocator);
     var new_list: std.ArrayList([]const u8) = .empty;
-    defer new_list.deinit(self.allocator);
+    defer new_list.deinit(allocator);
     var it = mem.splitScalar(u8, old_content, '\n');
-    while (it.next()) |line| try old_list.append(self.allocator, line);
+    while (it.next()) |line| try old_list.append(allocator, line);
     it = mem.splitScalar(u8, new_content, '\n');
-    while (it.next()) |line| try new_list.append(self.allocator, line);
+    while (it.next()) |line| try new_list.append(allocator, line);
     const old = old_list.items;
     const new = new_list.items;
     const n = old.len;
@@ -978,8 +980,8 @@ fn printDiff(
     }
 
     // LCS length table. dp[i][j] = length of LCS of old[i..] and new[j..].
-    const dp = try self.allocator.alloc(usize, (n + 1) * (m + 1));
-    defer self.allocator.free(dp);
+    const dp = try allocator.alloc(usize, (n + 1) * (m + 1));
+    defer allocator.free(dp);
     @memset(dp, 0);
     const row = struct {
         fn get(table: []usize, width: usize, r: usize) []usize {
@@ -1362,10 +1364,10 @@ fn snapshotFiles(
 ) !SourceFiles {
     const path = try self.snapshotPath(pkg_name, pkg_version);
     defer self.allocator.free(path);
-    return self.readSnapshotFiles(path);
+    return self.readSnapshotFiles(self.allocator, path);
 }
 
-fn readSnapshotFiles(self: *Pacman, path: []const u8) !SourceFiles {
+fn readSnapshotFiles(self: *Pacman, allocator: Allocator, path: []const u8) !SourceFiles {
     var dir = Dir.openDirAbsolute(self.io, path, .{
         .iterate = true,
         .follow_symlinks = false,
@@ -1380,8 +1382,8 @@ fn readSnapshotFiles(self: *Pacman, path: []const u8) !SourceFiles {
     try self.print(" reading files in {s}{s}{s}\n", .{ color.bold, path, color.reset });
 
     var files_map: SourceFiles = .empty;
-    errdefer deinitSnapshotFiles(self.allocator, &files_map);
-    var walker = try dir.walk(self.allocator);
+    errdefer deinitSnapshotFiles(allocator, &files_map);
+    var walker = try dir.walk(allocator);
     defer walker.deinit();
     while (try walker.next(self.io)) |node| {
         if (node.kind != .file and node.kind != .sym_link) continue;
@@ -1389,16 +1391,16 @@ fn readSnapshotFiles(self: *Pacman, path: []const u8) !SourceFiles {
         const file_contents = if (node.kind == .sym_link) target: {
             var buffer: [Dir.max_path_bytes]u8 = undefined;
             const len = try dir.readLink(self.io, node.path, &buffer);
-            break :target try self.allocator.dupe(u8, buffer[0..len]);
-        } else try dir.readFileAlloc(self.io, node.path, self.allocator, .unlimited);
+            break :target try allocator.dupe(u8, buffer[0..len]);
+        } else try dir.readFileAlloc(self.io, node.path, allocator, .unlimited);
 
         // Store raw file contents. Any indentation is applied only at
         // display time (bareInstall), so the update/diff path never copies
         // every snapshot file.
-        errdefer self.allocator.free(file_contents);
-        const copy_name = try self.allocator.dupe(u8, node.path);
-        errdefer self.allocator.free(copy_name);
-        try files_map.putNoClobber(self.allocator, copy_name, .{
+        errdefer allocator.free(file_contents);
+        const copy_name = try allocator.dupe(u8, node.path);
+        errdefer allocator.free(copy_name);
+        try files_map.putNoClobber(allocator, copy_name, .{
             .contents = file_contents,
             .kind = node.kind,
             .mode = stat.permissions.toMode(),
@@ -1737,7 +1739,7 @@ fn testSnapshotReview(name: []const u8, old: ?[]const u8, new: ?[]const u8) !boo
     }
     if (old) |content| try old_files.put(allocator, try allocator.dupe(u8, name), .{ .contents = try allocator.dupe(u8, content) });
     if (new) |content| try new_files.put(allocator, try allocator.dupe(u8, name), .{ .contents = try allocator.dupe(u8, content) });
-    return pacman.reviewSnapshotChanges(old_files, new_files);
+    return pacman.reviewSnapshotChanges(allocator, old_files, new_files);
 }
 
 test "snapshot review retains scripts larger than four kilobytes" {
@@ -2426,7 +2428,7 @@ test "installed snapshot records survive build mutations and use actual output v
     try build.writeFile(testing.io, .{ .sub_path = "PKGBUILD", .data = "mutated by makepkg\n" });
     var previous = (try fixture.pacman.loadInstalledSnapshot(&item)).?;
     defer previous.deinit(allocator);
-    var files = try fixture.pacman.readSnapshotFiles(previous.source_path);
+    var files = try fixture.pacman.readSnapshotFiles(allocator, previous.source_path);
     defer deinitSnapshotFiles(allocator, &files);
     try testing.expectEqualStrings("pkgname=review-cli\npkgver=2\npkgrel=1\n", files.get("PKGBUILD").?.contents);
     try testing.expectEqualStrings("echo original\n", files.get("nested/hook.sh").?.contents);
@@ -2444,17 +2446,17 @@ test "snapshot review detects permission and symlink target changes" {
     try fixture.tmp.dir.writeFile(testing.io, .{ .sub_path = "review/nested/hook", .data = "echo hi\n" });
     try fixture.tmp.dir.symLink(testing.io, "nested/hook", "review/link", .{});
     const path = try Dir.path.join(allocator, &.{ fixture.pacman.zur_path, "review" });
-    var before = try fixture.pacman.readSnapshotFiles(path);
+    var before = try fixture.pacman.readSnapshotFiles(allocator, path);
     defer deinitSnapshotFiles(allocator, &before);
     try fixture.tmp.dir.setFilePermissions(testing.io, "review/nested/hook", .fromMode(0o755), .{});
-    var executable = try fixture.pacman.readSnapshotFiles(path);
+    var executable = try fixture.pacman.readSnapshotFiles(allocator, path);
     defer deinitSnapshotFiles(allocator, &executable);
-    try testing.expect(try fixture.pacman.reviewSnapshotChanges(before, executable));
+    try testing.expect(try fixture.pacman.reviewSnapshotChanges(allocator, before, executable));
     try fixture.tmp.dir.deleteFile(testing.io, "review/link");
     try fixture.tmp.dir.symLink(testing.io, "another-target", "review/link", .{});
-    var relinked = try fixture.pacman.readSnapshotFiles(path);
+    var relinked = try fixture.pacman.readSnapshotFiles(allocator, path);
     defer deinitSnapshotFiles(allocator, &relinked);
-    try testing.expect(try fixture.pacman.reviewSnapshotChanges(executable, relinked));
+    try testing.expect(try fixture.pacman.reviewSnapshotChanges(allocator, executable, relinked));
     try testing.expectEqualStrings("another-target", relinked.get("link").?.contents);
 }
 
