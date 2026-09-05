@@ -8,4 +8,5 @@ test {
     _ = @import("Request.zig");
     _ = @import("aur.zig");
     _ = @import("color.zig");
+    _ = @import("review_text.zig");
 }

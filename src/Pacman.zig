@@ -19,6 +19,7 @@ const c = @cImport({
 const Alpm = @import("Alpm.zig");
 const aur = @import("aur.zig");
 const color = @import("color.zig");
+const review_text = @import("review_text.zig");
 const Request = @import("Request.zig");
 const Pkgbuild = @import("Pkgbuild.zig");
 const Snapshot = @import("Pacman/Snapshot.zig");
@@ -1052,8 +1053,8 @@ fn printDiff(
     // versions when alignment would exceed the memory budget.
     if (n + 1 > max_diff_cells / (m + 1)) {
         try self.print(":: {s} changed (complete old/new contents):\n", .{name});
-        for (old) |line| try self.print("- {s}\n", .{line});
-        for (new) |line| try self.print("+ {s}\n", .{line});
+        for (old) |line| try self.print("  - {s}\n", .{line});
+        for (new) |line| try self.print("  + {s}\n", .{line});
         return;
     }
 
@@ -1095,18 +1096,18 @@ fn printDiff(
             i += 1;
             j += 1;
         } else if (row(dp, m, i + 1)[j] >= row(dp, m, i)[j + 1]) {
-            try self.print("{s}- {s}{s}\n", .{ color.foreground_red, old[i], color.reset });
+            try self.print("  {s}- {s}{s}\n", .{ color.foreground_red, old[i], color.reset });
             i += 1;
         } else {
-            try self.print("{s}+ {s}{s}\n", .{ color.foreground_green, new[j], color.reset });
+            try self.print("  {s}+ {s}{s}\n", .{ color.foreground_green, new[j], color.reset });
             j += 1;
         }
     }
     while (i < n) : (i += 1) {
-        try self.print("{s}- {s}{s}\n", .{ color.foreground_red, old[i], color.reset });
+        try self.print("  {s}- {s}{s}\n", .{ color.foreground_red, old[i], color.reset });
     }
     while (j < m) : (j += 1) {
-        try self.print("{s}+ {s}{s}\n", .{ color.foreground_green, new[j], color.reset });
+        try self.print("  {s}+ {s}{s}\n", .{ color.foreground_green, new[j], color.reset });
     }
 }
 
@@ -1115,7 +1116,7 @@ fn isSourceField(name: []const u8) bool {
         (mem.startsWith(u8, name, "source_") and !mem.endsWith(u8, name, "()"));
 }
 
-fn printSourceLines(writer: *Io.Writer, value: []const u8, indentation: []const u8) !void {
+fn printListLines(writer: *Io.Writer, value: []const u8, indentation: []const u8) !void {
     var lines = mem.splitScalar(u8, value, '\n');
     while (lines.next()) |raw_line| {
         const line = mem.trim(u8, raw_line, " \t\r");
@@ -1139,13 +1140,14 @@ fn printPkgbuildFieldChange(
     change: []const u8,
 ) !void {
     if (!isSourceField(name)) {
-        return writer.print("{s}::{s} {s}{s}{s} was {s}: {s}\n", .{
+        return writer.print("{s}::{s} {s}{s}{s} was {s}:{s}{s}\n", .{
             color.bold_foreground_blue,
             color.reset,
             color.bold,
             name,
             color.reset,
             change,
+            if (mem.startsWith(u8, value, "\n")) "" else " ",
             value,
         });
     }
@@ -1171,10 +1173,10 @@ fn printPkgbuildFieldChange(
         color.reset,
         change,
     });
-    try printSourceLines(writer, normalized, "  ");
+    try printListLines(writer, normalized, "    ");
 }
 
-fn printBarePkgbuildSource(
+fn printBarePkgbuildList(
     writer: *Io.Writer,
     name: []const u8,
     value: []const u8,
@@ -1185,7 +1187,7 @@ fn printBarePkgbuildSource(
     }
 
     try writer.print("  {s}\n", .{name});
-    try printSourceLines(writer, normalized, "    ");
+    try printListLines(writer, normalized, "    ");
 }
 
 fn printBarePkgbuildFields(
@@ -1196,15 +1198,13 @@ fn printBarePkgbuildFields(
     var pkgbuild = Pkgbuild.init(allocator, file_contents);
     defer pkgbuild.deinit();
     if (!try pkgbuild.readForReview()) {
-        try writer.writeAll(file_contents);
-        if (!mem.endsWith(u8, file_contents, "\n")) try writer.writeByte('\n');
-        return;
+        return review_text.write(allocator, writer, file_contents, .{ .preserve_whitespace = true });
     }
     try pkgbuild.indentValues(2);
 
     var printed_source = false;
     if (pkgbuild.fields.get("source")) |source| {
-        try printBarePkgbuildSource(writer, "source", source.value);
+        try printBarePkgbuildList(writer, "source", source.value);
         printed_source = true;
     }
 
@@ -1215,7 +1215,7 @@ fn printBarePkgbuildFields(
         .{machineArch()},
     );
     if (pkgbuild.fields.get(source_arch_name)) |source| {
-        try printBarePkgbuildSource(writer, source_arch_name, source.value);
+        try printBarePkgbuildList(writer, source_arch_name, source.value);
         printed_source = true;
     }
 
@@ -1231,8 +1231,8 @@ fn printBarePkgbuildFields(
         // no shell expansion. Supporting variables and functions remain visible.
         if (isSourceField(name) and field.value_ptr.*.form == .array and
             mem.indexOfAny(u8, field.value_ptr.*.value, "$`\\[=") == null) continue;
-        if (isSourceField(name)) {
-            try printBarePkgbuildSource(writer, name, field.value_ptr.*.value);
+        if (isSourceField(name) or field.value_ptr.*.form == .array) {
+            try printBarePkgbuildList(writer, name, field.value_ptr.*.value);
         } else {
             try writer.print("  {s} {s}\n", .{ name, field.value_ptr.*.value });
         }
@@ -1254,7 +1254,11 @@ fn printSourceFile(allocator: Allocator, writer: *Io.Writer, name: []const u8, f
     if (mem.eql(u8, name, "PKGBUILD") and file.kind == .file) {
         try printBarePkgbuildFields(allocator, writer, file.contents);
     } else {
-        try writer.print("{s}\n", .{file.contents});
+        try review_text.write(allocator, writer, file.contents, .{
+            .preserve_whitespace = file.kind != .file or mem.endsWith(u8, name, ".patch") or
+                mem.endsWith(u8, name, ".diff") or mem.startsWith(u8, file.contents, "diff ") or
+                mem.indexOf(u8, file.contents, "\n@@ ") != null,
+        });
     }
 }
 
@@ -2003,7 +2007,7 @@ test "PKGBUILD review preserves valid Bash and unsupported statements" {
         .{ .contents = "package_foo-bar() { echo hello; }\n", .visible = "package_foo-bar()" },
         .{ .contents = "echo top-level-command\n", .visible = "echo top-level-command" },
         .{ .contents = "function package { echo alternate-syntax; }\n", .visible = "function package { echo alternate-syntax; }" },
-        .{ .contents = "package() {\ncat <<'END'\n}\nhello\nEND\n}\n", .visible = "cat <<'END'\n}\nhello\nEND" },
+        .{ .contents = "package() {\ncat <<'END'\n}\nhello\nEND\n}\n", .visible = "cat <<'END'\n  }\n  hello\n  END" },
     };
     for (cases) |case| {
         var output: Io.Writer.Allocating = .init(testing.allocator);
@@ -3043,7 +3047,7 @@ test "update review labels sources and retains changed function context" {
     const output = try fixture.tmp.dir.readFileAlloc(testing.io, "output", testing.allocator, .unlimited);
     defer testing.allocator.free(output);
     try testing.expect(mem.indexOf(u8, output, color.bold ++ "source" ++ color.reset ++
-        " was updated:\n  \"$_mirror/new.tar.gz\"\n  'fix.patch'\n") != null);
+        " was updated:\n    \"$_mirror/new.tar.gz\"\n    'fix.patch'\n") != null);
     try testing.expect(mem.indexOf(u8, output, color.bold ++ "_mirror" ++ color.reset ++
         " was updated: https://new.test") != null);
     try testing.expect(mem.indexOf(u8, output, color.bold ++ "install" ++ color.reset ++
@@ -3073,7 +3077,7 @@ test "printBarePkgbuildFields prints sources and every supporting field for revi
     const source_output = "  source 'https://example.com/testpkg.tar.gz'\n\n";
     const install_output = "  install testpkg.install\n";
     const function_output =
-        "  install()   {\n" ++
+        "  install() {\n" ++
         "    install -Dm755 testpkg \"$pkgdir/usr/bin/testpkg\"\n" ++
         "  }\n\n";
     try testing.expect(mem.startsWith(u8, output, source_output));
@@ -3104,7 +3108,7 @@ test "printBarePkgbuildFields formats multiline sources for review" {
         "    \"https://example.com/testpkg.tar.gz\"\n" ++
         "    'fix-build.patch'\n\n" ++
         "  pkgname testpkg\n" ++
-        "  package()   {\n" ++
+        "  package() {\n" ++
         "    install -Dm755 testpkg \"$pkgdir/usr/bin/testpkg\"\n" ++
         "  }\n\n";
     try testing.expectEqualStrings(expected, writer.buffered());
@@ -3123,8 +3127,8 @@ test "printUpdatedPkgbuildField formats multiline sources for review" {
     const expected =
         color.bold_foreground_blue ++ "::" ++ color.reset ++ " " ++
         color.bold ++ "source_x86_64" ++ color.reset ++ " was updated:\n" ++
-        "  \"https://example.com/testpkg.tar.gz\"\n" ++
-        "  'fix-build.patch'\n";
+        "    \"https://example.com/testpkg.tar.gz\"\n" ++
+        "    'fix-build.patch'\n";
     try testing.expectEqualStrings(expected, writer.buffered());
 }
 
@@ -3156,7 +3160,7 @@ test "printBarePkgbuildFields prints only the native architecture source" {
         &expected_buffer,
         "  source_{s} 'https://example.com/testpkg-{s}.tar.gz'\n\n" ++
             "  pkgname testpkg\n" ++
-            "  package()   {{\n" ++
+            "  package() {{\n" ++
             "    install -Dm755 testpkg \"$pkgdir/usr/bin/testpkg\"\n" ++
             "  }}\n\n",
         .{ expected_arch, expected_arch },
@@ -3249,7 +3253,16 @@ test "initial review falls back to complete text for unsupported shell syntax" {
         var output: Io.Writer.Allocating = .init(std.testing.allocator);
         defer output.deinit();
         try printSourceFile(std.testing.allocator, &output.writer, "PKGBUILD", .{ .contents = contents });
-        try std.testing.expect(mem.endsWith(u8, output.written(), contents));
+        const header_end = mem.indexOfScalarPos(u8, output.written(), 1, '\n').?;
+        var lines = mem.splitScalar(u8, output.written()[header_end + 1 ..], '\n');
+        var original: Io.Writer.Allocating = .init(std.testing.allocator);
+        defer original.deinit();
+        while (lines.next()) |line| {
+            if (line.len == 0 and lines.peek() == null) break;
+            try std.testing.expect(mem.startsWith(u8, line, "  "));
+            try original.writer.print("{s}\n", .{line[2..]});
+        }
+        try std.testing.expectEqualStrings(contents, original.written());
     }
 }
 
@@ -3349,11 +3362,230 @@ test "structured review propagates allocation failures without leaking" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, testReviewAllocations, .{});
 }
 
+test "PKGBUILD review uses two space levels and four space list items" {
+    const testing = std.testing;
+    const contents =
+        "pkgname=example\n" ++
+        "depends=('first'\n           'second'\n\t'third')\n" ++
+        "optdepends=(\n      'optional: some feature'\n'other: another feature'\n)\n" ++
+        "arch=('any')\n" ++
+        "build() {\n" ++
+        "      for file in *.patch; do\n" ++
+        "              patch -p1 \\\n" ++
+        "                      < \"$file\"\n" ++
+        "      done\n" ++
+        "\n" ++
+        "      make\n" ++
+        "}\n" ++
+        "package() {\n" ++
+        "\tif true; then\n" ++
+        "\t\tmake install\n" ++
+        "\tfi\n" ++
+        "}\n";
+    var output: Io.Writer.Allocating = .init(testing.allocator);
+    defer output.deinit();
+    try printBarePkgbuildFields(testing.allocator, &output.writer, contents);
+
+    try testing.expectEqualStrings(
+        "  pkgname example\n" ++
+            "  depends\n    'first'\n    'second'\n    'third'\n" ++
+            "  optdepends\n    'optional: some feature'\n    'other: another feature'\n" ++
+            "  arch 'any'\n" ++
+            "  build() {\n" ++
+            "    for file in *.patch; do\n" ++
+            "      patch -p1 \\\n" ++
+            "        < \"$file\"\n" ++
+            "    done\n" ++
+            "  \n" ++
+            "    make\n" ++
+            "  }\n\n" ++
+            "  package() {\n" ++
+            "    if true; then\n" ++
+            "      make install\n" ++
+            "    fi\n" ++
+            "  }\n\n",
+        output.written(),
+    );
+}
+
+test "PKGBUILD review adds a margin to complete fallback text" {
+    const testing = std.testing;
+    var output: Io.Writer.Allocating = .init(testing.allocator);
+    defer output.deinit();
+    try printBarePkgbuildFields(testing.allocator, &output.writer, "echo unsupported\n\npkgname=example");
+    try testing.expectEqualStrings("  echo unsupported\n  \n  pkgname=example\n", output.written());
+}
+
+test "PKGBUILD review preserves literal whitespace while normalizing code" {
+    const testing = std.testing;
+    const contents =
+        "pkgdesc='first\n\tliteral'\n" ++
+        "package() {\n" ++
+        "      # Don't treat this apostrophe as a quote.\n" ++
+        "      printf '%s\\n' \"first\n       second\"\n" ++
+        "      echo done\n" ++
+        "}\n";
+    var output: Io.Writer.Allocating = .init(testing.allocator);
+    defer output.deinit();
+    try printBarePkgbuildFields(testing.allocator, &output.writer, contents);
+    try testing.expectEqualStrings(
+        "  pkgdesc 'first\n  \tliteral'\n" ++
+            "  package() {\n" ++
+            "    # Don't treat this apostrophe as a quote.\n" ++
+            "    printf '%s\\n' \"first\n         second\"\n" ++
+            "    echo done\n" ++
+            "  }\n\n",
+        output.written(),
+    );
+}
+
+test "PKGBUILD review indents updated and removed multiline lists" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.pacman.printPkgbuildChanges(
+        testing.allocator,
+        "depends=('old')\noptdepends=('first'\n    'second')\n",
+        "depends=('new'\n          'another')\n",
+    );
+    try fixture.pacman.stdout().flush();
+    const output = try fixture.tmp.dir.readFileAlloc(testing.io, "output", testing.allocator, .unlimited);
+    defer testing.allocator.free(output);
+    try testing.expectEqualStrings(
+        color.bold_foreground_blue ++ "::" ++ color.reset ++ " " ++
+            color.bold ++ "depends" ++ color.reset ++ " was updated:\n" ++
+            "    'new'\n    'another'\n" ++
+            color.bold_foreground_blue ++ "::" ++ color.reset ++ " " ++
+            color.bold ++ "optdepends" ++ color.reset ++ " was removed:\n" ++
+            "    'first'\n    'second'\n",
+        output,
+    );
+}
+
 fn testReviewAllocations(allocator: Allocator) !void {
     var buffer: [1024]u8 = undefined;
     var output = Io.Writer.fixed(&buffer);
     try printSourceFile(allocator, &output, "PKGBUILD", .{
-        .contents = "pkgname=example\nsource=(one two)\npackage() { echo hello; }\n",
+        .contents = "pkgdesc='first\nsecond'\nsource=(one\n two)\npackage() {\n    echo hello\n}\n",
     });
     try std.testing.expect(mem.indexOf(u8, output.buffered(), "package()") != null);
+}
+
+test "file review normalizes install scripts and configuration indentation" {
+    const testing = std.testing;
+    const cases = [_]struct { name: []const u8, contents: []const u8, expected: []const u8 }{
+        .{
+            .name = "example.install",
+            .contents = "post_install() {\n      if true; then\n              echo installed\n      fi\n}\n" ++
+                "\npost_remove() {\n\techo removed\n}",
+            .expected = "  post_install() {\n    if true; then\n      echo installed\n    fi\n  }\n" ++
+                "  \n  post_remove() {\n    echo removed\n  }\n",
+        },
+        .{
+            .name = "prepare.sh",
+            .contents = "#!/bin/bash\nfiles=(\n        'one.patch'\n        'two.patch'\n)\n" ++
+                "printf '%s\\n' \"first\n       literal\"\n",
+            .expected = "  #!/bin/bash\n  files=(\n    'one.patch'\n    'two.patch'\n  )\n" ++
+                "  printf '%s\\n' \"first\n         literal\"\n",
+        },
+        .{
+            .name = "config.json",
+            .contents = "{\n    \"files\": [\n        \"one\",\n        \"two\"\n    ]\n}\n",
+            .expected = "  {\n    \"files\": [\n      \"one\",\n      \"two\"\n    ]\n  }\n",
+        },
+        .{
+            .name = "example.desktop",
+            .contents = "[Desktop Entry]\nName=Example\nExec=example\n",
+            .expected = "  [Desktop Entry]\n  Name=Example\n  Exec=example\n",
+        },
+    };
+    for (cases) |case| {
+        var output: Io.Writer.Allocating = .init(testing.allocator);
+        defer output.deinit();
+        try printSourceFile(testing.allocator, &output.writer, case.name, .{ .contents = case.contents });
+        const header_end = mem.indexOfScalarPos(u8, output.written(), 1, '\n').?;
+        try testing.expectEqualStrings(case.expected, output.written()[header_end + 1 ..]);
+    }
+}
+
+test "file review preserves patch and heredoc whitespace inside the margin" {
+    const testing = std.testing;
+    const cases = [_]struct { name: []const u8, contents: []const u8, expected: []const u8 }{
+        .{
+            .name = "fix.patch",
+            .contents = "--- a/Makefile\n+++ b/Makefile\n@@ -1,2 +1,2 @@\n all:\n-\told\n+\tnew\n",
+            .expected = "  --- a/Makefile\n  +++ b/Makefile\n  @@ -1,2 +1,2 @@\n   all:\n  -\told\n  +\tnew\n",
+        },
+        .{
+            .name = "setup.install",
+            .contents = "post_install() {\n  cat <<'END'\n       first\n\tsecond\nEND\n}\n",
+            .expected = "  post_install() {\n    cat <<'END'\n         first\n  \tsecond\n  END\n  }\n",
+        },
+    };
+    for (cases) |case| {
+        var output: Io.Writer.Allocating = .init(testing.allocator);
+        defer output.deinit();
+        try printSourceFile(testing.allocator, &output.writer, case.name, .{ .contents = case.contents });
+        const header_end = mem.indexOfScalarPos(u8, output.written(), 1, '\n').?;
+        try testing.expectEqualStrings(case.expected, output.written()[header_end + 1 ..]);
+    }
+}
+
+test "file review handles empty files trailing newlines and symlinks" {
+    const testing = std.testing;
+    const cases = [_]struct { file: SourceFile, expected: []const u8 }{
+        .{ .file = .{ .contents = "" }, .expected = "" },
+        .{ .file = .{ .contents = "\n" }, .expected = "  \n" },
+        .{ .file = .{ .contents = "first\n\n" }, .expected = "  first\n  \n" },
+        .{ .file = .{ .contents = "first" }, .expected = "  first\n" },
+        .{ .file = .{ .contents = "../target", .kind = .sym_link }, .expected = "  ../target\n" },
+    };
+    for (cases) |case| {
+        var output: Io.Writer.Allocating = .init(testing.allocator);
+        defer output.deinit();
+        try printSourceFile(testing.allocator, &output.writer, "example", case.file);
+        const header_end = mem.indexOfScalarPos(u8, output.written(), 1, '\n').?;
+        try testing.expectEqualStrings(case.expected, output.written()[header_end + 1 ..]);
+    }
+}
+
+test "file review indents diffs without hiding whitespace changes" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.pacman.printDiff(testing.allocator, "example.install", "    echo unchanged\n", "\techo unchanged\n");
+    try fixture.pacman.stdout().flush();
+    const output = try fixture.tmp.dir.readFileAlloc(testing.io, "output", testing.allocator, .unlimited);
+    defer testing.allocator.free(output);
+    try testing.expect(mem.endsWith(u8, output, "  " ++ color.foreground_red ++ "-     echo unchanged" ++ color.reset ++ "\n" ++
+        "  " ++ color.foreground_green ++ "+ \techo unchanged" ++ color.reset ++ "\n"));
+}
+
+test "file review indents complete versions when diff alignment is too large" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.pacman.printDiff(testing.allocator, "large.txt", "old\n" ** 1024, "new\n" ** 1024);
+    try fixture.pacman.stdout().flush();
+    const output = try fixture.tmp.dir.readFileAlloc(testing.io, "output", testing.allocator, .unlimited);
+    defer testing.allocator.free(output);
+    try testing.expect(mem.startsWith(u8, output, ":: large.txt changed (complete old/new contents):\n"));
+    try testing.expectEqual(@as(usize, 1024), mem.count(u8, output, "  - old\n"));
+    try testing.expectEqual(@as(usize, 1024), mem.count(u8, output, "  + new\n"));
+}
+
+test "file review propagates allocation failures without leaking" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, testFileReviewAllocations, .{});
+}
+
+fn testFileReviewAllocations(allocator: Allocator) !void {
+    var buffer: [1024]u8 = undefined;
+    var output = Io.Writer.fixed(&buffer);
+    try printSourceFile(allocator, &output, "example.install", .{
+        .contents = "post_install() {\n    if true; then\n        echo hello\n    fi\n}\n",
+    });
+    try std.testing.expect(mem.endsWith(u8, output.buffered(), "  post_install() {\n    if true; then\n      echo hello\n    fi\n  }\n"));
 }

@@ -7,6 +7,8 @@ const mem = std.mem;
 const Allocator = mem.Allocator;
 const log = std.log.scoped(.pkgbuild);
 
+const review_text = @import("review_text.zig");
+
 // Supported forms: name=value, name=( ... ), name() { ... }, package_foo() { ... }.
 // $var/${var}, command substitution, and conditionals are left as literal text.
 // Quotes are preserved. Unquoted array whitespace collapses to a single space.
@@ -516,25 +518,48 @@ pub fn remainingText(self: *const Pkgbuild, allocator: Allocator) Allocator.Erro
     return try remaining.toOwnedSlice(allocator);
 }
 
-/// Prefix every line of function-body fields with `spaces_count` spaces.
+/// Normalize display indentation to `spaces_count` per level. The first line
+/// follows a field label; subsequent lines include the outer review margin.
+/// Original statements remain in `Content.source` for comparison.
 pub fn indentValues(self: *Pkgbuild, spaces_count: usize) Allocator.Error!void {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(self.allocator);
-
-    var fields_iter = self.fields.iterator();
-    while (fields_iter.next()) |field| {
-        if (!mem.endsWith(u8, field.key_ptr.*, "()")) continue;
+    for (self.fields.values()) |field| {
+        if (mem.indexOfScalar(u8, field.value, '\n') == null) continue;
 
         buf.clearRetainingCapacity();
-        var lines_iter = mem.splitScalar(u8, field.value_ptr.*.value, '\n');
+        var first_line = true;
+        var lines_iter = mem.splitScalar(u8, field.value, '\n');
         while (lines_iter.next()) |line| {
-            try buf.appendNTimes(self.allocator, ' ', spaces_count);
-            try buf.appendSlice(self.allocator, line);
-            try buf.append(self.allocator, '\n');
+            switch (field.form) {
+                .array => {
+                    const item = mem.trim(u8, line, " \t\r");
+                    if (item.len == 0) continue;
+                    try buf.append(self.allocator, '\n');
+                    try buf.appendNTimes(self.allocator, ' ', spaces_count * 2);
+                    try buf.appendSlice(self.allocator, item);
+                },
+                .scalar => {
+                    // Whitespace in a multiline scalar can be literal data.
+                    if (!first_line) {
+                        try buf.append(self.allocator, '\n');
+                        try buf.appendNTimes(self.allocator, ' ', spaces_count);
+                    }
+                    try buf.appendSlice(self.allocator, line);
+                },
+                .function => {
+                    try review_text.append(self.allocator, &buf, field.value, .{
+                        .spaces_count = spaces_count,
+                        .inline_first = true,
+                    });
+                    break;
+                },
+            }
+            first_line = false;
         }
         const indented = try buf.toOwnedSlice(self.allocator);
-        self.allocator.free(field.value_ptr.*.value);
-        field.value_ptr.*.value = indented;
+        self.allocator.free(field.value);
+        field.value = indented;
     }
 }
 
@@ -725,7 +750,7 @@ test "readLines parses a real google-chrome-dev PKGBUILD" {
     try testing.expect(mem.indexOf(u8, package_body, "product_logo_") != null);
 }
 
-test "indentValues prefixes every function-body line" {
+test "indentValues normalizes function-body indentation" {
     const file_contents =
         \\pkgname=google-chrome-dev
         \\package() {
@@ -740,9 +765,9 @@ test "indentValues prefixes every function-body line" {
     try pkgbuild.indentValues(2);
 
     const expected =
-        "  {\n" ++
-        "        msg2 \"Extracting the data.tar.xz...\"\n" ++
-        "        bsdtar -xf data.tar.xz -C \"$pkgdir/\"\n" ++
+        "{\n" ++
+        "    msg2 \"Extracting the data.tar.xz...\"\n" ++
+        "    bsdtar -xf data.tar.xz -C \"$pkgdir/\"\n" ++
         "  }\n";
     try testing.expectEqualStrings(expected, pkgbuild.get("package()").?);
 }
@@ -766,8 +791,8 @@ test "indentValues keeps multiple function bodies independent" {
     const build_val = pkgbuild.get("build()").?;
     const package_val = pkgbuild.get("package()").?;
 
-    try testing.expectEqualStrings("  {\n      make\n  }\n", build_val);
-    try testing.expectEqualStrings("  {\n      make install\n  }\n", package_val);
+    try testing.expectEqualStrings("{\n    make\n  }\n", build_val);
+    try testing.expectEqualStrings("{\n    make install\n  }\n", package_val);
 }
 
 test "readLines preserves a minimal function body" {
