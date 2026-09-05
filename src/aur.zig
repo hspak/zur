@@ -19,11 +19,13 @@ pub const snapshot = "https://aur.archlinux.org/cgit/aur.git/snapshot";
 pub const SearchBy = enum {
     name,
     name_desc,
+    provides,
 
     fn field(self: SearchBy) []const u8 {
         return switch (self) {
             .name => "name",
             .name_desc => "name-desc",
+            .provides => "provides",
         };
     }
 };

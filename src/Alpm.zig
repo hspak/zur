@@ -37,10 +37,15 @@ const repos = [_][*:0]const u8{
 
 const sig_level = alpm.ALPM_SIG_PACKAGE_OPTIONAL | alpm.ALPM_SIG_DATABASE_OPTIONAL;
 
-/// Open a libalpm handle and register the sync repos. Expensive; reuse one instance.
-pub fn init(allocator: std.mem.Allocator) Error!Alpm {
+pub const Options = struct {
+    root: [:0]const u8 = "/",
+    db_path: [:0]const u8 = "/var/lib/pacman/",
+};
+
+/// Open a libalpm handle and register the sync repos. Paths are borrowed during initialization.
+pub fn init(allocator: std.mem.Allocator, options: Options) Error!Alpm {
     var err: alpm.alpm_errno_t = 0;
-    const handle = alpm.alpm_initialize("/", "/var/lib/pacman/", &err) orelse {
+    const handle = alpm.alpm_initialize(options.root, options.db_path, &err) orelse {
         return error.NoHandle;
     };
     errdefer _ = alpm.alpm_release(handle);
@@ -113,6 +118,77 @@ pub fn isInstalled(self: *Alpm, name: []const u8) Error!bool {
     return alpm.alpm_db_get_pkg(self.local_db, @ptrCast(name_cstr.ptr)) != null;
 }
 
+/// Return an installed package satisfying the complete dependency, including
+/// versioned provisions. The name is borrowed until this handle is released.
+pub fn installedSatisfier(self: *Alpm, dependency: []const u8) Error!?[]const u8 {
+    const expression = try self.allocator.dupeZ(u8, dependency);
+    defer self.allocator.free(expression);
+    const cache = alpm.alpm_db_get_pkgcache(self.local_db);
+    const pkg = alpm.alpm_find_satisfier(cache, expression) orelse return null;
+    return std.mem.span(alpm.alpm_pkg_get_name(pkg));
+}
+
+/// Whether a registered binary repository can satisfy the complete dependency.
+pub fn syncSatisfies(self: *Alpm, dependency: []const u8) Error!bool {
+    const expression = try self.allocator.dupeZ(u8, dependency);
+    defer self.allocator.free(expression);
+    var dbs = alpm.alpm_get_syncdbs(self.handle);
+    while (dbs != null) : (dbs = dbs.*.next) {
+        const db: *alpm.alpm_db_t = @ptrCast(dbs.*.data.?);
+        if (alpm.alpm_find_satisfier(alpm.alpm_db_get_pkgcache(db), expression) != null) return true;
+    }
+    return false;
+}
+
+/// Match remote metadata using libalpm's dependency parser and version ordering.
+/// All input strings are borrowed for the duration of the call.
+pub fn satisfies(
+    allocator: std.mem.Allocator,
+    dependency: []const u8,
+    name: []const u8,
+    version: []const u8,
+    provides: []const []const u8,
+) Error!bool {
+    const expression = try allocator.dupeZ(u8, dependency);
+    defer allocator.free(expression);
+    const dep: *alpm.alpm_depend_t = alpm.alpm_dep_from_string(expression) orelse return error.OutOfMemory;
+    defer alpm.alpm_dep_free(dep);
+    if (std.mem.eql(u8, std.mem.span(dep.name), name) and
+        try versionSatisfies(allocator, dep, version)) return true;
+
+    for (provides) |provision| {
+        const provision_z = try allocator.dupeZ(u8, provision);
+        defer allocator.free(provision_z);
+        const provided: *alpm.alpm_depend_t = alpm.alpm_dep_from_string(provision_z) orelse return error.OutOfMemory;
+        defer alpm.alpm_dep_free(provided);
+        if (!std.mem.eql(u8, std.mem.span(dep.name), std.mem.span(provided.name))) continue;
+        if (dep.mod == alpm.ALPM_DEP_MOD_ANY) return true;
+        // Unversioned provisions cannot satisfy a versioned dependency.
+        if (provided.mod != alpm.ALPM_DEP_MOD_EQ) continue;
+        if (try versionSatisfies(allocator, dep, std.mem.span(provided.version))) return true;
+    }
+    return false;
+}
+
+fn versionSatisfies(
+    allocator: std.mem.Allocator,
+    dep: *const alpm.alpm_depend_t,
+    version: []const u8,
+) Error!bool {
+    if (dep.mod == alpm.ALPM_DEP_MOD_ANY) return true;
+    const version_z = try allocator.dupeZ(u8, version);
+    defer allocator.free(version_z);
+    const comparison = alpm.alpm_pkg_vercmp(version_z, dep.version);
+    return switch (dep.mod) {
+        alpm.ALPM_DEP_MOD_EQ => comparison == 0,
+        alpm.ALPM_DEP_MOD_GE => comparison >= 0,
+        alpm.ALPM_DEP_MOD_LE => comparison <= 0,
+        alpm.ALPM_DEP_MOD_GT => comparison > 0,
+        alpm.ALPM_DEP_MOD_LT => comparison < 0,
+        else => unreachable, // alpm_dep_from_string returns a defined comparison.
+    };
+}
+
 // True if `name` appears in any of the registered sync database caches.
 // alpm_db_get_pkg wants a C string, so this makes a sentinel copy (like
 // isInstalled) rather than trusting that `name` is already terminated.
@@ -166,5 +242,35 @@ test "isNewerThan follows libalpm version ordering" {
             case.newer,
             try isNewerThan(testing.allocator, case.candidate, case.installed),
         );
+    }
+}
+
+test "satisfies uses dependency constraints and provision versions" {
+    const cases = [_]struct {
+        dependency: []const u8,
+        version: []const u8,
+        provides: []const []const u8 = &.{},
+        expected: bool,
+    }{
+        .{ .dependency = "foo>=2", .version = "1", .expected = false },
+        .{ .dependency = "foo>=2", .version = "2", .expected = true },
+        .{ .dependency = "foo<2", .version = "2", .expected = false },
+        .{ .dependency = "foo<=2", .version = "2", .expected = true },
+        .{ .dependency = "foo>2", .version = "3", .expected = true },
+        .{ .dependency = "foo=2", .version = "3", .expected = false },
+        .{ .dependency = "foo>=2:1", .version = "1:99", .expected = false },
+        .{ .dependency = "virtual", .version = "99", .provides = &.{"virtual"}, .expected = true },
+        .{ .dependency = "virtual>=2", .version = "99", .provides = &.{"virtual"}, .expected = false },
+        .{ .dependency = "virtual>=2", .version = "99", .provides = &.{"virtual=1"}, .expected = false },
+        .{ .dependency = "virtual>=2", .version = "1", .provides = &.{"virtual=2"}, .expected = true },
+    };
+    for (cases) |case| {
+        try testing.expectEqual(case.expected, try satisfies(
+            testing.allocator,
+            case.dependency,
+            "foo",
+            case.version,
+            case.provides,
+        ));
     }
 }

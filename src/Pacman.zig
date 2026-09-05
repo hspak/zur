@@ -71,6 +71,9 @@ const ErrorSet =
         EmptyDependency,
         VariableDependency,
         TarCreate,
+        UnsatisfiedDependency,
+        DependencyCycle,
+        DependencyConflict,
     };
 pub const Error = ErrorSet;
 
@@ -84,7 +87,9 @@ zur_path: []const u8,
 zur_pkg_dir: []const u8,
 updates: usize = 0,
 // Package bases already resolved this run, so dep recursion cannot loop.
-aur_deps_done: std.StringHashMapUnmanaged(void) = .empty,
+aur_deps_done: std.StringHashMapUnmanaged(enum { visiting, done }) = .empty,
+aur_cache: std.StringHashMapUnmanaged(?aur.Info) = .empty,
+provider_cache: std.StringHashMapUnmanaged([]aur.Info) = .empty,
 // Lazily-initialized libalpm handle (see getAlpm).
 alpm_state: ?Alpm = null,
 // Persisted HTTP client (see getRequest).
@@ -298,6 +303,15 @@ pub fn deinit(self: *Pacman) void {
     }
     self.pkgs.deinit(self.allocator);
     self.aur_deps_done.deinit(self.allocator);
+    var cached = self.aur_cache.keyIterator();
+    while (cached.next()) |key| self.allocator.free(key.*);
+    self.aur_cache.deinit(self.allocator);
+    var providers = self.provider_cache.iterator();
+    while (providers.next()) |entry| {
+        self.allocator.free(entry.key_ptr.*);
+        self.allocator.free(entry.value_ptr.*);
+    }
+    self.provider_cache.deinit(self.allocator);
     if (self.alpm_state) |*state| state.deinit();
     if (self.request_state) |*req| req.deinit();
     self.* = undefined;
@@ -305,7 +319,7 @@ pub fn deinit(self: *Pacman) void {
 
 fn getAlpm(self: *Pacman) !*Alpm {
     if (self.alpm_state == null) {
-        self.alpm_state = try Alpm.init(self.allocator);
+        self.alpm_state = try Alpm.init(self.allocator, .{});
     }
     return &self.alpm_state.?;
 }
@@ -384,6 +398,7 @@ pub fn fetchRemoteAurVersions(self: *Pacman) Error!void {
         return error.ZeroResultsFromAurQuery;
     }
     for (self.aur_resp.?.results) |result| {
+        try self.cacheAurInfo(result.name, result);
         // Skip results the AUR returns for packages we didn't ask about
         // (e.g. a dependency that also came back) rather than crashing.
         const curr_pkg = self.pkgs.get(result.name) orelse continue;
@@ -498,7 +513,12 @@ pub fn processOutOfDate(self: *Pacman) Error!void {
                     pkg.value_ptr.*.aur_version.?,
                     color.reset,
                 });
-                try self.aur_deps_done.put(self.allocator, pkg.key_ptr.*, {});
+                try self.queuePackageWithDeps(
+                    &pending,
+                    &queued_bases,
+                    pkg.key_ptr.*,
+                    pkg.value_ptr.*.*,
+                );
                 try queuePendingPackage(
                     self.allocator,
                     &pending,
@@ -564,39 +584,35 @@ pub fn processOutOfDate(self: *Pacman) Error!void {
     }
 }
 
-// Official/repo deps are left for `makepkg -s`. Mark `pkg_name` before
-// recursion so dependency cycles terminate.
+// Visit all scheduled AUR dependencies before appending their consumer.
 fn queuePackageWithDeps(
     self: *Pacman,
     pending: *std.ArrayList(PendingPackage),
     queued_bases: *std.StringHashMapUnmanaged(usize),
     pkg_name: []const u8,
     pkg: Package,
-) !void {
-    if (self.aur_deps_done.contains(pkg_name)) {
+) Error!void {
+    if (self.aur_deps_done.get(pkg_name)) |visit| {
+        if (visit == .visiting) return error.DependencyCycle;
         try queuePendingPackage(self.allocator, pending, queued_bases, pkg_name, pkg, null);
         return;
     }
-    try self.aur_deps_done.put(self.allocator, pkg_name, {});
+    try self.aur_deps_done.put(self.allocator, pkg_name, .visiting);
+    errdefer _ = self.aur_deps_done.remove(pkg_name);
 
     if (try self.getAurInfo(pkg_name)) |info| {
         const dep_lists = [_]?[][]const u8{ info.depends, info.make_depends };
         for (dep_lists) |maybe_list| {
-            const list = maybe_list orelse continue;
-            for (list) |dep| {
-                const dep_name = normalizeDepName(self.allocator, dep) catch continue;
-                defer self.allocator.free(dep_name);
-                if (dep_name.len == 0) continue;
-
-                if (self.aur_deps_done.contains(dep_name)) continue;
-                if (try (try self.getAlpm()).isInstalled(dep_name)) continue;
-                const dep_info = (try self.getAurInfo(dep_name)) orelse continue;
-
-                var dep_pkg = Package.init("0");
+            for (maybe_list orelse continue) |dep| {
+                const dep_info = (try self.resolveDependency(dep)) orelse continue;
+                // Outputs from this base are built together. A runtime edge
+                // within the base must not turn into a recursive build cycle.
+                if (mem.eql(u8, dep_info.package_base, info.package_base)) continue;
+                var dep_pkg = if (self.pkgs.get(dep_info.name)) |tracked|
+                    tracked.*
+                else
+                    Package.init("0");
                 dep_pkg.aur_version = dep_info.version;
-                // A split-package dep shares its base's snapshot; set base_name
-                // (mirroring fetchRemoteAurVersions) so the right archive and
-                // directory are used.
                 if (!mem.eql(u8, dep_info.name, dep_info.package_base)) {
                     dep_pkg.base_name = dep_info.package_base;
                 }
@@ -609,14 +625,96 @@ fn queuePackageWithDeps(
             }
         }
     }
-
     try queuePendingPackage(self.allocator, pending, queued_bases, pkg_name, pkg, null);
+    self.aur_deps_done.getPtr(pkg_name).?.* = .done;
 }
 
-// Full AUR info for `name`, or null if it is an official/repo dependency.
-fn getAurInfo(self: *Pacman, name: []const u8) !?aur.Info {
-    if (self.aurInfoFor(name)) |info| return info;
-    const info = try aur.queryName(self.allocator, self.getRequest(), name);
+fn infoSatisfies(self: *Pacman, dependency: []const u8, info: aur.Info) Error!bool {
+    return Alpm.satisfies(
+        self.allocator,
+        dependency,
+        info.name,
+        info.version,
+        info.provides orelse &.{},
+    );
+}
+
+// Null means the installed system or makepkg's binary-repository resolver can
+// satisfy this edge. A returned package must precede its consumer in our plan.
+fn resolveDependency(self: *Pacman, dependency: []const u8) Error!?aur.Info {
+    const db = try self.getAlpm();
+    if (try db.installedSatisfier(dependency)) |installed_name| {
+        if (self.pkgs.get(installed_name)) |pkg| {
+            if (pkg.requires_update) {
+                const info = (try self.getAurInfo(installed_name)) orelse return error.UnsatisfiedDependency;
+                if (!try self.infoSatisfies(dependency, info)) return error.DependencyConflict;
+                return info;
+            }
+        }
+        return null;
+    }
+
+    // Prefer a root already requested for installation, including providers.
+    var roots = self.pkgs.iterator();
+    while (roots.next()) |entry| {
+        if (!entry.value_ptr.*.requires_update) continue;
+        const info = (try self.getAurInfo(entry.key_ptr.*)) orelse continue;
+        if (try self.infoSatisfies(dependency, info)) return info;
+    }
+    if (try db.syncSatisfies(dependency)) return null;
+
+    const name = try normalizeDepName(self.allocator, dependency);
+    defer self.allocator.free(name);
+    if (try self.getAurInfo(name)) |info| {
+        if (try self.infoSatisfies(dependency, info)) return info;
+    }
+    const providers = try self.getProviders(name);
+    for (providers) |info| {
+        if (!try self.infoSatisfies(dependency, info)) continue;
+        try self.print(":: {s} provides {s}\n", .{ info.name, dependency });
+        return info;
+    }
+    try self.print("Cannot satisfy dependency: {s}\n", .{dependency});
+    return error.UnsatisfiedDependency;
+}
+
+fn getProviders(self: *Pacman, name: []const u8) Error![]aur.Info {
+    if (self.provider_cache.get(name)) |infos| return infos;
+    const response = try aur.search(self.allocator, self.getRequest(), name, .provides);
+    defer self.allocator.free(response.results);
+    var infos: std.ArrayList(aur.Info) = .empty;
+    defer infos.deinit(self.allocator);
+    for (response.results) |result| {
+        if (try self.getAurInfo(result.name)) |info| try infos.append(self.allocator, info);
+    }
+    // RPC result order is not a provider-selection policy.
+    std.mem.sort(aur.Info, infos.items, {}, struct {
+        fn lessThan(_: void, left: aur.Info, right: aur.Info) bool {
+            return mem.lessThan(u8, left.name, right.name);
+        }
+    }.lessThan);
+    const owned = try infos.toOwnedSlice(self.allocator);
+    errdefer self.allocator.free(owned);
+    const key = try self.allocator.dupe(u8, name);
+    errdefer self.allocator.free(key);
+    try self.provider_cache.put(self.allocator, key, owned);
+    return owned;
+}
+
+fn cacheAurInfo(self: *Pacman, name: []const u8, info: ?aur.Info) Error!void {
+    if (self.aur_cache.getPtr(name)) |cached| {
+        cached.* = info;
+        return;
+    }
+    const key = try self.allocator.dupe(u8, name);
+    errdefer self.allocator.free(key);
+    try self.aur_cache.putNoClobber(self.allocator, key, info);
+}
+
+fn getAurInfo(self: *Pacman, name: []const u8) Error!?aur.Info {
+    if (self.aur_cache.get(name)) |cached| return cached;
+    const info = self.aurInfoFor(name) orelse try aur.queryName(self.allocator, self.getRequest(), name);
+    try self.cacheAurInfo(name, info);
     return info;
 }
 
@@ -1852,4 +1950,205 @@ test "PKGBUILD review preserves valid Bash and unsupported statements" {
         try printBarePkgbuildFields(testing.allocator, &output.writer, case.contents);
         try testing.expect(mem.indexOf(u8, output.written(), case.visible) != null);
     }
+}
+
+test "dependency planning upgrades an insufficient installed version before its consumer" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const allocator = fixture.arena.allocator();
+    try testing.expect(try fixture.pacman.alpm_state.?.isInstalled("review-lib"));
+    var dependencies = [_][]const u8{"review-lib>=2"};
+    var infos = [_]aur.Info{
+        testAurInfo("review-app", "2"),
+        testAurInfo("review-lib", "2"),
+    };
+    infos[0].depends = &dependencies;
+    fixture.pacman.aur_resp = .{
+        .version = 5,
+        .type = "multiinfo",
+        .resultcount = infos.len,
+        .results = try allocator.dupe(aur.Info, &infos),
+    };
+    var pending: std.ArrayList(PendingPackage) = .empty;
+    defer deinitPendingPackages(allocator, &pending);
+    var bases: std.StringHashMapUnmanaged(usize) = .empty;
+    defer bases.deinit(allocator);
+    try fixture.pacman.queuePackageWithDeps(&pending, &bases, "review-app", .{
+        .version = "1",
+        .aur_version = "2",
+    });
+    try testing.expectEqual(@as(usize, 2), pending.items.len);
+    try testing.expectEqualStrings("review-lib", pending.items[0].name);
+    try testing.expectEqualStrings("review-app", pending.items[1].name);
+}
+
+fn testAurInfo(name: []const u8, version: []const u8) aur.Info {
+    return .{
+        .id = 1,
+        .name = name,
+        .package_base_id = 1,
+        .package_base = name,
+        .version = version,
+        .url = "",
+        .num_votes = 0,
+        .popularity = 0,
+        .first_submitted = 0,
+        .last_modified = 0,
+        .url_path = "",
+    };
+}
+
+const TestDependencies = struct {
+    arena: std.heap.ArenaAllocator,
+    tmp: std.testing.TmpDir,
+    environ: std.process.Environ.Map,
+    output: File,
+    output_buffer: [4096]u8 = undefined,
+    pacman: Pacman,
+
+    fn init(self: *TestDependencies) !void {
+        const testing = std.testing;
+        self.arena = .init(testing.allocator);
+        errdefer self.arena.deinit();
+        const allocator = self.arena.allocator();
+        self.tmp = testing.tmpDir(.{});
+        errdefer self.tmp.cleanup();
+        try self.tmp.dir.createDirPath(testing.io, "local/review-lib-1-1");
+        try self.tmp.dir.writeFile(testing.io, .{
+            .sub_path = "local/ALPM_DB_VERSION",
+            .data = "9\n",
+        });
+        try self.tmp.dir.writeFile(testing.io, .{
+            .sub_path = "local/review-lib-1-1/desc",
+            .data = "%NAME%\nreview-lib\n\n%VERSION%\n1-1\n\n%PROVIDES%\nreview-virtual=1\n\n",
+        });
+        var path_buffer: [4096]u8 = undefined;
+        const len = try self.tmp.dir.realPath(testing.io, &path_buffer);
+        const path = try allocator.dupeZ(u8, path_buffer[0..len]);
+        self.environ = .init(allocator);
+        errdefer self.environ.deinit();
+        self.output = try self.tmp.dir.createFile(testing.io, "output", .{});
+        errdefer self.output.close(testing.io);
+        self.pacman = .{
+            .allocator = allocator,
+            .io = testing.io,
+            .environ_map = &self.environ,
+            .zur_path = path,
+            .zur_pkg_dir = path,
+            .alpm_state = try Alpm.init(allocator, .{ .db_path = path }),
+            .stdout_writer = self.output.writer(testing.io, &self.output_buffer),
+        };
+    }
+
+    fn deinit(self: *TestDependencies) void {
+        self.pacman.deinit();
+        self.output.close(std.testing.io);
+        self.environ.deinit();
+        self.tmp.cleanup();
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+test "dependency planning recognizes installed versioned providers" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const alpm = &fixture.pacman.alpm_state.?;
+    const installed = try alpm.installedSatisfier("review-virtual>=1");
+    try testing.expect(installed != null);
+    try testing.expectEqualStrings("review-lib", installed.?);
+    try testing.expectEqual(null, try alpm.installedSatisfier("review-virtual>=2"));
+    try testing.expectEqual(null, try fixture.pacman.resolveDependency("review-virtual>=1"));
+}
+
+test "dependency planning retains scheduled upgrade edges and rejects incompatible updates" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const allocator = fixture.arena.allocator();
+    var dependencies = [_][]const u8{"review-lib>=1"};
+    var infos = [_]aur.Info{
+        testAurInfo("review-app", "2"),
+        testAurInfo("review-lib", "2"),
+    };
+    infos[0].depends = &dependencies;
+    fixture.pacman.aur_resp = .{
+        .version = 5,
+        .type = "multiinfo",
+        .resultcount = infos.len,
+        .results = try allocator.dupe(aur.Info, &infos),
+    };
+    const library = try allocator.create(Package);
+    library.* = .{ .version = "1", .aur_version = "2", .requires_update = true };
+    try fixture.pacman.pkgs.put(allocator, "review-lib", library);
+    var pending: std.ArrayList(PendingPackage) = .empty;
+    defer deinitPendingPackages(allocator, &pending);
+    var bases: std.StringHashMapUnmanaged(usize) = .empty;
+    defer bases.deinit(allocator);
+    try fixture.pacman.queuePackageWithDeps(&pending, &bases, "review-app", .{
+        .version = "1",
+        .aur_version = "2",
+    });
+    try testing.expectEqual(@as(usize, 2), pending.items.len);
+    try testing.expectEqualStrings("review-lib", pending.items[0].name);
+    try testing.expectEqualStrings("1", pending.items[0].pkg.version);
+    try testing.expectError(error.DependencyConflict, fixture.pacman.resolveDependency("review-lib=1"));
+}
+
+test "dependency planning selects an AUR provider that meets the required provision version" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const allocator = fixture.arena.allocator();
+    var old_provides = [_][]const u8{"review-virtual=1"};
+    var new_provides = [_][]const u8{"review-virtual=2"};
+    var infos = [_]aur.Info{
+        testAurInfo("review-old-provider", "99"),
+        testAurInfo("review-provider", "1"),
+    };
+    infos[0].provides = &old_provides;
+    infos[1].provides = &new_provides;
+    try fixture.pacman.aur_cache.put(allocator, try allocator.dupe(u8, "review-virtual"), null);
+    try fixture.pacman.provider_cache.put(
+        allocator,
+        try allocator.dupe(u8, "review-virtual"),
+        try allocator.dupe(aur.Info, &infos),
+    );
+    const selected = try fixture.pacman.resolveDependency("review-virtual>=2");
+    try testing.expect(selected != null);
+    try testing.expectEqualStrings("review-provider", selected.?.name);
+    try testing.expectError(error.UnsatisfiedDependency, fixture.pacman.resolveDependency("review-virtual>=3"));
+}
+
+test "dependency planning rejects a build cycle before installing anything" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const allocator = fixture.arena.allocator();
+    var first_deps = [_][]const u8{"review-other"};
+    var second_deps = [_][]const u8{"review-app"};
+    var first = testAurInfo("review-app", "1");
+    first.depends = &first_deps;
+    var second = testAurInfo("review-other", "1");
+    second.depends = &second_deps;
+    try fixture.pacman.cacheAurInfo(first.name, first);
+    try fixture.pacman.cacheAurInfo(second.name, second);
+    var pending: std.ArrayList(PendingPackage) = .empty;
+    defer deinitPendingPackages(allocator, &pending);
+    var bases: std.StringHashMapUnmanaged(usize) = .empty;
+    defer bases.deinit(allocator);
+    try testing.expectError(error.DependencyCycle, fixture.pacman.queuePackageWithDeps(
+        &pending,
+        &bases,
+        first.name,
+        .{ .version = "0", .aur_version = "1" },
+    ));
+    try testing.expectEqual(@as(usize, 0), pending.items.len);
 }
