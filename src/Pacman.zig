@@ -1250,11 +1250,41 @@ fn installArtifacts(self: *Pacman, item: *const PendingPackage, runner: anytype)
     if (reasons.items.len > 5) try runner.execCommand(reasons.items, self.zur_pkg_dir);
 }
 
+fn makepkgEnviron(self: *Pacman, cwd: []const u8) !std.process.Environ.Map {
+    var environ = try self.environ_map.clone(self.allocator);
+    errdefer environ.deinit();
+    // Snapshot source paths have the shape .build/<base>/<unique build>.
+    const base = Dir.path.basename(Dir.path.dirname(cwd) orelse return error.InvalidSnapshot);
+    try environ.put("PKGDEST", cwd);
+    try environ.put("BUILDDIR", cwd);
+    const shared = [_]struct { variable: []const u8, directory: []const u8 }{
+        .{ .variable = "SRCDEST", .directory = ".sources" },
+        .{ .variable = "SRCPKGDEST", .directory = ".source_packages" },
+        .{ .variable = "LOGDEST", .directory = ".logs" },
+    };
+    for (shared) |entry| {
+        const path = try Dir.path.join(self.allocator, &.{ self.zur_path, entry.directory, base });
+        defer self.allocator.free(path);
+        try Dir.cwd().createDirPath(self.io, path);
+        try environ.put(entry.variable, path);
+    }
+    const temporary = try Dir.path.join(self.allocator, &.{ cwd, ".tmp" });
+    defer self.allocator.free(temporary);
+    try Dir.cwd().createDirPath(self.io, temporary);
+    try environ.put("TMPDIR", temporary);
+    return environ;
+}
+
 fn captureCommand(self: *Pacman, argv: []const []const u8, cwd: []const u8) ![]u8 {
+    var environ = if (mem.eql(u8, Dir.path.basename(argv[0]), "makepkg"))
+        try self.makepkgEnviron(cwd)
+    else
+        null;
+    defer if (environ) |*map| map.deinit();
     const result = try std.process.run(self.allocator, self.io, .{
         .argv = argv,
         .cwd = .{ .path = cwd },
-        .environ_map = self.environ_map,
+        .environ_map = if (environ) |*map| map else self.environ_map,
         .stdout_limit = .limited(16 * 1024 * 1024),
         .stderr_limit = .limited(16 * 1024 * 1024),
     });
@@ -1268,6 +1298,11 @@ fn captureCommand(self: *Pacman, argv: []const []const u8, cwd: []const u8) ![]u
 }
 
 fn execCommand(self: *Pacman, argv: []const []const u8, cwd: []const u8) !void {
+    var environ = if (mem.eql(u8, Dir.path.basename(argv[0]), "makepkg"))
+        try self.makepkgEnviron(cwd)
+    else
+        null;
+    defer if (environ) |*map| map.deinit();
     // Our pending output must be flushed before the child inherits stdout,
     // otherwise it could appear after the child's own output.
     self.flushStdout();
@@ -1275,7 +1310,7 @@ fn execCommand(self: *Pacman, argv: []const []const u8, cwd: []const u8) !void {
     var child = try std.process.spawn(self.io, .{
         .argv = argv,
         .cwd = .{ .path = cwd },
-        .environ_map = self.environ_map,
+        .environ_map = if (environ) |*map| map else self.environ_map,
         .stdin = .inherit,
         .stdout = .inherit,
         .stderr = .inherit,
@@ -2830,4 +2865,62 @@ test "mixed split outputs preserve existing reasons and mark only new dependenci
     defer rejecting.deinit();
     try testing.expectError(error.NonzeroStatus, fixture.pacman.installArtifacts(item, &rejecting));
     try testing.expectEqual(@as(usize, 2), rejecting.commands.items.len);
+}
+
+test "makepkg child paths stay managed despite environment and configuration overrides" {
+    const testing = std.testing;
+    const library = Dir.openFileAbsolute(testing.io, "/usr/share/makepkg/util/config.sh", .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+    library.close(testing.io);
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const allocator = fixture.arena.allocator();
+    var snapshot = try testSnapshot(&fixture, "review-base");
+    defer snapshot.deinit(allocator);
+    try fixture.tmp.dir.createDirPath(testing.io, "bin");
+    try fixture.tmp.dir.writeFile(testing.io, .{
+        .sub_path = "bin/makepkg",
+        .data =
+        \\#!/bin/bash
+        \\source /usr/share/makepkg/util/config.sh
+        \\load_makepkg_config "$TEST_MAKEPKG_CONF"
+        \\printf '%s\n' "$PKGDEST" "$SRCDEST" "$SRCPKGDEST" "$BUILDDIR" "$LOGDEST" "$PKGEXT" > "$TEST_REPORT"
+        \\if [[ $1 == --packagelist ]]; then cat "$TEST_REPORT"; fi
+        \\
+        ,
+    });
+    try fixture.tmp.dir.setFilePermissions(testing.io, "bin/makepkg", .fromMode(0o755), .{});
+    try fixture.tmp.dir.writeFile(testing.io, .{
+        .sub_path = "makepkg.conf",
+        .data = "PKGDEST=/external/config\nSRCDEST=/external/config\nSRCPKGDEST=/external/config\nBUILDDIR=/external/config\nLOGDEST=/external/config\nPKGEXT=.pkg.tar.xz\n",
+    });
+    const search_path = try std.fmt.allocPrint(allocator, "{s}/bin:/usr/bin:/bin", .{fixture.pacman.zur_path});
+    try fixture.environ.put("PATH", search_path);
+    const config = try Dir.path.join(allocator, &.{ fixture.pacman.zur_path, "makepkg.conf" });
+    const report = try Dir.path.join(allocator, &.{ fixture.pacman.zur_path, "report" });
+    try fixture.environ.put("TEST_MAKEPKG_CONF", config);
+    try fixture.environ.put("TEST_REPORT", report);
+    for ([_][]const u8{ "PKGDEST", "SRCDEST", "SRCPKGDEST", "BUILDDIR", "LOGDEST" }) |name| {
+        try fixture.environ.put(name, "/external/environment");
+    }
+    const program = try Dir.path.join(allocator, &.{ fixture.pacman.zur_path, "bin/makepkg" });
+    try fixture.pacman.execCommand(&.{ program, "-scC" }, snapshot.source_path);
+    const build_report = try fixture.tmp.dir.readFileAlloc(testing.io, "report", allocator, .unlimited);
+    defer allocator.free(build_report);
+    var paths = mem.splitScalar(u8, build_report, '\n');
+    for (0..5) |_| {
+        const path = paths.next().?;
+        try testing.expect(mem.startsWith(u8, path, fixture.pacman.zur_path));
+        try testing.expectEqual(@as(u8, '/'), path[fixture.pacman.zur_path.len]);
+        var dir = try Dir.openDirAbsolute(testing.io, path, .{});
+        dir.close(testing.io);
+    }
+    try testing.expectEqualStrings(".pkg.tar.xz", paths.next().?);
+    const listing_report = try fixture.pacman.captureCommand(&.{ program, "--packagelist" }, snapshot.source_path);
+    defer allocator.free(listing_report);
+    try testing.expectEqualStrings(build_report, listing_report);
+    try testing.expectEqualStrings("/external/environment", fixture.environ.get("PKGDEST").?);
 }
