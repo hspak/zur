@@ -23,6 +23,8 @@ pub const Error = ErrorSet;
 allocator: Allocator,
 file_contents: []const u8,
 fields: std.StringHashMapUnmanaged(*Content) = .empty,
+/// True when presentation must use the original text to avoid omitting shell code.
+unparsed: bool = false,
 
 // Fields compared when reviewing PKGBUILD changes between versions.
 const relevant_fields = &[_][]const u8{
@@ -53,6 +55,7 @@ const Parser = struct {
     pos: usize,
     allocator: Allocator,
     fields: *std.StringHashMapUnmanaged(*Content),
+    unparsed: *bool,
 
     fn parse(self: *Parser) !void {
         while (self.pos < self.src.len) {
@@ -62,13 +65,17 @@ const Parser = struct {
             const name_start = self.pos;
             if (!self.scanName()) {
                 // Unknown top-level statement (not an assignment or function).
+                self.unparsed.* = true;
                 self.skipToEol();
                 continue;
             }
             const name = self.src[name_start..self.pos];
 
             self.skipSpacesAndTabs();
-            if (self.pos >= self.src.len) break;
+            if (self.pos >= self.src.len) {
+                self.unparsed.* = true;
+                break;
+            }
 
             const c = self.src[self.pos];
             if (c == '=') {
@@ -77,6 +84,7 @@ const Parser = struct {
             } else if (c == '(') {
                 try self.parseFunction(name);
             } else {
+                self.unparsed.* = true;
                 self.skipToEol();
             }
         }
@@ -92,6 +100,9 @@ const Parser = struct {
         } else {
             const value = try self.readScalarValue();
             errdefer self.allocator.free(value);
+            if (mem.indexOf(u8, value, "$(") != null or mem.indexOfScalar(u8, value, '`') != null) {
+                self.unparsed.* = true;
+            }
             try self.putField(name, value);
         }
     }
@@ -290,7 +301,15 @@ const Parser = struct {
                     self.pos += 1;
                 },
                 '#' => {
-                    self.skipToEol();
+                    if (self.startsComment()) self.skipToEol() else self.pos += 1;
+                },
+                '\\' => self.pos += @min(@as(usize, 2), self.src.len - self.pos),
+                '<' => {
+                    if (self.pos + 1 < self.src.len and self.src[self.pos + 1] == '<') {
+                        // Heredoc contents are shell text, not brace-group tokens.
+                        self.unparsed.* = true;
+                    }
+                    self.pos += 1;
                 },
                 '{' => {
                     depth += 1;
@@ -336,13 +355,19 @@ const Parser = struct {
     fn scanName(self: *Parser) bool {
         if (self.pos >= self.src.len) return false;
         const c0 = self.src[self.pos];
-        // Bash name: [a-zA-Z_][a-zA-Z0-9_]*
+        // Bash functions may include package-name punctuation.
         if (!isNameStart(c0)) return false;
         self.pos += 1;
-        while (self.pos < self.src.len and isNameCont(self.src[self.pos])) {
+        while (self.pos < self.src.len and
+            (isNameCont(self.src[self.pos]) or mem.indexOfScalar(u8, "-+.@", self.src[self.pos]) != null))
+        {
             self.pos += 1;
         }
         return true;
+    }
+
+    fn startsComment(self: *const Parser) bool {
+        return self.pos == 0 or mem.indexOfScalar(u8, " \t\r\n;|&()", self.src[self.pos - 1]) != null;
     }
 
     fn skipBlanksAndComments(self: *Parser) void {
@@ -410,6 +435,7 @@ pub fn readLines(self: *Pkgbuild) Error!void {
         .pos = 0,
         .allocator = self.allocator,
         .fields = &self.fields,
+        .unparsed = &self.unparsed,
     };
     try parser.parse();
     log.debug("parsed {d} fields", .{self.fields.count()});

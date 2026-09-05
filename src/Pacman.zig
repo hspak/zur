@@ -962,7 +962,17 @@ fn printBarePkgbuildFields(
 ) !void {
     var pkgbuild = Pkgbuild.init(allocator, file_contents);
     defer pkgbuild.deinit();
-    try pkgbuild.readLines();
+    pkgbuild.readLines() catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        error.MalformedFunction, error.UnterminatedArray, error.UnterminatedFunction => {
+            try writer.writeAll(file_contents);
+            return;
+        },
+    };
+    if (pkgbuild.unparsed) {
+        try writer.writeAll(file_contents);
+        return;
+    }
     try pkgbuild.indentValues(2);
 
     var printed_source = false;
@@ -1825,4 +1835,21 @@ test "snapshot review retains scripts larger than four kilobytes" {
     defer deinitSnapshotFiles(allocator, &files);
     try testing.expect(files.contains("prepare.sh"));
     try testing.expectEqualStrings(script, files.get("prepare.sh").?);
+}
+
+test "PKGBUILD review preserves valid Bash and unsupported statements" {
+    const testing = std.testing;
+    const cases = [_]struct { contents: []const u8, visible: []const u8 }{
+        .{ .contents = "package() {\n  name=${pkgname#prefix}\n}\n", .visible = "name=${pkgname#prefix}" },
+        .{ .contents = "package_foo-bar() { echo hello; }\n", .visible = "package_foo-bar()" },
+        .{ .contents = "echo top-level-command\n", .visible = "echo top-level-command" },
+        .{ .contents = "function package { echo alternate-syntax; }\n", .visible = "function package { echo alternate-syntax; }" },
+        .{ .contents = "package() {\ncat <<'END'\n}\nhello\nEND\n}\n", .visible = "cat <<'END'\n}\nhello\nEND" },
+    };
+    for (cases) |case| {
+        var output: Io.Writer.Allocating = .init(testing.allocator);
+        defer output.deinit();
+        try printBarePkgbuildFields(testing.allocator, &output.writer, case.contents);
+        try testing.expect(mem.indexOf(u8, output.written(), case.visible) != null);
+    }
 }
