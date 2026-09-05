@@ -41,6 +41,20 @@ pub fn build(b: *std.Build) void {
     });
 
     const run_tests = b.addRunArtifact(tests);
-    const test_step = b.step("test", "Run unit tests");
+    const cli_options = b.addOptions();
+    cli_options.addOptionPath("executable", exe.getEmittedBin());
+    const cli_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    cli_mod.linkSystemLibrary("alpm", .{});
+    cli_mod.addOptions("build_options", exe_options);
+    cli_mod.addOptions("cli_test_options", cli_options);
+    const cli_tests = b.addTest(.{ .root_module = cli_mod });
+    const run_cli_tests = b.addRunArtifact(cli_tests);
+    const test_step = b.step("test", "Run unit and CLI tests");
+    test_step.dependOn(&run_cli_tests.step);
     test_step.dependOn(&run_tests.step);
 }

@@ -12,7 +12,7 @@ const build_version = @import("build_options").version;
 
 pub const log_level: std.log.Level = .info;
 
-pub fn main(init: std.process.Init) !void {
+pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
     const allocator = init.arena.allocator();
 
@@ -25,6 +25,7 @@ pub fn main(init: std.process.Init) !void {
     var stderr_writer = Io.File.stderr().writer(io, &stderr_buffer);
     const stderr = &stderr_writer.interface;
 
+    var exit_code: u8 = 0;
     switch (args.action) {
         .print_help => {
             const msg =
@@ -49,6 +50,7 @@ pub fn main(init: std.process.Init) !void {
             args.pkgs.items[0],
         ) catch |err| {
             try printCaughtError(stderr, err);
+            exit_code = 1;
         },
         .install_or_upgrade => installOrUpdate(
             allocator,
@@ -57,11 +59,13 @@ pub fn main(init: std.process.Init) !void {
             args.pkgs,
         ) catch |err| {
             try printCaughtError(stderr, err);
+            exit_code = 1;
         },
         // parse() never leaves action unset; Unset is only the pre-parse default.
         .unset => unreachable,
     }
     try stderr.flush();
+    return exit_code;
 }
 
 fn printCaughtError(stderr: *Io.Writer, err: Pacman.Error) !void {
@@ -97,4 +101,29 @@ fn installOrUpdate(
     try pacman.fetchRemoteAurVersions();
     try pacman.compareVersions();
     try pacman.processOutOfDate();
+}
+
+test "CLI reports operational failures with a nonzero exit status" {
+    const testing = std.testing;
+    var environ: std.process.Environ.Map = .init(testing.allocator);
+    defer environ.deinit();
+    for ([_][]const u8{ "-S", "-Ss" }) |action| {
+        const result = try std.process.run(testing.allocator, testing.io, .{
+            .argv = &.{ @import("cli_test_options").executable, action, "review-missing-home" },
+            .environ_map = &environ,
+        });
+        defer testing.allocator.free(result.stdout);
+        defer testing.allocator.free(result.stderr);
+        try testing.expect(std.mem.indexOf(u8, result.stderr, "NoHomeEnvVarFound") != null);
+        try testing.expect(result.term == .exited);
+        try testing.expect(result.term.exited != 0);
+    }
+    const help = try std.process.run(testing.allocator, testing.io, .{
+        .argv = &.{ @import("cli_test_options").executable, "--help" },
+        .environ_map = &environ,
+    });
+    defer testing.allocator.free(help.stdout);
+    defer testing.allocator.free(help.stderr);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, help.term);
+    try testing.expect(std.mem.indexOf(u8, help.stderr, "usage: zur") != null);
 }
