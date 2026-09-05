@@ -114,6 +114,8 @@ const PendingPackage = struct {
     const Output = struct {
         pkg: Package,
         artifact: ?[]u8 = null,
+        reason: Alpm.InstallReason = .explicit,
+        was_installed: bool = false,
     };
 
     fn base(self: PendingPackage) []const u8 {
@@ -526,7 +528,9 @@ pub fn processOutOfDate(self: *Pacman) Error!void {
     }
     for (pending.items) |*item| {
         try self.print(":: Selected outputs from {s}:\n", .{item.base()});
-        for (item.outputs.keys()) |name| try self.print("  {s}\n", .{name});
+        for (item.outputs.keys(), item.outputs.values()) |name, output| {
+            try self.print("  {s} ({t})\n", .{ name, output.reason });
+        }
         if (item.isCached()) {
             try self.installArtifacts(item, self);
         } else {
@@ -548,6 +552,14 @@ fn planPackages(
     // Additional outputs may introduce dependencies after their base was first
     // queued. Sort the merged base graph only after visiting every root.
     try orderPendingPackages(self.allocator, pending, queued_bases);
+    const db = try self.getAlpm();
+    for (pending.items) |*item| {
+        for (item.outputs.keys(), item.outputs.values()) |name, *output| {
+            const existing = try db.installedReason(name);
+            output.was_installed = existing != null;
+            output.reason = existing orelse if (self.pkgs.contains(name)) .explicit else .dependency;
+        }
+    }
 }
 
 // Visit all scheduled AUR dependencies before appending their consumer.
@@ -1210,11 +1222,32 @@ fn selectBuiltArtifacts(self: *Pacman, item: *PendingPackage, build_dir: []const
 fn installArtifacts(self: *Pacman, item: *const PendingPackage, runner: anytype) !void {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(self.allocator);
-    try argv.appendSlice(self.allocator, &.{ "sudo", "pacman", "-U", "--" });
+    var all_dependencies = true;
+    for (item.outputs.values()) |output| {
+        if (output.reason == .explicit) all_dependencies = false;
+    }
+    try argv.appendSlice(self.allocator, &.{ "sudo", "pacman", "-U" });
+    if (all_dependencies) try argv.append(self.allocator, "--asdeps");
+    try argv.append(self.allocator, "--");
     for (item.outputs.values()) |output| {
         try argv.append(self.allocator, output.artifact orelse return error.MissingPackageOutput);
     }
+
+    // Split siblings may depend on one another, so install them in one
+    // transaction. Default -U preserves existing reasons. For a mixed group,
+    // change only newly installed dependency outputs after that transaction.
+    var reasons: std.ArrayList([]const u8) = .empty;
+    defer reasons.deinit(self.allocator);
+    if (!all_dependencies) {
+        try reasons.appendSlice(self.allocator, &.{ "sudo", "pacman", "-D", "--asdeps", "--" });
+        for (item.outputs.keys(), item.outputs.values()) |name, output| {
+            if (output.reason == .dependency and !output.was_installed) {
+                try reasons.append(self.allocator, name);
+            }
+        }
+    }
     try runner.execCommand(argv.items, self.zur_pkg_dir);
+    if (reasons.items.len > 5) try runner.execCommand(reasons.items, self.zur_pkg_dir);
 }
 
 fn captureCommand(self: *Pacman, argv: []const []const u8, cwd: []const u8) ![]u8 {
@@ -2053,7 +2086,12 @@ const TestDependencies = struct {
         });
         try self.tmp.dir.writeFile(testing.io, .{
             .sub_path = "local/review-lib-1-1/desc",
-            .data = "%NAME%\nreview-lib\n\n%VERSION%\n1-1\n\n%PROVIDES%\nreview-virtual=1\n\n",
+            .data = "%NAME%\nreview-lib\n\n%VERSION%\n1-1\n\n%PROVIDES%\nreview-virtual=1\n\n%REASON%\n1\n\n",
+        });
+        try self.tmp.dir.createDirPath(testing.io, "local/review-explicit-1-1");
+        try self.tmp.dir.writeFile(testing.io, .{
+            .sub_path = "local/review-explicit-1-1/desc",
+            .data = "%NAME%\nreview-explicit\n\n%VERSION%\n1-1\n\n%REASON%\n0\n\n",
         });
         var path_buffer: [4096]u8 = undefined;
         const len = try self.tmp.dir.realPath(testing.io, &path_buffer);
@@ -2681,4 +2719,115 @@ test "update skips remote initialization when no foreign packages are installed"
     try fixture.pacman.processOutOfDate();
     try std.testing.expect(fixture.pacman.request_state == null);
     try std.testing.expectEqual(@as(usize, 0), fixture.pacman.updates);
+}
+
+const TestReasonRunner = struct {
+    allocator: Allocator,
+    commands: std.ArrayList([]const []const u8) = .empty,
+    reject_reason_change: bool = false,
+
+    fn deinit(self: *TestReasonRunner) void {
+        for (self.commands.items) |command| {
+            for (command) |arg| self.allocator.free(arg);
+            self.allocator.free(command);
+        }
+        self.commands.deinit(self.allocator);
+    }
+
+    fn execCommand(self: *TestReasonRunner, argv: []const []const u8, _: []const u8) !void {
+        const command = try self.allocator.alloc([]const u8, argv.len);
+        for (argv, command) |arg, *copy| copy.* = try self.allocator.dupe(u8, arg);
+        try self.commands.append(self.allocator, command);
+        if (self.reject_reason_change and mem.eql(u8, argv[2], "-D")) return error.NonzeroStatus;
+    }
+};
+
+test "planned AUR dependencies are installed with dependency reasons" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const allocator = fixture.arena.allocator();
+    var names: std.ArrayList([]const u8) = .empty;
+    defer names.deinit(allocator);
+    try names.append(allocator, "review-cli");
+    try fixture.pacman.setInstallPackages(names);
+    const root_pkg = fixture.pacman.pkgs.get("review-cli").?;
+    root_pkg.aur_version = "2-1";
+    root_pkg.requires_update = true;
+    var dependencies = [_][]const u8{"review-new-dep"};
+    var root = testAurInfo("review-cli", "2-1");
+    root.depends = &dependencies;
+    try fixture.pacman.cacheAurInfo(root.name, root);
+    try fixture.pacman.cacheAurInfo("review-new-dep", testAurInfo("review-new-dep", "2-1"));
+    var pending: std.ArrayList(PendingPackage) = .empty;
+    defer deinitPendingPackages(allocator, &pending);
+    var bases: std.StringHashMapUnmanaged(usize) = .empty;
+    defer bases.deinit(allocator);
+    try fixture.pacman.planPackages(&pending, &bases);
+    var runner: TestReasonRunner = .{ .allocator = allocator };
+    defer runner.deinit();
+    for (pending.items) |*item| {
+        for (item.outputs.values()) |*output| output.artifact = try allocator.dupe(u8, "/cache/test.pkg.tar");
+        try fixture.pacman.installArtifacts(item, &runner);
+    }
+    try testing.expectEqual(@as(usize, 2), runner.commands.items.len);
+    try testing.expectEqualStrings("-U", runner.commands.items[0][2]);
+    try testing.expectEqualStrings("--asdeps", runner.commands.items[0][3]);
+    try testing.expectEqualStrings("-U", runner.commands.items[1][2]);
+    try testing.expectEqualStrings("--", runner.commands.items[1][3]);
+}
+
+test "mixed split outputs preserve existing reasons and mark only new dependencies" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const allocator = fixture.arena.allocator();
+    var names: std.ArrayList([]const u8) = .empty;
+    defer names.deinit(allocator);
+    try names.appendSlice(allocator, &.{ "review-cli", "review-lib" });
+    try fixture.pacman.setInstallPackages(names);
+    var deps = [_][]const u8{ "review-sibling", "review-lib>=2", "review-explicit>=2" };
+    for ([_][]const u8{ "review-cli", "review-sibling", "review-lib", "review-explicit" }) |name| {
+        var info = testAurInfo(name, "2-1");
+        info.package_base = "review-base";
+        if (mem.eql(u8, name, "review-cli")) info.depends = &deps;
+        try fixture.pacman.cacheAurInfo(name, info);
+        if (fixture.pacman.pkgs.get(name)) |pkg| {
+            pkg.aur_version = "2-1";
+            pkg.base_name = info.package_base;
+            pkg.requires_update = true;
+        }
+    }
+    var pending: std.ArrayList(PendingPackage) = .empty;
+    defer deinitPendingPackages(allocator, &pending);
+    var bases: std.StringHashMapUnmanaged(usize) = .empty;
+    defer bases.deinit(allocator);
+    try fixture.pacman.planPackages(&pending, &bases);
+    try testing.expectEqual(@as(usize, 1), pending.items.len);
+    const item = &pending.items[0];
+    try testing.expectEqual(Alpm.InstallReason.dependency, item.outputs.get("review-lib").?.reason);
+    try testing.expect(item.outputs.get("review-lib").?.was_installed);
+    try testing.expectEqual(Alpm.InstallReason.explicit, item.outputs.get("review-explicit").?.reason);
+    try testing.expect(item.outputs.get("review-explicit").?.was_installed);
+    try testing.expectEqual(Alpm.InstallReason.explicit, item.outputs.get("review-cli").?.reason);
+    try testing.expectEqual(Alpm.InstallReason.dependency, item.outputs.get("review-sibling").?.reason);
+    for (item.outputs.values()) |*output| output.artifact = try allocator.dupe(u8, "/cache/test.pkg.tar");
+    var runner: TestReasonRunner = .{ .allocator = allocator };
+    defer runner.deinit();
+    try fixture.pacman.installArtifacts(item, &runner);
+    try testing.expectEqual(@as(usize, 2), runner.commands.items.len);
+    try testing.expectEqualStrings("-U", runner.commands.items[0][2]);
+    try testing.expectEqual(@as(usize, 8), runner.commands.items[0].len);
+    try testing.expectEqualStrings("--", runner.commands.items[0][3]);
+    const marking = runner.commands.items[1];
+    try testing.expectEqual(@as(usize, 6), marking.len);
+    try testing.expectEqualStrings("-D", marking[2]);
+    try testing.expectEqualStrings("--asdeps", marking[3]);
+    try testing.expectEqualStrings("review-sibling", marking[5]);
+    var rejecting: TestReasonRunner = .{ .allocator = allocator, .reject_reason_change = true };
+    defer rejecting.deinit();
+    try testing.expectError(error.NonzeroStatus, fixture.pacman.installArtifacts(item, &rejecting));
+    try testing.expectEqual(@as(usize, 2), rejecting.commands.items.len);
 }

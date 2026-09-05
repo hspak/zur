@@ -14,6 +14,7 @@ const ErrorSet = std.mem.Allocator.Error || error{
     NoLocalDb,
     NoCache,
     InvalidPackageArchive,
+    InvalidInstallReason,
 };
 pub const Error = ErrorSet;
 
@@ -117,6 +118,20 @@ pub fn isInstalled(self: *Alpm, name: []const u8) Error!bool {
     const name_cstr = try std.mem.concatWithSentinel(self.allocator, u8, &.{name}, 0);
     defer self.allocator.free(name_cstr);
     return alpm.alpm_db_get_pkg(self.local_db, @ptrCast(name_cstr.ptr)) != null;
+}
+
+pub const InstallReason = enum { explicit, dependency };
+
+/// Return the stored install reason, or null if this exact name is not installed.
+pub fn installedReason(self: *Alpm, name: []const u8) Error!?InstallReason {
+    const name_z = try self.allocator.dupeZ(u8, name);
+    defer self.allocator.free(name_z);
+    const pkg = alpm.alpm_db_get_pkg(self.local_db, name_z) orelse return null;
+    return switch (alpm.alpm_pkg_get_reason(pkg)) {
+        alpm.ALPM_PKG_REASON_EXPLICIT => .explicit,
+        alpm.ALPM_PKG_REASON_DEPEND => .dependency,
+        else => error.InvalidInstallReason,
+    };
 }
 
 /// Return an installed package satisfying the complete dependency, including
