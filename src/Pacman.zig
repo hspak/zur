@@ -108,8 +108,8 @@ pub const Package = struct {
     }
 };
 
-// Files larger than this are skipped when diffing a package snapshot.
-const max_snapshot_diff_bytes: usize = 4096;
+// Larger diffs use a linear-memory full-file display.
+const max_diff_cells: usize = 1024 * 1024;
 
 // `name` and the slices in `pkg` are borrowed for the `Pacman` lifetime.
 // `existing_artifact` is owned by the queue when non-null.
@@ -767,57 +767,7 @@ fn compareUpdateAndInstall(self: *Pacman, pkg_name: []const u8, pkg: *Package) !
         return self.bareInstall(pkg_name, new_files, pkg.aur_version.?);
     }
 
-    var old_pkgbuild = Pkgbuild.init(self.allocator, old_files.get("PKGBUILD").?);
-    defer old_pkgbuild.deinit();
-    try old_pkgbuild.readLines();
-    var new_pkgbuild = Pkgbuild.init(self.allocator, new_files.get("PKGBUILD").?);
-    defer new_pkgbuild.deinit();
-    try new_pkgbuild.readLines();
-
-    var at_least_one_diff = false;
-    try new_pkgbuild.comparePrev(old_pkgbuild);
-    try new_pkgbuild.compareArchSource(old_pkgbuild, machineArch());
-    try new_pkgbuild.indentValues(2);
-    var new_pkgbuild_iter = new_pkgbuild.fields.iterator();
-    while (new_pkgbuild_iter.next()) |field| {
-        if (field.value_ptr.*.updated) {
-            at_least_one_diff = true;
-            try printUpdatedPkgbuildField(
-                self.stdout(),
-                field.key_ptr.*,
-                field.value_ptr.*.value,
-            );
-        }
-    }
-
-    var new_iter = new_files.iterator();
-    while (new_iter.next()) |file| {
-        const is_script = mem.endsWith(u8, file.key_ptr.*, ".install") or
-            mem.endsWith(u8, file.key_ptr.*, ".sh");
-        if (is_script) {
-            const old_content_maybe = old_files.get(file.key_ptr.*);
-            const new_content_maybe = new_files.get(file.key_ptr.*);
-            if (old_content_maybe == null or new_content_maybe == null) {
-                // One side is missing this file (added or removed in this
-                // update), so there's nothing to compare.
-                try self.print("{s}->{s} {s}{s}{s} only exists in one version; skipping diff\n", .{
-                    color.foreground_blue,
-                    color.reset,
-                    color.bold,
-                    file.key_ptr.*,
-                    color.reset,
-                });
-                continue;
-            }
-
-            const old_content = old_content_maybe.?;
-            const new_content = new_content_maybe.?;
-            if (!mem.eql(u8, old_content, new_content)) {
-                at_least_one_diff = true;
-                try self.printDiff(file.key_ptr.*, old_content, new_content);
-            }
-        }
-    }
+    const at_least_one_diff = try self.reviewSnapshotChanges(old_files, new_files);
     if (at_least_one_diff) {
         try self.print("\nContinue? [Y/n]: ", .{});
         const input = try self.stdinReadByte();
@@ -827,12 +777,34 @@ fn compareUpdateAndInstall(self: *Pacman, pkg_name: []const u8, pkg: *Package) !
             try self.print("\n", .{});
         }
     } else {
-        try self.print("{s}::{s} No meaningful diff's found\n", .{
+        try self.print("{s}::{s} No snapshot changes found\n", .{
             color.foreground_blue,
             color.reset,
         });
     }
     try self.install(pkg_name, pkg.aur_version.?);
+}
+
+fn reviewSnapshotChanges(
+    self: *Pacman,
+    old_files: std.StringHashMapUnmanaged([]u8),
+    new_files: std.StringHashMapUnmanaged([]u8),
+) !bool {
+    var changed = false;
+    var new_iter = new_files.iterator();
+    while (new_iter.next()) |file| {
+        const old = old_files.get(file.key_ptr.*) orelse "";
+        if (old_files.contains(file.key_ptr.*) and mem.eql(u8, old, file.value_ptr.*)) continue;
+        changed = true;
+        try self.printDiff(file.key_ptr.*, old, file.value_ptr.*);
+    }
+    var old_iter = old_files.iterator();
+    while (old_iter.next()) |file| {
+        if (new_files.contains(file.key_ptr.*)) continue;
+        changed = true;
+        try self.printDiff(file.key_ptr.*, file.value_ptr.*, "");
+    }
+    return changed;
 }
 
 // Print a minimal line-based diff between two file contents using an LCS
@@ -855,6 +827,15 @@ fn printDiff(
     const new = new_list.items;
     const n = old.len;
     const m = new.len;
+
+    // A byte-size limit cannot bound a line-count matrix. Display both complete
+    // versions when alignment would exceed the memory budget.
+    if (n + 1 > max_diff_cells / (m + 1)) {
+        try self.print(":: {s} changed (complete old/new contents):\n", .{name});
+        for (old) |line| try self.print("- {s}\n", .{line});
+        for (new) |line| try self.print("+ {s}\n", .{line});
+        return;
+    }
 
     // LCS length table. dp[i][j] = length of LCS of old[i..] and new[j..].
     const dp = try self.allocator.alloc(usize, (n + 1) * (m + 1));
@@ -1303,25 +1284,12 @@ fn snapshotFiles(
             continue;
         }
 
-        const file_contents = dir.readFileAlloc(
+        const file_contents = try dir.readFileAlloc(
             self.io,
             node.name,
             self.allocator,
-            .limited(max_snapshot_diff_bytes),
-        ) catch |err| switch (err) {
-            error.StreamTooLong => {
-                @branchHint(.cold);
-                try self.print("  {s}->{s} skipping diff for large file: {s}{s}{s}\n", .{
-                    color.foreground_blue,
-                    color.reset,
-                    color.bold,
-                    node.name,
-                    color.reset,
-                });
-                continue;
-            },
-            else => return err,
-        };
+            .unlimited,
+        );
 
         // Store raw file contents. Any indentation is applied only at
         // display time (bareInstall), so the update/diff path never copies
@@ -1766,4 +1734,95 @@ test "extractTarGz strips the snapshot root and consumes the archive" {
         defer file.close(io);
         return error.ArchiveNotConsumed;
     }
+}
+
+test "snapshot review detects executable changes and added or removed files" {
+    const testing = std.testing;
+    const cases = [_]struct {
+        file_name: []const u8,
+        old: ?[]const u8,
+        new: ?[]const u8,
+    }{
+        .{ .file_name = "PKGBUILD", .old = "build() { echo old; }\n", .new = "build() { echo new; }\n" },
+        .{ .file_name = "PKGBUILD", .old = "prepare() { echo old; }\n", .new = "prepare() { echo new; }\n" },
+        .{ .file_name = "PKGBUILD", .old = "package_foo() { echo old; }\n", .new = "package_foo() { echo new; }\n" },
+        .{ .file_name = "PKGBUILD", .old = "helper() { echo old; }\n", .new = "helper() { echo new; }\n" },
+        .{ .file_name = "PKGBUILD", .old = "echo old\n", .new = "echo new\n" },
+        .{ .file_name = "PKGBUILD", .old = "_url=old\nsource=(\"$_url\")\n", .new = "_url=new\nsource=(\"$_url\")\n" },
+        .{ .file_name = "post.install", .old = null, .new = "post_install() { echo added; }\n" },
+        .{ .file_name = "prepare.sh", .old = "echo removed\n", .new = null },
+        .{ .file_name = "fix.patch", .old = "old\n", .new = "new\n" },
+    };
+    for (cases) |case| {
+        try testing.expect(try testSnapshotReview(case.file_name, case.old, case.new));
+    }
+    try testing.expect(!try testSnapshotReview("PKGBUILD", "pkgname=foo\n", "pkgname=foo\n"));
+}
+
+fn testSnapshotReview(name: []const u8, old: ?[]const u8, new: ?[]const u8) !bool {
+    const testing = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var output_file = try tmp.dir.createFile(testing.io, "review-output", .{});
+    defer output_file.close(testing.io);
+    var output_buffer: [4096]u8 = undefined;
+    var environ: std.process.Environ.Map = .init(allocator);
+    defer environ.deinit();
+    var pacman: Pacman = .{
+        .allocator = allocator,
+        .io = testing.io,
+        .environ_map = &environ,
+        .stdout_writer = output_file.writer(testing.io, &output_buffer),
+        .zur_path = "",
+        .zur_pkg_dir = "",
+    };
+    defer pacman.deinit();
+    var old_files: std.StringHashMapUnmanaged([]u8) = .empty;
+    defer deinitSnapshotFiles(allocator, &old_files);
+    var new_files: std.StringHashMapUnmanaged([]u8) = .empty;
+    defer deinitSnapshotFiles(allocator, &new_files);
+    for ([_]*std.StringHashMapUnmanaged([]u8){ &old_files, &new_files }) |files| {
+        try files.put(allocator, try allocator.dupe(u8, "PKGBUILD"), try allocator.dupe(u8, "pkgname=foo\n"));
+    }
+    if (old) |content| try old_files.put(allocator, try allocator.dupe(u8, name), try allocator.dupe(u8, content));
+    if (new) |content| try new_files.put(allocator, try allocator.dupe(u8, name), try allocator.dupe(u8, content));
+    return pacman.reviewSnapshotChanges(old_files, new_files);
+}
+
+test "snapshot review retains scripts larger than four kilobytes" {
+    const testing = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "foo-2");
+    const script = "echo reviewed\n" ** 400;
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "foo-2/prepare.sh",
+        .data = script,
+    });
+    var path_buffer: [4096]u8 = undefined;
+    const len = try tmp.dir.realPath(testing.io, &path_buffer);
+    var output_file = try tmp.dir.createFile(testing.io, "review-output", .{});
+    defer output_file.close(testing.io);
+    var output_buffer: [4096]u8 = undefined;
+    var environ: std.process.Environ.Map = .init(allocator);
+    defer environ.deinit();
+    var pacman: Pacman = .{
+        .allocator = allocator,
+        .io = testing.io,
+        .environ_map = &environ,
+        .stdout_writer = output_file.writer(testing.io, &output_buffer),
+        .zur_path = path_buffer[0..len],
+        .zur_pkg_dir = path_buffer[0..len],
+    };
+    defer pacman.deinit();
+    var files = try pacman.snapshotFiles("foo", "2");
+    defer deinitSnapshotFiles(allocator, &files);
+    try testing.expect(files.contains("prepare.sh"));
+    try testing.expectEqualStrings(script, files.get("prepare.sh").?);
 }
