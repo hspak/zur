@@ -334,11 +334,11 @@ const Parser = struct {
         try self.putFieldOwnedKey(key, value);
     }
 
+    // Takes ownership of key and value only on success.
     fn putFieldOwnedKey(self: *Parser, key: []u8, value: []u8) !void {
         const content = try self.allocator.create(Content);
-        content.* = .init(value);
         errdefer self.allocator.destroy(content);
-        errdefer content.deinit(self.allocator);
+        content.* = .init(value);
         // Last assignment wins (bash semantics). getOrPut first so a failed
         // insert cannot drop an existing entry.
         const gop = try self.fields.getOrPut(self.allocator, key);
@@ -1028,4 +1028,22 @@ test "readLines uses the final assignment to a field" {
     try pkgbuild.readLines();
 
     try testing.expectEqualStrings("second", pkgbuild.get("pkgname").?);
+}
+
+test "readLines releases each field exactly once on allocation failure" {
+    for ([_][]const u8{
+        "pkgname=foo\n",
+        "source=(one two)\n",
+        "package() { echo hello; }\n",
+        "pkgname=old\npkgname=new\nsource=(one two)\npackage() { echo hello; }\n",
+    }) |source| {
+        try testing.checkAllAllocationFailures(testing.allocator, testParseAllocations, .{source});
+    }
+}
+
+fn testParseAllocations(allocator: Allocator, source: []const u8) !void {
+    var pkgbuild = Pkgbuild.init(allocator, source);
+    defer pkgbuild.deinit();
+    try pkgbuild.readLines();
+    try testing.expect(pkgbuild.fields.count() > 0);
 }
