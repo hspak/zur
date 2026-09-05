@@ -431,7 +431,12 @@ pub fn setInstallPackages(self: *Pacman, pkg_list: std.ArrayList([]const u8)) Er
 
 /// Fill each tracked package's `aur_version` (and `base_name` if split).
 pub fn fetchRemoteAurVersions(self: *Pacman) Error!void {
-    self.aur_resp = try aur.queryAll(self.allocator, self.getRequest(), self.pkgs);
+    if (self.pkgs.count() == 0) return;
+    var names: std.ArrayList([]const u8) = .empty;
+    defer names.deinit(self.allocator);
+    var keys = self.pkgs.keyIterator();
+    while (keys.next()) |name| try names.append(self.allocator, name.*);
+    self.aur_resp = try aur.queryAll(self.allocator, self.getRequest(), names.items);
     if (self.aur_resp.?.resultcount == 0) {
         return error.ZeroResultsFromAurQuery;
     }
@@ -2665,4 +2670,15 @@ test "install requests deduplicate repeated package names" {
     try testing.expectEqual(@as(usize, 2), fixture.pacman.pkgs.count());
     try testing.expect(fixture.pacman.pkgs.contains("review-cli"));
     try testing.expect(fixture.pacman.pkgs.contains("review-lib"));
+}
+
+test "update skips remote initialization when no foreign packages are installed" {
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.pacman.fetchRemoteAurVersions();
+    try fixture.pacman.compareVersions();
+    try fixture.pacman.processOutOfDate();
+    try std.testing.expect(fixture.pacman.request_state == null);
+    try std.testing.expectEqual(@as(usize, 0), fixture.pacman.updates);
 }
