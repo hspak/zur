@@ -10,6 +10,5 @@ jobs:
           clean: false
       - name: Build and test
         run: |
-          ls -la
-          zig test src/tests.zig 
+          zig build test
           zig build
