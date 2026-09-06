@@ -12,9 +12,7 @@ const File = Io.File;
 // For `tcgetpgrp`/`tcsetpgrp` (terminal foreground process group control),
 // which the libc-backed `std.posix` layer doesn't expose. zur links libc for
 // libalpm, so these come straight from libc.
-const c = @cImport({
-    @cInclude("unistd.h");
-});
+const c = @import("c");
 
 const Alpm = @import("Alpm.zig");
 const aur = @import("aur.zig");

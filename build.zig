@@ -1,17 +1,24 @@
-const Build = @import("std").Build;
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const exe_mod = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
+    const translate_c = b.addTranslateC(.{
+        .root_source_file = b.path("src/c.h"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    exe_mod.linkSystemLibrary("alpm", .{});
+    translate_c.linkSystemLibrary("alpm", .{});
+    const c_mod = translate_c.createModule();
+
+    const exe_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    exe_mod.addImport("c", c_mod);
 
     const exe = b.addExecutable(.{
         .name = "zur",
@@ -32,9 +39,8 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libc = true,
     });
-    test_mod.linkSystemLibrary("alpm", .{});
+    test_mod.addImport("c", c_mod);
 
     const tests = b.addTest(.{
         .root_module = test_mod,
@@ -47,9 +53,8 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libc = true,
     });
-    cli_mod.linkSystemLibrary("alpm", .{});
+    cli_mod.addImport("c", c_mod);
     cli_mod.addOptions("build_options", exe_options);
     cli_mod.addOptions("cli_test_options", cli_options);
     const cli_tests = b.addTest(.{ .root_module = cli_mod });

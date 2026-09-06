@@ -2,9 +2,7 @@
 
 const std = @import("std");
 const log = std.log.scoped(.alpm);
-const alpm = @cImport({
-    @cInclude("alpm.h");
-});
+const alpm = @import("c");
 
 const Alpm = @This();
 
