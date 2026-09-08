@@ -57,6 +57,7 @@ const ErrorSet =
         DependencyConflict,
         MissingPackageOutput,
         DuplicatePackageOutput,
+        InvalidSrcinfo,
         UserDeclined,
     };
 pub const Error = ErrorSet;
@@ -111,6 +112,14 @@ const PendingPackage = struct {
 
     fn base(self: PendingPackage) []const u8 {
         return self.pkg.base_name orelse self.name;
+    }
+
+    fn isGit(self: PendingPackage) bool {
+        if (isGitPkg(self.base())) return true;
+        for (self.outputs.keys()) |name| {
+            if (isGitPkg(name)) return true;
+        }
+        return false;
     }
 
     fn isCached(self: PendingPackage) bool {
@@ -236,12 +245,11 @@ fn machineArch() []const u8 {
     };
 }
 
-// VCS/-git packages (e.g. neovim-git): rebuild even when pkgver is unchanged.
 fn isGitPkg(name: []const u8) bool {
     return mem.endsWith(u8, name, "-git");
 }
 
-// Whether a package needs an update/install. `remote_newer` is alpm vercmp.
+// Select candidates; git packages need a source refresh before comparing versions.
 fn shouldUpdate(name: []const u8, installed_version: ?[]const u8, requested: bool, remote_newer: bool) bool {
     // pkgver() can advance development versions beyond the RPC version.
     return requested or installed_version == null or isGitPkg(name) or remote_newer;
@@ -509,8 +517,10 @@ fn processOutOfDate(self: *Pacman) Error!void {
     }
 
     for (pending.items) |*item| {
-        for (item.outputs.keys(), item.outputs.values()) |name, *output| {
-            output.artifact = try self.findExistingPackage(name, output.pkg.aur_version.?);
+        if (!item.isGit()) {
+            for (item.outputs.keys(), item.outputs.values()) |name, *output| {
+                output.artifact = try self.findExistingPackage(name, output.pkg.aur_version.?);
+            }
         }
         if (!item.isCached()) try self.downloadAndExtractPackage(item);
     }
@@ -1289,7 +1299,27 @@ fn install(self: *Pacman, item: *PendingPackage) !void {
 
 fn installUsing(self: *Pacman, item: *PendingPackage, runner: anytype) !void {
     const full_pkg_dir = (item.snapshot orelse return error.InvalidSnapshot).source_path;
-    try runner.execCommand(&.{ "makepkg", "-scC" }, full_pkg_dir);
+    const is_git = item.isGit();
+    if (is_git) {
+        try self.print("{s}::{s} Checking upstream version of {s}\n", .{
+            color.bold_foreground_blue,
+            color.reset,
+            item.base(),
+        });
+        // --nobuild runs prepare() and pkgver() without compiling or packaging.
+        try runner.execCommand(&.{
+            "makepkg",
+            "--nobuild",
+            "--syncdeps",
+            "--cleanbuild",
+        }, full_pkg_dir);
+        const srcinfo = try runner.captureCommand(&.{ "makepkg", "--printsrcinfo" }, full_pkg_dir);
+        defer self.allocator.free(srcinfo);
+        try self.skipCurrentGitOutputs(item, srcinfo);
+        if (item.outputs.count() == 0) return;
+    }
+    // Reuse the prepared sources so a git build uses the revision just checked.
+    try runner.execCommand(&.{ "makepkg", if (is_git) "-sce" else "-scC" }, full_pkg_dir);
     const listing = try runner.captureCommand(&.{ "makepkg", "--packagelist" }, full_pkg_dir);
     defer self.allocator.free(listing);
     try self.selectBuiltArtifacts(item, full_pkg_dir, listing);
@@ -1299,6 +1329,74 @@ fn installUsing(self: *Pacman, item: *PendingPackage, runner: anytype) !void {
     const source_root = try Dir.path.join(self.allocator, &.{ self.zur_path, ".src" });
     defer self.allocator.free(source_root);
     try self.removeStaleArtifacts(item.base(), source_root);
+}
+
+fn skipCurrentGitOutputs(self: *Pacman, item: *PendingPackage, srcinfo: []const u8) !void {
+    const version = try srcinfoVersion(self.allocator, srcinfo);
+    defer self.allocator.free(version);
+    for (item.outputs.keys()) |name| {
+        if (!srcinfoHasPackage(srcinfo, name)) return error.MissingPackageOutput;
+    }
+    var index: usize = 0;
+    while (index < item.outputs.count()) {
+        const name = item.outputs.keys()[index];
+        const output = item.outputs.values()[index];
+        if (output.pkg.installed_version) |installed| {
+            if (try Alpm.compareVersions(self.allocator, version, installed) == .eq) {
+                try self.print("{s}::{s} {s} ({s}) is up-to-date, skipping\n", .{
+                    color.bold_foreground_blue,
+                    color.reset,
+                    name,
+                    version,
+                });
+                if (output.artifact) |artifact| self.allocator.free(artifact);
+                item.outputs.orderedRemoveAt(index);
+                continue;
+            }
+        }
+        index += 1;
+    }
+}
+
+// The caller owns the version. Read fresh makepkg output, never the AUR's stale .SRCINFO.
+fn srcinfoVersion(allocator: Allocator, srcinfo: []const u8) ![]u8 {
+    var pkgver: ?[]const u8 = null;
+    var pkgrel: ?[]const u8 = null;
+    var epoch: ?[]const u8 = null;
+    var lines = mem.splitScalar(u8, srcinfo, '\n');
+    while (lines.next()) |line| {
+        const separator = mem.indexOfScalar(u8, line, '=') orelse continue;
+        const key = mem.trim(u8, line[0..separator], " \t\r");
+        const value = mem.trim(u8, line[separator + 1 ..], " \t\r");
+        // Versions are shared by all outputs and belong to the pkgbase section.
+        if (mem.eql(u8, key, "pkgname")) break;
+        const field = if (mem.eql(u8, key, "pkgver")) &pkgver else if (mem.eql(u8, key, "pkgrel"))
+            &pkgrel
+        else if (mem.eql(u8, key, "epoch"))
+            &epoch
+        else
+            continue;
+        if (field.* != null or value.len == 0) return error.InvalidSrcinfo;
+        field.* = value;
+    }
+    const version = pkgver orelse return error.InvalidSrcinfo;
+    const release = pkgrel orelse return error.InvalidSrcinfo;
+    if (epoch) |prefix| return std.fmt.allocPrint(allocator, "{s}:{s}-{s}", .{
+        prefix,
+        version,
+        release,
+    });
+    return std.fmt.allocPrint(allocator, "{s}-{s}", .{ version, release });
+}
+
+fn srcinfoHasPackage(srcinfo: []const u8, name: []const u8) bool {
+    var lines = mem.splitScalar(u8, srcinfo, '\n');
+    while (lines.next()) |line| {
+        const separator = mem.indexOfScalar(u8, line, '=') orelse continue;
+        if (!mem.eql(u8, mem.trim(u8, line[0..separator], " \t\r"), "pkgname")) continue;
+        if (mem.eql(u8, mem.trim(u8, line[separator + 1 ..], " \t\r"), name)) return true;
+    }
+    return false;
 }
 
 fn selectBuiltArtifacts(self: *Pacman, item: *PendingPackage, build_dir: []const u8, listing: []const u8) !void {
@@ -1728,7 +1826,7 @@ test "shouldUpdate selects a normal package only when its remote version is newe
     try testing.expect(!shouldUpdate("foo", "2.0", false, false));
 }
 
-test "shouldUpdate rebuilds a git package when its pkgver still matches" {
+test "shouldUpdate checks upstream when a git package still matches AUR" {
     const testing = std.testing;
     try testing.expect(shouldUpdate("neovim-git", "r100.abc", false, false));
     try testing.expect(shouldUpdate("neovim-git", "r100.abc", false, false));
@@ -2234,7 +2332,7 @@ test "dependency planning installs AUR check dependencies before the consumer" {
     try testing.expectEqualStrings("review-app", pending.items[1].name);
 }
 
-test "shouldUpdate rebuilds a git package whose generated version is ahead of AUR" {
+test "shouldUpdate checks upstream when a git package version is ahead of AUR" {
     try std.testing.expect(shouldUpdate("foo-git", "r200.def-1", false, false));
 }
 
@@ -2310,6 +2408,305 @@ test "split builds install only selected archive identities" {
     const unselected = try Dir.openFileAbsolute(testing.io, gui, .{});
     unselected.close(testing.io);
 }
+
+test "git install skips builds and reinstalls when the upstream version matches" {
+    const testing = std.testing;
+    for ([_]bool{ false, true }) |requested| {
+        var fixture: TestDependencies = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        const allocator = fixture.arena.allocator();
+        const archive = try testPackageArchive(&fixture, "produced.pkg.tar", "review-git");
+        var runner: TestBuildRunner = .{
+            .allocator = allocator,
+            .listing = archive,
+            .srcinfo = "pkgbase = review-git\n\tpkgver = r200.def\n\tpkgrel = 1\npkgname = review-git\n",
+        };
+        defer runner.deinit();
+        const pkg: Package = .{
+            .installed_version = "r200.def-1",
+            .aur_version = "r100.abc-1",
+            .requested = requested,
+        };
+        var item: PendingPackage = .{ .name = "review-git", .pkg = pkg };
+        defer item.deinit(allocator);
+        try item.outputs.put(allocator, item.name, .{ .pkg = pkg });
+        item.snapshot = try testSnapshot(&fixture, item.name);
+
+        try fixture.pacman.installUsing(&item, &runner);
+
+        try testing.expectEqual(@as(usize, 0), runner.builds);
+        try testing.expectEqual(@as(usize, 0), runner.installs);
+        try testing.expectEqual(@as(usize, 1), runner.preparations);
+        try fixture.pacman.stdout().flush();
+        const output = try fixture.tmp.dir.readFileAlloc(testing.io, "output", allocator, .unlimited);
+        defer allocator.free(output);
+        try testing.expect(mem.indexOf(u8, output, "review-git (r200.def-1) is up-to-date, skipping") != null);
+        const record = try fixture.pacman.installedSnapshotPath(item.base(), item.name);
+        defer allocator.free(record);
+        try testing.expectError(error.FileNotFound, Dir.cwd().statFile(testing.io, record, .{}));
+    }
+}
+
+test "git install compares the full generated version and retains fresh installs" {
+    const testing = std.testing;
+    const cases = [_]struct {
+        installed: ?[]const u8,
+        pkgver: []const u8 = "r200.def",
+        pkgrel: []const u8 = "1",
+        epoch: []const u8 = "",
+        builds: usize = 1,
+    }{
+        .{ .installed = "r100.abc-1" },
+        .{ .installed = "r200.def-1", .pkgrel = "2" },
+        .{ .installed = "1:r200.def-1", .epoch = "\tepoch = 2\n" },
+        .{ .installed = "1:r200.def-1", .epoch = "\tepoch = 1\n", .builds = 0 },
+        .{ .installed = "r200.def-1", .epoch = "\tepoch = 0\n", .builds = 0 },
+        .{ .installed = null },
+    };
+    for (cases) |case| {
+        var fixture: TestDependencies = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        const allocator = fixture.arena.allocator();
+        const archive = try testPackageArchive(&fixture, "produced.pkg.tar", "review-git");
+        const srcinfo = try std.fmt.allocPrint(allocator, "pkgbase = review-git\n\tpkgver = {s}\n\tpkgrel = {s}\n{s}pkgname = review-git\n", .{ case.pkgver, case.pkgrel, case.epoch });
+        defer allocator.free(srcinfo);
+        var runner: TestBuildRunner = .{ .allocator = allocator, .listing = archive, .srcinfo = srcinfo };
+        defer runner.deinit();
+        const pkg: Package = .{ .installed_version = case.installed, .aur_version = "r0-1" };
+        var item: PendingPackage = .{ .name = "review-git", .pkg = pkg };
+        defer item.deinit(allocator);
+        try item.outputs.put(allocator, item.name, .{ .pkg = pkg });
+        item.snapshot = try testSnapshot(&fixture, item.name);
+
+        try fixture.pacman.installUsing(&item, &runner);
+
+        try testing.expectEqual(@as(usize, 1), runner.preparations);
+        try testing.expectEqual(case.builds, runner.builds);
+        try testing.expectEqual(case.builds, runner.installs);
+    }
+}
+
+test "git split install skips current outputs while installing missing and outdated siblings" {
+    const testing = std.testing;
+    for ([_]?[]const u8{ null, "1-1" }) |installed| {
+        var fixture: TestDependencies = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        const allocator = fixture.arena.allocator();
+        const cli = try testPackageArchive(&fixture, "cli.pkg.tar", "review-cli");
+        const lib = try testPackageArchive(&fixture, "lib.pkg.tar", "review-lib");
+        const listing = try std.fmt.allocPrint(allocator, "{s}\n{s}\n", .{ cli, lib });
+        defer allocator.free(listing);
+        var runner: TestBuildRunner = .{
+            .allocator = allocator,
+            .listing = listing,
+            .srcinfo = "pkgbase = review-git\n\tpkgver = 2\n\tpkgrel = 1\npkgname = review-cli\npkgname = review-lib\n",
+        };
+        defer runner.deinit();
+        const pkg: Package = .{ .installed_version = "2-1", .base_name = "review-git" };
+        var item: PendingPackage = .{ .name = "review-cli", .pkg = pkg };
+        defer item.deinit(allocator);
+        try item.outputs.put(allocator, "review-cli", .{ .pkg = pkg });
+        try item.outputs.put(allocator, "review-lib", .{ .pkg = .{ .installed_version = installed } });
+        item.snapshot = try testSnapshot(&fixture, item.base());
+
+        try fixture.pacman.installUsing(&item, &runner);
+
+        try testing.expectEqual(@as(usize, 1), runner.builds);
+        try testing.expectEqual(@as(usize, 1), runner.installs);
+        try testing.expectEqual(@as(usize, 1), runner.installed.items.len);
+        var archive = try fixture.pacman.alpm_state.?.readArchive(runner.installed.items[0]);
+        defer archive.deinit(allocator);
+        try testing.expectEqualStrings("review-lib", archive.name);
+    }
+}
+
+test "git install stops before building when the upstream check fails" {
+    const testing = std.testing;
+    const cases = [_]struct {
+        srcinfo: []const u8 = "",
+        reject_preparation: bool = false,
+        reject_srcinfo: bool = false,
+        expected: error{ NonzeroStatus, InvalidSrcinfo, MissingPackageOutput },
+    }{
+        .{ .reject_preparation = true, .expected = error.NonzeroStatus },
+        .{ .reject_srcinfo = true, .expected = error.NonzeroStatus },
+        .{ .expected = error.InvalidSrcinfo },
+        .{ .srcinfo = "pkgver = r1\npkgname = review-git\n", .expected = error.InvalidSrcinfo },
+        .{ .srcinfo = "pkgver = \npkgrel = 1\npkgname = review-git\n", .expected = error.InvalidSrcinfo },
+        .{ .srcinfo = "pkgver = r1\npkgrel = 1\npkgname = other-git\n", .expected = error.MissingPackageOutput },
+    };
+    for (cases) |case| {
+        var fixture: TestDependencies = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        const allocator = fixture.arena.allocator();
+        var runner: TestBuildRunner = .{
+            .allocator = allocator,
+            .listing = "",
+            .srcinfo = case.srcinfo,
+            .reject_preparation = case.reject_preparation,
+            .reject_srcinfo = case.reject_srcinfo,
+        };
+        defer runner.deinit();
+        const pkg: Package = .{ .installed_version = "r1-1" };
+        var item: PendingPackage = .{ .name = "review-git", .pkg = pkg };
+        defer item.deinit(allocator);
+        try item.outputs.put(allocator, item.name, .{ .pkg = pkg });
+        item.snapshot = try testSnapshot(&fixture, item.name);
+
+        try testing.expectError(case.expected, fixture.pacman.installUsing(&item, &runner));
+
+        try testing.expectEqual(@as(usize, 0), runner.builds);
+        try testing.expectEqual(@as(usize, 0), runner.installs);
+        try testing.expectEqual(@as(usize, 1), item.outputs.count());
+    }
+}
+
+test "non-git install retains explicit reinstalls without an upstream check" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const allocator = fixture.arena.allocator();
+    const archive = try testPackageArchive(&fixture, "produced.pkg.tar", "review-cli");
+    var runner: TestBuildRunner = .{ .allocator = allocator, .listing = archive };
+    defer runner.deinit();
+    const pkg: Package = .{ .installed_version = "2-1", .aur_version = "2-1", .requested = true };
+    var item: PendingPackage = .{ .name = "review-cli", .pkg = pkg };
+    defer item.deinit(allocator);
+    try item.outputs.put(allocator, item.name, .{ .pkg = pkg });
+    item.snapshot = try testSnapshot(&fixture, item.name);
+
+    try fixture.pacman.installUsing(&item, &runner);
+
+    try testing.expectEqual(@as(usize, 0), runner.preparations);
+    try testing.expectEqual(@as(usize, 1), runner.builds);
+    try testing.expectEqual(@as(usize, 1), runner.installs);
+}
+
+test "git install refreshes local upstream commits with real makepkg" {
+    const testing = std.testing;
+    if (c.getuid() == 0) return error.SkipZigTest; // makepkg refuses root builds.
+    for ([_][]const u8{ "/usr/bin/makepkg", "/usr/bin/git", "/usr/bin/fakeroot" }) |path| {
+        const file = Dir.openFileAbsolute(testing.io, path, .{}) catch |err| switch (err) {
+            error.FileNotFound => return error.SkipZigTest,
+            else => return err,
+        };
+        file.close(testing.io);
+    }
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const allocator = fixture.arena.allocator();
+    try fixture.environ.put("PATH", "/usr/bin:/bin");
+    try fixture.environ.put("GIT_CONFIG_NOSYSTEM", "1");
+    try fixture.environ.put("GIT_CONFIG_GLOBAL", "/dev/null");
+    try fixture.environ.put("PKGEXT", ".pkg.tar");
+    const init_output = try fixture.pacman.captureCommand(&.{
+        "git",
+        "init",
+        "--initial-branch=main",
+        "upstream",
+    }, fixture.pacman.zur_path);
+    defer allocator.free(init_output);
+    const pkgbuild = try std.fmt.allocPrint(allocator,
+        \\pkgname=review-git
+        \\pkgver=r0
+        \\pkgrel=1
+        \\arch=(any)
+        \\source=("upstream::git+file://{s}/upstream#branch=main")
+        \\sha256sums=(SKIP)
+        \\options=(!debug !strip)
+        \\prepare() {{
+        \\  echo prepared >> "$startdir/prepared"
+        \\}}
+        \\pkgver() {{
+        \\  cd "$srcdir/upstream"
+        \\  printf 'r%s' "$(git rev-list --count HEAD)"
+        \\}}
+        \\build() {{
+        \\  echo built > "$startdir/built"
+        \\}}
+        \\package() {{
+        \\  mkdir -p "$pkgdir/usr/share/review-git"
+        \\  cp "$startdir/built" "$pkgdir/usr/share/review-git/marker"
+        \\}}
+        \\
+    , .{fixture.pacman.zur_path});
+    defer allocator.free(pkgbuild);
+    const cases = [_]struct { commit: bool, installed: []const u8, builds: usize }{
+        .{ .commit = true, .installed = "r1-1", .builds = 0 },
+        .{ .commit = true, .installed = "r1-1", .builds = 1 },
+        .{ .commit = false, .installed = "r2-1", .builds = 0 },
+    };
+    for (cases) |case| {
+        if (case.commit) {
+            const commit_output = try fixture.pacman.captureCommand(&.{
+                "git",
+                "-C",
+                "upstream",
+                "-c",
+                "user.name=Zur test",
+                "-c",
+                "user.email=zur@example.test",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "upstream revision",
+            }, fixture.pacman.zur_path);
+            defer allocator.free(commit_output);
+        }
+        var runner: TestGitRunner = .{
+            .pacman = &fixture.pacman,
+            .actions = .{ .allocator = allocator, .listing = "" },
+        };
+        defer runner.actions.deinit();
+        const pkg: Package = .{ .installed_version = case.installed, .aur_version = "r0-1" };
+        var item: PendingPackage = .{ .name = "review-git", .pkg = pkg };
+        defer item.deinit(allocator);
+        try item.outputs.put(allocator, item.name, .{ .pkg = pkg });
+        item.snapshot = try testSnapshot(&fixture, item.name);
+        var directory = try Dir.openDirAbsolute(testing.io, item.snapshot.?.source_path, .{});
+        defer directory.close(testing.io);
+        try directory.writeFile(testing.io, .{ .sub_path = "PKGBUILD", .data = pkgbuild });
+
+        try fixture.pacman.installUsing(&item, &runner);
+
+        try testing.expectEqual(@as(usize, 1), runner.actions.preparations);
+        try testing.expectEqual(case.builds, runner.actions.builds);
+        try testing.expectEqual(case.builds, runner.actions.installs);
+        const prepared = try directory.readFileAlloc(testing.io, "prepared", allocator, .unlimited);
+        defer allocator.free(prepared);
+        try testing.expectEqualStrings("prepared\n", prepared);
+        if (case.builds == 0) {
+            try testing.expectError(error.FileNotFound, directory.statFile(testing.io, "built", .{}));
+        } else {
+            var archive = try fixture.pacman.alpm_state.?.readArchive(runner.actions.installed.items[0]);
+            defer archive.deinit(allocator);
+            try testing.expectEqualStrings("r2-1", archive.version);
+        }
+    }
+}
+
+// Exercise makepkg itself while intercepting the final system installation.
+const TestGitRunner = struct {
+    pacman: *Pacman,
+    actions: TestBuildRunner,
+
+    fn execCommand(self: *TestGitRunner, argv: []const []const u8, cwd: []const u8) !void {
+        try self.actions.execCommand(argv, cwd);
+        if (!mem.eql(u8, argv[0], "makepkg")) return;
+        const output = try self.pacman.captureCommand(argv, cwd);
+        defer self.pacman.allocator.free(output);
+    }
+
+    fn captureCommand(self: *TestGitRunner, argv: []const []const u8, cwd: []const u8) ![]u8 {
+        return self.pacman.captureCommand(argv, cwd);
+    }
+};
 
 test "split builds reject missing selected output before installing" {
     const testing = std.testing;
@@ -2390,6 +2787,10 @@ fn testPackageArchiveFor(fixture: *TestDependencies, filename: []const u8, name:
 const TestBuildRunner = struct {
     allocator: Allocator,
     listing: []const u8,
+    srcinfo: ?[]const u8 = null,
+    preparations: usize = 0,
+    reject_preparation: bool = false,
+    reject_srcinfo: bool = false,
     builds: usize = 0,
     installs: usize = 0,
     installed: std.ArrayList([]u8) = .empty,
@@ -2397,6 +2798,7 @@ const TestBuildRunner = struct {
     fn deinit(self: *TestBuildRunner) void {
         for (self.installed.items) |path| self.allocator.free(path);
         self.installed.deinit(self.allocator);
+        self.* = undefined;
     }
 
     fn execCommand(self: *TestBuildRunner, argv: []const []const u8, _: []const u8) !void {
@@ -2406,6 +2808,18 @@ const TestBuildRunner = struct {
                     (mem.startsWith(u8, arg, "-") and !mem.startsWith(u8, arg, "--") and
                         mem.indexOfScalar(u8, arg, 'i') != null)) return error.UnselectedOutputsInstalled;
             }
+            if (mem.eql(u8, argv[1], "--nobuild")) {
+                try std.testing.expectEqualSlices([]const u8, &.{
+                    "makepkg",
+                    "--nobuild",
+                    "--syncdeps",
+                    "--cleanbuild",
+                }, argv);
+                self.preparations += 1;
+                if (self.reject_preparation) return error.NonzeroStatus;
+                return;
+            }
+            if (self.preparations != 0) try std.testing.expectEqualStrings("-sce", argv[1]);
             self.builds += 1;
             return;
         }
@@ -2419,6 +2833,10 @@ const TestBuildRunner = struct {
 
     fn captureCommand(self: *TestBuildRunner, argv: []const []const u8, _: []const u8) ![]u8 {
         try std.testing.expectEqualStrings("makepkg", argv[0]);
+        if (mem.eql(u8, argv[1], "--printsrcinfo")) {
+            if (self.reject_srcinfo) return error.NonzeroStatus;
+            return self.allocator.dupe(u8, self.srcinfo orelse return error.UnexpectedCommand);
+        }
         try std.testing.expectEqualStrings("--packagelist", argv[1]);
         return self.allocator.dupe(u8, self.listing);
     }

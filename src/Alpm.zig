@@ -263,6 +263,15 @@ pub fn readArchive(self: *Alpm, path: []const u8) Error!Archive {
 
 /// True if `ver_a` is a newer alpm version than `ver_b`.
 pub fn isNewerThan(allocator: std.mem.Allocator, ver_a: []const u8, ver_b: []const u8) Error!bool {
+    return try compareVersions(allocator, ver_a, ver_b) == .gt;
+}
+
+/// Compare full package versions, including epoch and release, using libalpm ordering.
+pub fn compareVersions(
+    allocator: std.mem.Allocator,
+    ver_a: []const u8,
+    ver_b: []const u8,
+) Error!std.math.Order {
     const ver_a_sentinel = try std.mem.concatWithSentinel(allocator, u8, &.{ver_a}, 0);
     defer allocator.free(ver_a_sentinel);
     const ver_b_sentinel = try std.mem.concatWithSentinel(allocator, u8, &.{ver_b}, 0);
@@ -271,11 +280,7 @@ pub fn isNewerThan(allocator: std.mem.Allocator, ver_a: []const u8, ver_b: []con
     const ver_a_cstr: [*c]const u8 = @ptrCast(ver_a_sentinel.ptr);
     const ver_b_cstr: [*c]const u8 = @ptrCast(ver_b_sentinel.ptr);
 
-    const ret = alpm.alpm_pkg_vercmp(ver_a_cstr, ver_b_cstr);
-    if (ret == 1) {
-        return true;
-    }
-    return false;
+    return std.math.order(alpm.alpm_pkg_vercmp(ver_a_cstr, ver_b_cstr), 0);
 }
 
 const testing = std.testing;
