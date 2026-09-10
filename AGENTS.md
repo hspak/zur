@@ -2,8 +2,10 @@
 
 Goals:
 - All operations scoped within ~/.zur
+- File operations are generally explicit
 - Minimal user input, though always surface key install info for the user to
 review
+- All log statements are debug level, this is a CLI application
 
 # Zig Guidelines
 

@@ -210,7 +210,7 @@ fn parseResponse(comptime T: type, allocator: std.mem.Allocator, body: []const u
         .allocate = .alloc_always,
     });
     if (response.@"error" != null or std.mem.eql(u8, response.type, "error")) {
-        log.warn("AUR rejected the request: {s}", .{response.@"error" orelse "unspecified RPC error"});
+        log.debug("AUR rejected the request: {s}", .{response.@"error" orelse "unspecified RPC error"});
         return error.RpcRejected;
     }
     if (response.version != 5 or !std.mem.eql(u8, response.type, expected_type) or

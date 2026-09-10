@@ -21,6 +21,12 @@ const review_text = @import("review_text.zig");
 const Request = @import("Request.zig");
 const Pkgbuild = @import("Pkgbuild.zig");
 const Snapshot = @import("Pacman/Snapshot.zig");
+const BuildCache = @import("Pacman/BuildCache.zig");
+const VersionCache = @import("Pacman/VersionCache.zig");
+const retention = @import("Pacman/retention.zig");
+const srcinfo_text = @import("Pacman/srcinfo.zig");
+const srcinfoVersion = srcinfo_text.version;
+const srcinfoHasPackage = srcinfo_text.hasPackage;
 
 const Pacman = @This();
 
@@ -36,12 +42,15 @@ const ErrorSet =
     Dir.ReadLinkError ||
     Dir.WriteFileError ||
     Dir.RenameError ||
+    Dir.SetTimestampsError ||
     File.OpenError ||
     File.StatError ||
     std.process.SpawnError ||
     std.process.RunError ||
     std.process.Child.WaitError ||
     Snapshot.Error ||
+    BuildCache.Error ||
+    VersionCache.Error ||
     std.json.ParseError(std.json.Scanner) ||
     Io.Reader.DelimiterError ||
     error{
@@ -381,6 +390,10 @@ fn flushStdout(self: *Pacman) void {
 /// Resolve, review, and install requested names, or update foreign packages
 /// when names is empty. Metadata is allocated for this Pacman run.
 pub fn installOrUpdate(self: *Pacman, names: []const []const u8) Error!void {
+    var builds: BuildCache = undefined;
+    try builds.init(self.io, self.zur_path, self.stdout());
+    defer builds.deinit();
+    defer self.cleanupArchiveCaches() catch |err| log.debug("cannot prune archive caches: {t}", .{err});
     if (names.len == 0) {
         try self.fetchLocalPackages();
     } else {
@@ -488,9 +501,16 @@ fn compareVersions(self: *Pacman) Error!void {
         color.reset,
     });
     while (pkgs_iter.next()) |pkg| {
-        if (pkg.value_ptr.*.requires_update) {
-            try self.print(" {s}\n", .{pkg.key_ptr.*});
-        }
+        if (!pkg.value_ptr.requires_update) continue;
+        try self.print(" {s} ({s}{s}{s} -> {s}{s}{s})\n", .{
+            pkg.key_ptr.*,
+            color.foreground_red,
+            pkg.value_ptr.installed_version orelse "not installed",
+            color.reset,
+            color.foreground_green,
+            pkg.value_ptr.aur_version.?,
+            color.reset,
+        });
     }
 }
 
@@ -501,7 +521,10 @@ fn processOutOfDate(self: *Pacman) Error!void {
     // Collect missing AUR dependencies in postorder so the build phase remains
     // dependency-first even though every snapshot is downloaded up front.
     var pending: std.ArrayList(PendingPackage) = .empty;
-    defer deinitPendingPackages(self.allocator, &pending);
+    defer {
+        self.flushStdout();
+        deinitPendingPackages(self.allocator, &pending);
+    }
     var queued_bases: std.StringHashMapUnmanaged(usize) = .empty;
     defer queued_bases.deinit(self.allocator);
 
@@ -674,7 +697,12 @@ fn resolveDependency(self: *Pacman, dependency: []const u8) Error!?aur.Info {
     const providers = try self.getProviders(name);
     for (providers) |info| {
         if (!try self.infoSatisfies(dependency, info)) continue;
-        try self.print(":: {s} provides {s}\n", .{ info.name, dependency });
+        try self.print("{s}::{s} {s} provides {s}\n", .{
+            color.bold_foreground_blue,
+            color.reset,
+            info.name,
+            dependency,
+        });
         return info;
     }
     try self.print("Cannot satisfy dependency: {s}\n", .{dependency});
@@ -758,14 +786,6 @@ fn findExistingPackage(self: *Pacman, pkg_name: []const u8, version: []const u8)
     if (isGitPkg(pkg_name)) return null;
     const directory = try Dir.path.join(self.allocator, &.{ self.zur_pkg_dir, pkg_name });
     defer self.allocator.free(directory);
-    if (try self.findCachedInDir(directory, pkg_name, version)) |path| return path;
-    // Migrate only a verified requested artifact from the former flat cache.
-    const legacy = (try self.findCachedInDir(self.zur_pkg_dir, pkg_name, version)) orelse return null;
-    defer self.allocator.free(legacy);
-    return try self.moveArchiveToCache(pkg_name, legacy);
-}
-
-fn findCachedInDir(self: *Pacman, directory: []const u8, name: []const u8, version: []const u8) !?[]u8 {
     var dir = Dir.openDirAbsolute(self.io, directory, .{ .iterate = true, .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => return err,
@@ -783,8 +803,12 @@ fn findCachedInDir(self: *Pacman, directory: []const u8, name: []const u8, versi
             else => return err,
         };
         defer archive.deinit(self.allocator);
-        if (!mem.eql(u8, archive.name, name) or !mem.eql(u8, archive.version, version)) continue;
+        if (!mem.eql(u8, archive.name, pkg_name) or !mem.eql(u8, archive.version, version)) continue;
         if (!mem.eql(u8, archive.arch, "any") and !mem.eql(u8, archive.arch, machineArch())) continue;
+        try dir.setTimestamps(self.io, entry.name, .{
+            .follow_symlinks = false,
+            .modify_timestamp = .now,
+        });
         keep = true;
         return path;
     }
@@ -801,21 +825,43 @@ fn moveArchiveToCache(self: *Pacman, name: []const u8, source: []const u8) ![]u8
     defer self.allocator.free(source_sig);
     const dest_sig = try std.fmt.allocPrint(self.allocator, "{s}.sig", .{dest});
     defer self.allocator.free(dest_sig);
-    Dir.renameAbsolute(source_sig, dest_sig, self.io) catch |err| switch (err) {
+    if (Dir.renameAbsolute(source_sig, dest_sig, self.io)) |_| {
+        try self.print("  {s}->{s} moved package signature: {s} -> {s}\n", .{
+            color.foreground_blue,
+            color.reset,
+            source_sig,
+            dest_sig,
+        });
+        self.flushStdout();
+    } else |err| switch (err) {
         error.FileNotFound => {
-            Dir.cwd().deleteFile(self.io, dest_sig) catch |delete_err| switch (delete_err) {
+            if (Dir.cwd().deleteFile(self.io, dest_sig)) |_| {
+                try self.print("  {s}->{s} deleted stale package signature: {s}\n", .{
+                    color.foreground_blue,
+                    color.reset,
+                    dest_sig,
+                });
+                self.flushStdout();
+            } else |delete_err| switch (delete_err) {
                 error.FileNotFound => {},
                 else => return delete_err,
-            };
+            }
         },
         else => return err,
-    };
+    }
     try Dir.renameAbsolute(source, dest, self.io);
+    try self.print("  {s}->{s} moved package archive: {s} -> {s}\n", .{
+        color.foreground_blue,
+        color.reset,
+        source,
+        dest,
+    });
+    self.flushStdout();
     return dest;
 }
 
-fn snapshotPath(self: *Pacman, base: []const u8, version: []const u8) Allocator.Error![]u8 {
-    return Dir.path.join(self.allocator, &.{ self.zur_path, ".src", base, version });
+fn snapshotPath(self: *Pacman, base: []const u8, filename: []const u8) Allocator.Error![]u8 {
+    return Dir.path.join(self.allocator, &.{ self.zur_path, ".src", base, filename });
 }
 
 fn downloadAndExtractPackage(self: *Pacman, item: *PendingPackage) !void {
@@ -827,6 +873,7 @@ fn downloadAndExtractPackageUsing(self: *Pacman, pkg_name: []const u8, pkg: *con
     const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}.tar.gz", .{ aur.snapshot, base });
     defer self.allocator.free(url);
     try self.print(" downloading from: {s}{s}{s}\n", .{ color.bold, url, color.reset });
+    self.flushStdout();
     const bytes = try request.get(url);
     defer self.allocator.free(bytes);
     return Snapshot.create(self.allocator, self.io, self.zur_path, base, bytes);
@@ -899,12 +946,16 @@ fn compareUpdateAndInstall(self: *Pacman, item: *PendingPackage) !void {
     var scratch: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer scratch.deinit();
     const allocator = scratch.allocator();
+    self.flushStdout();
     var previous = try self.loadInstalledSnapshot(item);
-    defer if (previous) |*snapshot| snapshot.deinit(self.allocator);
-    var old_files = if (previous) |snapshot|
+    defer {
+        self.flushStdout();
+        if (previous) |*snapshot| snapshot.deinit(self.allocator);
+    }
+    var old_files: SourceFiles = if (previous) |snapshot|
         try self.readSnapshotFiles(allocator, snapshot.source_path)
     else
-        SourceFiles.empty;
+        .empty;
     defer deinitSnapshotFiles(allocator, &old_files);
     var new_files = try self.readSnapshotFiles(allocator, item.snapshot.?.source_path);
     defer deinitSnapshotFiles(allocator, &new_files);
@@ -950,12 +1001,24 @@ fn reviewSnapshotChanges(
             if (previous.kind == new.kind and previous.mode == new.mode and
                 mem.eql(u8, previous.contents, new.contents)) continue;
             if (previous.kind != new.kind or previous.mode != new.mode) {
-                try self.print(":: {s}: {t} mode {o} -> {t} mode {o}\n", .{
-                    file.key_ptr.*, previous.kind, previous.mode, new.kind, new.mode,
+                try self.print("{s}::{s} {s}: {t} mode {o} -> {t} mode {o}\n", .{
+                    color.bold_foreground_blue,
+                    color.reset,
+                    file.key_ptr.*,
+                    previous.kind,
+                    previous.mode,
+                    new.kind,
+                    new.mode,
                 });
             }
         } else {
-            try self.print(":: Added {s}: {t} mode {o}\n", .{ file.key_ptr.*, new.kind, new.mode });
+            try self.print("{s}::{s} Added {s}: {t} mode {o}\n", .{
+                color.bold_foreground_blue,
+                color.reset,
+                file.key_ptr.*,
+                new.kind,
+                new.mode,
+            });
         }
         changed = true;
         if (mem.eql(u8, file.key_ptr.*, "PKGBUILD") and new.kind == .file and
@@ -992,23 +1055,16 @@ fn printPkgbuildChanges(
         return self.printDiff(allocator, "PKGBUILD", old_contents, new_contents);
     }
 
-    try old.indentValues(2);
-    try new.indentValues(2);
     for (new.fields.keys(), new.fields.values()) |name, field| {
-        if (old.fields.get(name)) |previous| {
-            if (mem.eql(u8, previous.source, field.source)) continue;
-            // Normalized display values alone cannot reveal changes to array
-            // delimiters, comments, or whitespace inside shell words.
-            if (mem.eql(u8, previous.value, field.value)) {
-                try self.printDiff(allocator, name, previous.source, field.source);
-                continue;
-            }
-        }
-        try printUpdatedPkgbuildField(self.stdout(), name, field.value);
+        const previous = if (old.fields.get(name)) |content| content.source else "";
+        if (mem.eql(u8, previous, field.source)) continue;
+        // Compare source text so unchanged function lines disappear and shell
+        // whitespace, delimiters, and comments retain their original meaning.
+        try self.printDiff(allocator, name, previous, field.source);
     }
     for (old.fields.keys(), old.fields.values()) |name, field| {
         if (new.fields.contains(name)) continue;
-        try printPkgbuildFieldChange(self.stdout(), name, field.value, "removed");
+        try self.printDiff(allocator, name, field.source, "");
     }
 
     const old_remaining = try old.remainingText(allocator);
@@ -1060,7 +1116,11 @@ fn printDiff(
     // A byte-size limit cannot bound a line-count matrix. Display both complete
     // versions when alignment would exceed the memory budget.
     if (n + 1 > max_diff_cells / (m + 1)) {
-        try self.print(":: {s} changed (complete old/new contents):\n", .{name});
+        try self.print("{s}::{s} {s} changed (complete old/new contents):\n", .{
+            color.bold_foreground_blue,
+            color.reset,
+            name,
+        });
         for (old) |line| try self.print("  - {s}\n", .{line});
         for (new) |line| try self.print("  + {s}\n", .{line});
         return;
@@ -1089,12 +1149,13 @@ fn printDiff(
         }
     }
 
-    try self.print("{s}::{s} {s}{s}{s} was updated:{s}\n", .{
+    try self.print("{s}::{s} {s}{s}{s} was {s}:{s}\n", .{
         color.bold_foreground_blue,
         color.reset,
         color.bold,
         name,
         color.reset,
+        if (new_content.len == 0) "removed" else if (old_content.len == 0) "added" else "updated",
         color.reset,
     });
     i = 0;
@@ -1131,57 +1192,6 @@ fn printListLines(writer: *Io.Writer, value: []const u8, indentation: []const u8
         if (line.len == 0) continue;
         try writer.print("{s}{s}\n", .{ indentation, line });
     }
-}
-
-fn printUpdatedPkgbuildField(
-    writer: *Io.Writer,
-    name: []const u8,
-    value: []const u8,
-) !void {
-    return printPkgbuildFieldChange(writer, name, value, "updated");
-}
-
-fn printPkgbuildFieldChange(
-    writer: *Io.Writer,
-    name: []const u8,
-    value: []const u8,
-    change: []const u8,
-) !void {
-    if (!isSourceField(name)) {
-        return writer.print("{s}::{s} {s}{s}{s} was {s}:{s}{s}\n", .{
-            color.bold_foreground_blue,
-            color.reset,
-            color.bold,
-            name,
-            color.reset,
-            change,
-            if (mem.startsWith(u8, value, "\n")) "" else " ",
-            value,
-        });
-    }
-
-    const normalized = mem.trim(u8, value, " \t\r\n");
-    if (normalized.len != 0 and mem.indexOfScalar(u8, normalized, '\n') == null) {
-        return writer.print("{s}::{s} {s}{s}{s} was {s}: {s}\n", .{
-            color.bold_foreground_blue,
-            color.reset,
-            color.bold,
-            name,
-            color.reset,
-            change,
-            normalized,
-        });
-    }
-
-    try writer.print("{s}::{s} {s}{s}{s} was {s}:\n", .{
-        color.bold_foreground_blue,
-        color.reset,
-        color.bold,
-        name,
-        color.reset,
-        change,
-    });
-    try printListLines(writer, normalized, "    ");
 }
 
 fn printBarePkgbuildList(
@@ -1298,7 +1308,19 @@ fn install(self: *Pacman, item: *PendingPackage) !void {
 }
 
 fn installUsing(self: *Pacman, item: *PendingPackage, runner: anytype) !void {
-    const full_pkg_dir = (item.snapshot orelse return error.InvalidSnapshot).source_path;
+    const snapshot = if (item.snapshot) |*snapshot| snapshot else return error.InvalidSnapshot;
+    const version = item.pkg.aur_version orelse item.pkg.installed_version orelse return error.InvalidSnapshot;
+    try snapshot.useBuild(self.allocator, .{
+        .root_path = self.zur_path,
+        .base = item.base(),
+        .version = version,
+    });
+    const full_pkg_dir = snapshot.source_path;
+    try self.print("{s}::{s} Using build directory: {s}\n", .{
+        color.bold_foreground_blue,
+        color.reset,
+        full_pkg_dir,
+    });
     const is_git = item.isGit();
     if (is_git) {
         try self.print("{s}::{s} Checking upstream version of {s}\n", .{
@@ -1311,7 +1333,6 @@ fn installUsing(self: *Pacman, item: *PendingPackage, runner: anytype) !void {
             "makepkg",
             "--nobuild",
             "--syncdeps",
-            "--cleanbuild",
         }, full_pkg_dir);
         const srcinfo = try runner.captureCommand(&.{ "makepkg", "--printsrcinfo" }, full_pkg_dir);
         defer self.allocator.free(srcinfo);
@@ -1319,16 +1340,13 @@ fn installUsing(self: *Pacman, item: *PendingPackage, runner: anytype) !void {
         if (item.outputs.count() == 0) return;
     }
     // Reuse the prepared sources so a git build uses the revision just checked.
-    try runner.execCommand(&.{ "makepkg", if (is_git) "-sce" else "-scC" }, full_pkg_dir);
+    // Force output replacement because retained trees can contain earlier archives.
+    try runner.execCommand(&.{ "makepkg", if (is_git) "-sef" else "-sf" }, full_pkg_dir);
     const listing = try runner.captureCommand(&.{ "makepkg", "--packagelist" }, full_pkg_dir);
     defer self.allocator.free(listing);
     try self.selectBuiltArtifacts(item, full_pkg_dir, listing);
     try self.installArtifacts(item, runner);
     try self.recordInstalledSnapshot(item);
-    for (item.outputs.keys()) |name| try self.removeStaleArtifacts(name, self.zur_pkg_dir);
-    const source_root = try Dir.path.join(self.allocator, &.{ self.zur_path, ".src" });
-    defer self.allocator.free(source_root);
-    try self.removeStaleArtifacts(item.base(), source_root);
 }
 
 fn skipCurrentGitOutputs(self: *Pacman, item: *PendingPackage, srcinfo: []const u8) !void {
@@ -1356,47 +1374,6 @@ fn skipCurrentGitOutputs(self: *Pacman, item: *PendingPackage, srcinfo: []const 
         }
         index += 1;
     }
-}
-
-// The caller owns the version. Read fresh makepkg output, never the AUR's stale .SRCINFO.
-fn srcinfoVersion(allocator: Allocator, srcinfo: []const u8) ![]u8 {
-    var pkgver: ?[]const u8 = null;
-    var pkgrel: ?[]const u8 = null;
-    var epoch: ?[]const u8 = null;
-    var lines = mem.splitScalar(u8, srcinfo, '\n');
-    while (lines.next()) |line| {
-        const separator = mem.indexOfScalar(u8, line, '=') orelse continue;
-        const key = mem.trim(u8, line[0..separator], " \t\r");
-        const value = mem.trim(u8, line[separator + 1 ..], " \t\r");
-        // Versions are shared by all outputs and belong to the pkgbase section.
-        if (mem.eql(u8, key, "pkgname")) break;
-        const field = if (mem.eql(u8, key, "pkgver")) &pkgver else if (mem.eql(u8, key, "pkgrel"))
-            &pkgrel
-        else if (mem.eql(u8, key, "epoch"))
-            &epoch
-        else
-            continue;
-        if (field.* != null or value.len == 0) return error.InvalidSrcinfo;
-        field.* = value;
-    }
-    const version = pkgver orelse return error.InvalidSrcinfo;
-    const release = pkgrel orelse return error.InvalidSrcinfo;
-    if (epoch) |prefix| return std.fmt.allocPrint(allocator, "{s}:{s}-{s}", .{
-        prefix,
-        version,
-        release,
-    });
-    return std.fmt.allocPrint(allocator, "{s}-{s}", .{ version, release });
-}
-
-fn srcinfoHasPackage(srcinfo: []const u8, name: []const u8) bool {
-    var lines = mem.splitScalar(u8, srcinfo, '\n');
-    while (lines.next()) |line| {
-        const separator = mem.indexOfScalar(u8, line, '=') orelse continue;
-        if (!mem.eql(u8, mem.trim(u8, line[0..separator], " \t\r"), "pkgname")) continue;
-        if (mem.eql(u8, mem.trim(u8, line[separator + 1 ..], " \t\r"), name)) return true;
-    }
-    return false;
 }
 
 fn selectBuiltArtifacts(self: *Pacman, item: *PendingPackage, build_dir: []const u8, listing: []const u8) !void {
@@ -1472,19 +1449,22 @@ fn installArtifacts(self: *Pacman, item: *const PendingPackage, runner: anytype)
 fn makepkgEnviron(self: *Pacman, cwd: []const u8) !std.process.Environ.Map {
     var environ = try self.environ_map.clone(self.allocator);
     errdefer environ.deinit();
-    // Snapshot source paths have the shape .build/<base>/<unique build>.
-    const base = Dir.path.basename(Dir.path.dirname(cwd) orelse return error.InvalidSnapshot);
     try environ.put("PKGDEST", cwd);
     try environ.put("BUILDDIR", cwd);
-    const shared = [_]struct { variable: []const u8, directory: []const u8 }{
-        .{ .variable = "SRCDEST", .directory = ".sources" },
-        .{ .variable = "SRCPKGDEST", .directory = ".source_packages" },
-        .{ .variable = "LOGDEST", .directory = ".logs" },
+    var cache: VersionCache = .{
+        .allocator = self.allocator,
+        .io = self.io,
+        .root_path = self.zur_path,
     };
-    for (shared) |entry| {
-        const path = try Dir.path.join(self.allocator, &.{ self.zur_path, entry.directory, base });
+    const versioned = [_]struct { variable: []const u8, kind: VersionCache.Kind }{
+        .{ .variable = "SRCDEST", .kind = .sources },
+        .{ .variable = "SRCPKGDEST", .kind = .source_packages },
+        .{ .variable = "LOGDEST", .kind = .logs },
+    };
+    for (versioned) |entry| {
+        cache.kind = entry.kind;
+        const path = try cache.prepare(cwd);
         defer self.allocator.free(path);
-        try Dir.cwd().createDirPath(self.io, path);
         try environ.put(entry.variable, path);
     }
     const temporary = try Dir.path.join(self.allocator, &.{ cwd, ".tmp" });
@@ -1590,80 +1570,147 @@ fn execCommand(self: *Pacman, argv: []const []const u8, cwd: []const u8) !void {
     }
 }
 
+fn cleanupArchiveCaches(self: *Pacman) !void {
+    const snapshots = try Dir.path.join(self.allocator, &.{ self.zur_path, ".src" });
+    defer self.allocator.free(snapshots);
+    for ([_][]const u8{ self.zur_pkg_dir, snapshots }) |path| {
+        var directory = Dir.openDirAbsolute(self.io, path, .{
+            .iterate = true,
+            .follow_symlinks = false,
+        }) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => return err,
+        };
+        defer directory.close(self.io);
+        var entries = directory.iterate();
+        while (try entries.next(self.io)) |entry| {
+            if (entry.kind != .directory or mem.startsWith(u8, entry.name, ".")) continue;
+            self.removeStaleArtifacts(entry.name, path) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => log.debug("cannot prune archives in {s}/{s}: {t}", .{ path, entry.name, err }),
+            };
+        }
+    }
+}
+
+fn isSnapshotArchive(name: []const u8) bool {
+    if (name.len != 71 or !mem.endsWith(u8, name, ".tar.gz")) return false;
+    for (name[0..64]) |char| if (!std.ascii.isHex(char)) return false;
+    return true;
+}
+
 fn removeStaleArtifacts(self: *Pacman, pkg_name: []const u8, dir_path: []const u8) !void {
     const package_dir = try Dir.path.join(self.allocator, &.{ dir_path, pkg_name });
     defer self.allocator.free(package_dir);
     var dir = Dir.openDirAbsolute(self.io, package_dir, .{
         .iterate = true,
-        .access_sub_paths = false,
         .follow_symlinks = false,
     }) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
     defer dir.close(self.io);
-
-    // Collect (mtime, name) pairs in a single slice and sort it directly,
-    // rather than keeping a parallel list + map keyed by mtime (which also
-    // collided when two files shared a timestamp).
-    const Artifact = struct {
-        mtime: i128,
-        name: []u8,
+    var scratch: std.heap.ArenaAllocator = .init(self.allocator);
+    defer scratch.deinit();
+    const allocator = scratch.allocator();
+    const snapshots = mem.eql(u8, Dir.path.basename(dir_path), ".src");
+    const installed = if (snapshots) null else try (try self.getAlpm()).installedVersion(pkg_name);
+    const Artifact = struct { name: []const u8, version: []const u8 };
+    const Version = struct {
+        name: []const u8,
+        mtime: Io.Timestamp,
+        protected: bool = false,
     };
     var artifacts: std.ArrayList(Artifact) = .empty;
-    defer {
-        for (artifacts.items) |a| self.allocator.free(a.name);
-        artifacts.deinit(self.allocator);
-    }
-    var dir_iter = dir.iterate();
-    while (try dir_iter.next(self.io)) |node| {
-        if (node.kind != .file and node.kind != .directory) continue;
-        if (mem.endsWith(u8, node.name, ".sig") or mem.startsWith(u8, node.name, ".")) continue;
-        const path = try Dir.path.join(self.allocator, &.{ package_dir, node.name });
-        defer self.allocator.free(path);
-        var f = try Dir.openFileAbsolute(self.io, path, .{});
-        defer f.close(self.io);
-        const stat = try f.stat(self.io);
-        // Store an owned copy of the entry name (dir_iter buffers are
-        // reused) so we can delete via a Dir handle after iteration.
-        const name_copy = try self.allocator.dupe(u8, node.name);
-        errdefer self.allocator.free(name_copy);
-        try artifacts.append(self.allocator, .{
-            .mtime = stat.mtime.nanoseconds,
-            .name = name_copy,
-        });
-    }
-
-    // Keep the last 3 installed versions of the package.
-    if (artifacts.items.len > 3) {
-        const less_than = struct {
-            fn lessThan(_: void, a: Artifact, b: Artifact) bool {
-                return a.mtime < b.mtime;
+    var versions: std.StringArrayHashMapUnmanaged(Version) = .empty;
+    var pinned: std.StringHashMapUnmanaged(void) = .empty;
+    var entries = dir.iterate();
+    while (try entries.next(self.io)) |entry| {
+        if (entry.kind != .file) continue;
+        if (snapshots and mem.startsWith(u8, entry.name, ".installed-") and
+            mem.endsWith(u8, entry.name, ".json"))
+        {
+            const bytes = try dir.readFileAlloc(self.io, entry.name, allocator, .unlimited);
+            const record = std.json.parseFromSlice(InstalledSnapshot, allocator, bytes, .{}) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => continue,
+            };
+            defer record.deinit();
+            if (isSnapshotArchive(record.value.archive)) {
+                try pinned.put(allocator, try allocator.dupe(u8, record.value.archive), {});
             }
-        };
-        std.mem.sort(Artifact, artifacts.items, {}, less_than.lessThan);
-
-        const marked_for_removal = artifacts.items[0 .. artifacts.items.len - 3];
-        // deleteTree is relative to a Dir handle, so open the (absolute)
-        // parent directory once and delete by entry name rather than
-        // resolving an absolute path through cwd.
-        var parent = try Dir.openDirAbsolute(self.io, package_dir, .{});
-        defer parent.close(self.io);
-        for (marked_for_removal) |artifact| {
-            try parent.deleteTree(self.io, artifact.name);
-            const signature = try std.fmt.allocPrint(self.allocator, "{s}.sig", .{artifact.name});
-            defer self.allocator.free(signature);
-            parent.deleteFile(self.io, signature) catch |err| switch (err) {
-                error.FileNotFound => {},
+            continue;
+        }
+        if (mem.startsWith(u8, entry.name, ".") or mem.endsWith(u8, entry.name, ".sig")) continue;
+        const version = if (snapshots) snapshot: {
+            if (!isSnapshotArchive(entry.name)) continue;
+            break :snapshot try allocator.dupe(u8, entry.name);
+        } else package: {
+            if (mem.indexOf(u8, entry.name, ".pkg.tar") == null) continue;
+            const path = try Dir.path.join(allocator, &.{ package_dir, entry.name });
+            var archive = (try self.getAlpm()).readArchive(path) catch |err| switch (err) {
+                error.InvalidPackageArchive => continue,
                 else => return err,
             };
-            try self.print("  {s}->{s} deleting stale file or dir: {s}/{s}\n", .{
-                color.foreground_blue,
-                color.reset,
-                package_dir,
-                artifact.name,
-            });
+            defer archive.deinit(self.allocator);
+            if (!mem.eql(u8, archive.name, pkg_name)) continue;
+            break :package try allocator.dupe(u8, archive.version);
+        };
+        const name = try allocator.dupe(u8, entry.name);
+        const stat = try dir.statFile(self.io, name, .{ .follow_symlinks = false });
+        try artifacts.append(allocator, .{ .name = name, .version = version });
+        const group = try versions.getOrPut(allocator, version);
+        if (!group.found_existing) group.value_ptr.* = .{ .name = version, .mtime = stat.mtime };
+        if (stat.mtime.nanoseconds > group.value_ptr.mtime.nanoseconds) group.value_ptr.mtime = stat.mtime;
+    }
+    for (versions.values()) |*version| {
+        version.protected = pinned.contains(version.name) or
+            (installed != null and try Alpm.compareVersions(allocator, version.name, installed.?) == .eq);
+    }
+    // Split outputs can pin several recipe revisions. Keep the latest attempt
+    // available even when those installed baselines already exceed the limit.
+    var latest: ?*Version = null;
+    for (versions.values()) |*version| {
+        if (version.protected) continue;
+        if (latest == null or version.mtime.nanoseconds > latest.?.mtime.nanoseconds) latest = version;
+    }
+    if (latest) |version| version.protected = true;
+    // Sort a copy: the map retains its indices for grouping archive variants.
+    const ordered = try allocator.dupe(Version, versions.values());
+    mem.sort(Version, ordered, {}, struct {
+        fn newer(_: void, a: Version, b: Version) bool {
+            if (a.protected != b.protected) return a.protected;
+            if (a.mtime.nanoseconds != b.mtime.nanoseconds) return a.mtime.nanoseconds > b.mtime.nanoseconds;
+            return mem.lessThan(u8, a.name, b.name);
         }
+    }.newer);
+    var expired: std.StringHashMapUnmanaged(void) = .empty;
+    for (ordered[@min(retention.total_versions, ordered.len)..]) |version| {
+        if (!version.protected) try expired.put(allocator, version.name, {});
+    }
+    for (artifacts.items) |artifact| {
+        if (!expired.contains(artifact.version)) continue;
+        try dir.deleteFile(self.io, artifact.name);
+        try self.print("  {s}->{s} deleting stale file: {s}/{s}\n", .{
+            color.foreground_blue,
+            color.reset,
+            package_dir,
+            artifact.name,
+        });
+        self.flushStdout();
+        if (snapshots) continue;
+        const signature = try std.fmt.allocPrint(allocator, "{s}.sig", .{artifact.name});
+        dir.deleteFile(self.io, signature) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => return err,
+        };
+        try self.print("  {s}->{s} deleting stale signature: {s}/{s}\n", .{
+            color.foreground_blue,
+            color.reset,
+            package_dir,
+            signature,
+        });
+        self.flushStdout();
     }
 }
 
@@ -1674,16 +1721,6 @@ fn deinitSnapshotFiles(allocator: Allocator, files: *SourceFiles) void {
         allocator.free(entry.value_ptr.contents);
     }
     files.deinit(allocator);
-}
-
-fn snapshotFiles(
-    self: *Pacman,
-    pkg_name: []const u8,
-    pkg_version: []const u8,
-) !SourceFiles {
-    const path = try self.snapshotPath(pkg_name, pkg_version);
-    defer self.allocator.free(path);
-    return self.readSnapshotFiles(self.allocator, path);
 }
 
 fn readSnapshotFiles(self: *Pacman, allocator: Allocator, path: []const u8) !SourceFiles {
@@ -1702,9 +1739,13 @@ fn readSnapshotFiles(self: *Pacman, allocator: Allocator, path: []const u8) !Sou
 
     var files_map: SourceFiles = .empty;
     errdefer deinitSnapshotFiles(allocator, &files_map);
-    var walker = try dir.walk(allocator);
+    var walker = try dir.walkSelectively(allocator);
     defer walker.deinit();
     while (try walker.next(self.io)) |node| {
+        if (node.kind == .directory) {
+            try walker.enter(self.io, node);
+            continue;
+        }
         if (node.kind != .file and node.kind != .sym_link) continue;
         const stat = try dir.statFile(self.io, node.path, .{ .follow_symlinks = false });
         const file_contents = if (node.kind == .sym_link) target: {
@@ -2063,35 +2104,17 @@ fn testSnapshotReview(name: []const u8, old: ?[]const u8, new: ?[]const u8) !boo
 
 test "snapshot review retains scripts larger than four kilobytes" {
     const testing = std.testing;
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(testing.io, ".src/foo/2");
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var snapshot = try testSnapshot(&fixture, "foo");
+    defer snapshot.deinit(fixture.arena.allocator());
+    var source = try Dir.openDirAbsolute(testing.io, snapshot.source_path, .{});
+    defer source.close(testing.io);
     const script = "echo reviewed\n" ** 400;
-    try tmp.dir.writeFile(testing.io, .{
-        .sub_path = ".src/foo/2/prepare.sh",
-        .data = script,
-    });
-    var path_buffer: [4096]u8 = undefined;
-    const len = try tmp.dir.realPath(testing.io, &path_buffer);
-    var output_file = try tmp.dir.createFile(testing.io, "review-output", .{});
-    defer output_file.close(testing.io);
-    var output_buffer: [4096]u8 = undefined;
-    var environ: std.process.Environ.Map = .init(allocator);
-    defer environ.deinit();
-    var pacman: Pacman = .{
-        .allocator = allocator,
-        .io = testing.io,
-        .environ_map = &environ,
-        .stdout_writer = output_file.writer(testing.io, &output_buffer),
-        .zur_path = path_buffer[0..len],
-        .zur_pkg_dir = path_buffer[0..len],
-    };
-    defer pacman.deinit();
-    var files = try pacman.snapshotFiles("foo", "2");
-    defer deinitSnapshotFiles(allocator, &files);
+    try source.writeFile(testing.io, .{ .sub_path = "prepare.sh", .data = script });
+    var files = try fixture.pacman.readSnapshotFiles(testing.allocator, snapshot.source_path);
+    defer deinitSnapshotFiles(testing.allocator, &files);
     try testing.expect(files.contains("prepare.sh"));
     try testing.expectEqualStrings(script, files.get("prepare.sh").?.contents);
 }
@@ -2377,7 +2400,6 @@ test "split builds install only selected archive identities" {
     defer fixture.deinit();
     const allocator = fixture.arena.allocator();
     try fixture.tmp.dir.createDirPath(testing.io, "cache");
-    try fixture.tmp.dir.createDirPath(testing.io, ".src/review-base/2");
     fixture.pacman.zur_pkg_dir = try Dir.path.join(allocator, &.{ fixture.pacman.zur_path, "cache" });
     const cli = try testPackageArchive(&fixture, "cli-produced.pkg.tar", "review-cli");
     const gui = try testPackageArchive(&fixture, "gui-produced.pkg.tar", "review-gui");
@@ -2446,6 +2468,77 @@ test "git install skips builds and reinstalls when the upstream version matches"
         defer allocator.free(record);
         try testing.expectError(error.FileNotFound, Dir.cwd().statFile(testing.io, record, .{}));
     }
+}
+
+test "git checks reuse pkgver build trees across operations" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const allocator = fixture.arena.allocator();
+    const cached = ".build/review-git/r100.abc/src/checkout";
+    for (0..2) |attempt| {
+        var builds: BuildCache = undefined;
+        try builds.init(testing.io, fixture.pacman.zur_path, fixture.pacman.stdout());
+        defer builds.deinit();
+        var runner: TestBuildRunner = .{
+            .allocator = allocator,
+            .listing = "",
+            .srcinfo = "pkgbase = review-git\n\tpkgver = r200.def\n\tpkgrel = 1\npkgname = review-git\n",
+        };
+        defer runner.deinit();
+        const pkg: Package = .{ .installed_version = "r200.def-1", .aur_version = "1:r100.abc-2" };
+        var item: PendingPackage = .{ .name = "review-git", .pkg = pkg };
+        defer item.deinit(allocator);
+        try item.outputs.put(allocator, item.name, .{ .pkg = pkg });
+        item.snapshot = try testSnapshot(&fixture, item.name);
+        try fixture.pacman.installUsing(&item, &runner);
+        try testing.expectEqualStrings("r100.abc", Dir.path.basename(item.snapshot.?.source_path));
+        if (attempt == 0) {
+            try fixture.tmp.dir.createDirPath(testing.io, Dir.path.dirname(cached).?);
+            try fixture.tmp.dir.writeFile(testing.io, .{ .sub_path = cached, .data = "cached checkout\n" });
+        } else {
+            const contents = try fixture.tmp.dir.readFileAlloc(testing.io, cached, testing.allocator, .unlimited);
+            defer testing.allocator.free(contents);
+            try testing.expectEqualStrings("cached checkout\n", contents);
+        }
+    }
+    _ = try fixture.tmp.dir.statFile(testing.io, cached, .{});
+}
+
+test "failed git preparation retains its sources for the next operation" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const allocator = fixture.arena.allocator();
+    const cached = ".build/review-git/r0/src/download";
+    for (0..2) |attempt| {
+        var builds: BuildCache = undefined;
+        try builds.init(testing.io, fixture.pacman.zur_path, fixture.pacman.stdout());
+        defer builds.deinit();
+        var runner: TestBuildRunner = .{
+            .allocator = allocator,
+            .listing = "",
+            .reject_preparation = true,
+        };
+        defer runner.deinit();
+        const pkg: Package = .{ .installed_version = "r1-1", .aur_version = "r0-1" };
+        var item: PendingPackage = .{ .name = "review-git", .pkg = pkg };
+        defer item.deinit(allocator);
+        try item.outputs.put(allocator, item.name, .{ .pkg = pkg });
+        item.snapshot = try testSnapshot(&fixture, item.name);
+        try testing.expectError(error.NonzeroStatus, fixture.pacman.installUsing(&item, &runner));
+        if (attempt == 0) {
+            try fixture.tmp.dir.createDirPath(testing.io, Dir.path.dirname(cached).?);
+            try fixture.tmp.dir.writeFile(testing.io, .{ .sub_path = cached, .data = "partial download\n" });
+        } else {
+            const contents = try fixture.tmp.dir.readFileAlloc(testing.io, cached, testing.allocator, .unlimited);
+            defer testing.allocator.free(contents);
+            try testing.expectEqualStrings("partial download\n", contents);
+        }
+    }
+    _ = try fixture.tmp.dir.statFile(testing.io, cached, .{});
 }
 
 test "git install compares the full generated version and retains fresh installs" {
@@ -2642,7 +2735,9 @@ test "git install refreshes local upstream commits with real makepkg" {
         .{ .commit = true, .installed = "r1-1", .builds = 1 },
         .{ .commit = false, .installed = "r2-1", .builds = 0 },
     };
-    for (cases) |case| {
+    var checkout_inode: ?File.INode = null;
+    var mirror_inode: ?File.INode = null;
+    for (cases, 0..) |case, attempt| {
         if (case.commit) {
             const commit_output = try fixture.pacman.captureCommand(&.{
                 "git",
@@ -2669,21 +2764,31 @@ test "git install refreshes local upstream commits with real makepkg" {
         defer item.deinit(allocator);
         try item.outputs.put(allocator, item.name, .{ .pkg = pkg });
         item.snapshot = try testSnapshot(&fixture, item.name);
-        var directory = try Dir.openDirAbsolute(testing.io, item.snapshot.?.source_path, .{});
-        defer directory.close(testing.io);
-        try directory.writeFile(testing.io, .{ .sub_path = "PKGBUILD", .data = pkgbuild });
+        {
+            var directory = try Dir.openDirAbsolute(testing.io, item.snapshot.?.source_path, .{});
+            defer directory.close(testing.io);
+            try directory.writeFile(testing.io, .{ .sub_path = "PKGBUILD", .data = pkgbuild });
+        }
 
         try fixture.pacman.installUsing(&item, &runner);
 
+        var directory = try Dir.openDirAbsolute(testing.io, item.snapshot.?.source_path, .{});
+        defer directory.close(testing.io);
+        const checkout = try directory.statFile(testing.io, "src/upstream/.git", .{});
+        const mirror = try fixture.tmp.dir.statFile(testing.io, ".sources/review-git/r0/upstream", .{});
+        if (checkout_inode) |inode| try testing.expectEqual(inode, checkout.inode);
+        if (mirror_inode) |inode| try testing.expectEqual(inode, mirror.inode);
+        checkout_inode = checkout.inode;
+        mirror_inode = mirror.inode;
         try testing.expectEqual(@as(usize, 1), runner.actions.preparations);
         try testing.expectEqual(case.builds, runner.actions.builds);
         try testing.expectEqual(case.builds, runner.actions.installs);
         const prepared = try directory.readFileAlloc(testing.io, "prepared", allocator, .unlimited);
         defer allocator.free(prepared);
-        try testing.expectEqualStrings("prepared\n", prepared);
-        if (case.builds == 0) {
+        try testing.expectEqualStrings(("prepared\n" ** 3)[0 .. "prepared\n".len * (attempt + 1)], prepared);
+        if (attempt == 0) {
             try testing.expectError(error.FileNotFound, directory.statFile(testing.io, "built", .{}));
-        } else {
+        } else if (case.builds != 0) {
             var archive = try fixture.pacman.alpm_state.?.readArchive(runner.actions.installed.items[0]);
             defer archive.deinit(allocator);
             try testing.expectEqualStrings("r2-1", archive.version);
@@ -2765,12 +2870,26 @@ fn testPackageArchive(fixture: *TestDependencies, filename: []const u8, name: []
 }
 
 fn testPackageArchiveFor(fixture: *TestDependencies, filename: []const u8, name: []const u8, arch: []const u8) ![]const u8 {
+    return testPackageArchiveVersion(fixture, filename, .{ .name = name, .arch = arch });
+}
+
+const TestArchive = struct {
+    name: []const u8,
+    arch: []const u8 = "any",
+    version: []const u8 = "2-1",
+};
+
+fn testPackageArchiveVersion(fixture: *TestDependencies, filename: []const u8, options: TestArchive) ![]const u8 {
     const allocator = fixture.arena.allocator();
     const io = std.testing.io;
     const metadata = try std.fmt.allocPrint(
         allocator,
-        "pkgname = {s}\npkgver = 2-1\npkgdesc = Test fixture\narch = {s}\nbuilddate = 1\nsize = 0\n",
-        .{ name, arch },
+        "pkgname = {s}\npkgver = {s}\npkgdesc = Test fixture\narch = {s}\nbuilddate = 1\nsize = 0\n",
+        .{
+            options.name,
+            options.version,
+            options.arch,
+        },
     );
     try fixture.tmp.dir.writeFile(io, .{ .sub_path = ".PKGINFO", .data = metadata });
     const path = try Dir.path.join(allocator, &.{ fixture.pacman.zur_path, filename });
@@ -2813,13 +2932,12 @@ const TestBuildRunner = struct {
                     "makepkg",
                     "--nobuild",
                     "--syncdeps",
-                    "--cleanbuild",
                 }, argv);
                 self.preparations += 1;
                 if (self.reject_preparation) return error.NonzeroStatus;
                 return;
             }
-            if (self.preparations != 0) try std.testing.expectEqualStrings("-sce", argv[1]);
+            if (self.preparations != 0) try std.testing.expectEqualStrings("-sef", argv[1]);
             self.builds += 1;
             return;
         }
@@ -2893,7 +3011,7 @@ test "cleanup does not delete a different package sharing a name prefix" {
     file.close(testing.io);
 }
 
-test "cleanup keeps three versions with their signatures inside the owning package directory" {
+test "cleanup keeps the current and three older versions with their signatures" {
     const testing = std.testing;
     var fixture: TestDependencies = undefined;
     try fixture.init();
@@ -2903,10 +3021,11 @@ test "cleanup keeps three versions with their signatures inside the owning packa
     try fixture.tmp.dir.createDirPath(testing.io, "foo-bar");
     try fixture.tmp.dir.writeFile(testing.io, .{ .sub_path = "foo/.review", .data = "marker" });
     try fixture.tmp.dir.writeFile(testing.io, .{ .sub_path = "foo-bar/old.pkg.tar", .data = "other package" });
-    for (1..5) |version| {
+    for (1..6) |version| {
         const path = try std.fmt.allocPrint(allocator, "foo/{d}.pkg.tar", .{version});
         const signature = try std.fmt.allocPrint(allocator, "{s}.sig", .{path});
-        try fixture.tmp.dir.writeFile(testing.io, .{ .sub_path = path, .data = "archive" });
+        const pkgver = try std.fmt.allocPrint(allocator, "{d}-1", .{version});
+        _ = try testPackageArchiveVersion(&fixture, path, .{ .name = "foo", .version = pkgver });
         try fixture.tmp.dir.writeFile(testing.io, .{ .sub_path = signature, .data = "signature" });
         try Io.sleep(testing.io, .fromMilliseconds(10), .awake);
     }
@@ -2914,7 +3033,7 @@ test "cleanup keeps three versions with their signatures inside the owning packa
     for ([_][]const u8{ "foo/1.pkg.tar", "foo/1.pkg.tar.sig" }) |path| {
         try testing.expectError(error.FileNotFound, fixture.tmp.dir.openFile(testing.io, path, .{}));
     }
-    for (2..5) |version| {
+    for (2..6) |version| {
         const path = try std.fmt.allocPrint(allocator, "foo/{d}.pkg.tar", .{version});
         const signature = try std.fmt.allocPrint(allocator, "{s}.sig", .{path});
         const archive_file = try fixture.tmp.dir.openFile(testing.io, path, .{});
@@ -2926,6 +3045,89 @@ test "cleanup keeps three versions with their signatures inside the owning packa
         const file = try fixture.tmp.dir.openFile(testing.io, path, .{});
         file.close(testing.io);
     }
+    try fixture.pacman.stdout().flush();
+    const output = try fixture.tmp.dir.readFileAlloc(testing.io, "output", testing.allocator, .unlimited);
+    defer testing.allocator.free(output);
+    try testing.expect(mem.indexOf(u8, output, "/foo/1.pkg.tar\n") != null);
+    try testing.expect(mem.indexOf(u8, output, "/foo/1.pkg.tar.sig\n") != null);
+}
+
+test "archive cleanup groups variants and protects the installed package version" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const allocator = fixture.arena.allocator();
+    fixture.pacman.zur_pkg_dir = try Dir.path.join(allocator, &.{ fixture.pacman.zur_path, ".pkg" });
+    try fixture.tmp.dir.createDirPath(testing.io, ".pkg/review-lib");
+    try fixture.tmp.dir.writeFile(testing.io, .{ .sub_path = ".pkg/review-lib/notes", .data = "keep\n" });
+    try fixture.tmp.dir.writeFile(testing.io, .{ .sub_path = ".pkg/review-lib/broken.pkg.tar", .data = "invalid archive\n" });
+    _ = try testPackageArchive(&fixture, ".pkg/review-lib/other.pkg.tar", "review-library");
+    for (1..6) |version| {
+        for ([_][]const u8{ "any", "x86_64" }) |arch| {
+            const path = try std.fmt.allocPrint(allocator, ".pkg/review-lib/{d}-{s}.pkg.tar", .{ version, arch });
+            const pkgver = try std.fmt.allocPrint(allocator, "{d}-1", .{version});
+            _ = try testPackageArchiveVersion(&fixture, path, .{
+                .name = "review-lib",
+                .arch = arch,
+                .version = pkgver,
+            });
+            const signature = try std.fmt.allocPrint(allocator, "{s}.sig", .{path});
+            try fixture.tmp.dir.writeFile(testing.io, .{ .sub_path = signature, .data = "signature\n" });
+            try fixture.tmp.dir.setTimestamps(testing.io, path, .{
+                .modify_timestamp = .{ .new = .fromNanoseconds(@as(i96, @intCast(version)) * std.time.ns_per_s) },
+            });
+        }
+    }
+    try fixture.pacman.removeStaleArtifacts("review-lib", fixture.pacman.zur_pkg_dir);
+    for (1..6) |version| {
+        for ([_][]const u8{ "any", "x86_64" }) |arch| {
+            for ([_][]const u8{ "", ".sig" }) |suffix| {
+                const path = try std.fmt.allocPrint(allocator, ".pkg/review-lib/{d}-{s}.pkg.tar{s}", .{
+                    version,
+                    arch,
+                    suffix,
+                });
+                if (version == 2) {
+                    try testing.expectError(error.FileNotFound, fixture.tmp.dir.statFile(testing.io, path, .{}));
+                } else {
+                    _ = try fixture.tmp.dir.statFile(testing.io, path, .{});
+                }
+            }
+        }
+    }
+    for ([_][]const u8{ "notes", "broken.pkg.tar", "other.pkg.tar" }) |name| {
+        const path = try Dir.path.join(allocator, &.{ ".pkg/review-lib", name });
+        _ = try fixture.tmp.dir.statFile(testing.io, path, .{});
+    }
+}
+
+test "cleanup reports archive deletion even when signature removal fails" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const allocator = fixture.arena.allocator();
+    try fixture.tmp.dir.createDirPath(testing.io, "foo/1.pkg.tar.sig");
+    for (1..6) |version| {
+        const path = try std.fmt.allocPrint(allocator, "foo/{d}.pkg.tar", .{version});
+        defer allocator.free(path);
+        const pkgver = try std.fmt.allocPrint(allocator, "{d}-1", .{version});
+        defer allocator.free(pkgver);
+        _ = try testPackageArchiveVersion(&fixture, path, .{ .name = "foo", .version = pkgver });
+        const file = try fixture.tmp.dir.openFile(testing.io, path, .{});
+        defer file.close(testing.io);
+        try file.setTimestamps(testing.io, .{
+            .modify_timestamp = .{ .new = .fromNanoseconds(@as(i96, @intCast(version)) * std.time.ns_per_s) },
+        });
+    }
+
+    try testing.expectError(error.IsDir, fixture.pacman.removeStaleArtifacts("foo", fixture.pacman.zur_path));
+    try testing.expectError(error.FileNotFound, fixture.tmp.dir.openFile(testing.io, "foo/1.pkg.tar", .{}));
+    try fixture.pacman.stdout().flush();
+    const output = try fixture.tmp.dir.readFileAlloc(testing.io, "output", testing.allocator, .unlimited);
+    defer testing.allocator.free(output);
+    try testing.expect(mem.indexOf(u8, output, "/foo/1.pkg.tar\n") != null);
 }
 
 test "archive caching preserves detached signatures in the package directory" {
@@ -2980,25 +3182,6 @@ test "cache lookup uses archive identity and supports alternate extensions" {
     try testing.expectEqual(null, try fixture.pacman.findExistingPackage("review-cli", "3-1"));
 }
 
-test "cache lookup migrates verified legacy archives with their signatures" {
-    const testing = std.testing;
-    var fixture: TestDependencies = undefined;
-    try fixture.init();
-    defer fixture.deinit();
-    const allocator = fixture.arena.allocator();
-    _ = try testPackageArchive(&fixture, "legacy.pkg.tar", "review-cli");
-    try fixture.tmp.dir.writeFile(testing.io, .{ .sub_path = "legacy.pkg.tar.sig", .data = "signature" });
-    const found = try fixture.pacman.findExistingPackage("review-cli", "2-1");
-    defer if (found) |path| allocator.free(path);
-    try testing.expect(found != null);
-    try testing.expect(mem.endsWith(u8, found.?, "/review-cli/legacy.pkg.tar"));
-    const signature = try fixture.tmp.dir.readFileAlloc(testing.io, "review-cli/legacy.pkg.tar.sig", allocator, .unlimited);
-    defer allocator.free(signature);
-    try testing.expectEqualStrings("signature", signature);
-    try testing.expectError(error.FileNotFound, fixture.tmp.dir.openFile(testing.io, "legacy.pkg.tar", .{}));
-    try testing.expectError(error.FileNotFound, fixture.tmp.dir.openFile(testing.io, "legacy.pkg.tar.sig", .{}));
-}
-
 test "cache lookup never reuses development package archives" {
     const testing = std.testing;
     var fixture: TestDependencies = undefined;
@@ -3007,6 +3190,95 @@ test "cache lookup never reuses development package archives" {
     try fixture.tmp.dir.createDirPath(testing.io, "review-git");
     _ = try testPackageArchive(&fixture, "review-git/review-git-2-1-any.pkg.tar.zst", "review-git");
     try testing.expectEqual(null, try fixture.pacman.findExistingPackage("review-git", "2-1"));
+}
+
+test "cache lookup ignores flat archives" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const allocator = fixture.arena.allocator();
+    try fixture.tmp.dir.createDirPath(testing.io, ".pkg");
+    fixture.pacman.zur_pkg_dir = try Dir.path.join(allocator, &.{ fixture.pacman.zur_path, ".pkg" });
+    const archive = try testPackageArchive(&fixture, ".pkg/legacy.pkg.tar", "review-cli");
+    try fixture.tmp.dir.writeFile(testing.io, .{ .sub_path = ".pkg/legacy.pkg.tar.sig", .data = "signature" });
+
+    const found = try fixture.pacman.findExistingPackage("review-cli", "2-1");
+    defer if (found) |path| allocator.free(path);
+    try testing.expectEqual(null, found);
+    var retained = try fixture.pacman.alpm_state.?.readArchive(archive);
+    defer retained.deinit(allocator);
+    try testing.expectEqualStrings("review-cli", retained.name);
+    const signature = try fixture.tmp.dir.readFileAlloc(testing.io, ".pkg/legacy.pkg.tar.sig", testing.allocator, .unlimited);
+    defer testing.allocator.free(signature);
+    try testing.expectEqualStrings("signature", signature);
+    try testing.expectError(error.FileNotFound, fixture.tmp.dir.statFile(testing.io, ".pkg/review-cli", .{}));
+}
+
+test "upgrade review ignores unrecorded source directories" {
+    const testing = std.testing;
+    for ([_][]const u8{
+        "review-base-2-1",
+        "review-cli-2-1",
+        ".src/review-base/2-1",
+    }) |path| {
+        var fixture: TestDependencies = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        const allocator = fixture.arena.allocator();
+        try testLegacyTree(&fixture, path);
+        var item: PendingPackage = .{
+            .name = "review-cli",
+            .pkg = .{ .base_name = "review-base", .installed_version = "2-1", .aur_version = "3-1" },
+        };
+        defer item.deinit(allocator);
+        item.snapshot = try testSnapshot(&fixture, item.base());
+        var incoming = try Dir.openDirAbsolute(testing.io, item.snapshot.?.source_path, .{});
+        defer incoming.close(testing.io);
+        try incoming.writeFile(testing.io, .{ .sub_path = "PKGBUILD", .data = "pkgname=review-cli\npkgver=3\npkgrel=1\n" });
+        try fixture.tmp.dir.writeFile(testing.io, .{ .sub_path = "input", .data = "n\n" });
+        const input = try fixture.tmp.dir.openFile(testing.io, "input", .{});
+        defer input.close(testing.io);
+        var buffer: [128]u8 = undefined;
+        fixture.pacman.stdin_reader = input.reader(testing.io, &buffer);
+
+        try testing.expectError(error.UserDeclined, fixture.pacman.compareUpdateAndInstall(&item));
+        try fixture.pacman.stdout().flush();
+        const output = try fixture.tmp.dir.readFileAlloc(testing.io, "output", testing.allocator, .unlimited);
+        defer testing.allocator.free(output);
+        try testing.expect(mem.indexOf(u8, output, "File:") != null);
+        try testing.expect(mem.indexOf(u8, output, "  pkgver 3\n") != null);
+        try testing.expect(mem.indexOf(u8, output, "Install? [Y/n]:") != null);
+        try testing.expect(mem.indexOf(u8, output, "- pkgver=2") == null);
+        try testing.expect(mem.indexOf(u8, output, path) == null);
+        var legacy = try fixture.tmp.dir.openDir(testing.io, path, .{});
+        defer legacy.close(testing.io);
+        const retained = try legacy.readFileAlloc(testing.io, "PKGBUILD", testing.allocator, .unlimited);
+        defer testing.allocator.free(retained);
+        try testing.expectEqualStrings("pkgname=review-cli\npkgver=2\npkgrel=1\n", retained);
+    }
+}
+
+test "source cleanup ignores legacy version directories" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    for ([_][]const u8{ "1-1", "2-1", "3-1", "4-1" }) |version| {
+        const path = try Dir.path.join(fixture.arena.allocator(), &.{ ".src", "review-base", version });
+        try fixture.tmp.dir.createDirPath(testing.io, path);
+        var directory = try fixture.tmp.dir.openDir(testing.io, path, .{});
+        defer directory.close(testing.io);
+        try directory.writeFile(testing.io, .{ .sub_path = "PKGBUILD", .data = "retained legacy recipe\n" });
+    }
+    const root = try Dir.path.join(fixture.arena.allocator(), &.{ fixture.pacman.zur_path, ".src" });
+    try fixture.pacman.removeStaleArtifacts("review-base", root);
+    for ([_][]const u8{ "1-1", "2-1", "3-1", "4-1" }) |version| {
+        const path = try Dir.path.join(fixture.arena.allocator(), &.{ ".src", "review-base", version, "PKGBUILD" });
+        const contents = try fixture.tmp.dir.readFileAlloc(testing.io, path, testing.allocator, .unlimited);
+        defer testing.allocator.free(contents);
+        try testing.expectEqualStrings("retained legacy recipe\n", contents);
+    }
 }
 
 const TestSnapshotRequest = struct {
@@ -3075,6 +3347,155 @@ test "installed snapshot records survive build mutations and use actual output v
     try testing.expectEqual(null, try fixture.pacman.loadInstalledSnapshot(&item));
 }
 
+test "upgrade review diffs installed source files and falls back when the baseline is unavailable" {
+    const testing = std.testing;
+    const Baseline = enum {
+        available,
+        missing_record,
+        missing_archive,
+        different_version,
+        not_installed,
+    };
+    for (std.enums.values(Baseline)) |baseline| {
+        var fixture: TestDependencies = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        const allocator = fixture.arena.allocator();
+        var item: PendingPackage = .{
+            .name = "review-cli",
+            .pkg = .{
+                .installed_version = "2-1",
+                .aur_version = "3-1",
+                .base_name = "review-base",
+            },
+        };
+        defer item.deinit(allocator);
+        item.snapshot = try testSnapshot(&fixture, item.base());
+        const produced = try testPackageArchive(&fixture, "produced.pkg.tar", item.name);
+        try item.outputs.put(allocator, item.name, .{
+            .pkg = item.pkg,
+            .artifact = try allocator.dupe(u8, produced),
+        });
+        if (baseline != .missing_record) try fixture.pacman.recordInstalledSnapshot(&item);
+        switch (baseline) {
+            .available, .missing_record => {},
+            .missing_archive => try Dir.cwd().deleteFile(testing.io, item.snapshot.?.archive_path),
+            .different_version => item.pkg.installed_version = "1-1",
+            .not_installed => item.pkg.installed_version = null,
+        }
+        var incoming = try Dir.openDirAbsolute(testing.io, item.snapshot.?.source_path, .{});
+        defer incoming.close(testing.io);
+        try incoming.writeFile(testing.io, .{
+            .sub_path = "PKGBUILD",
+            .data = "pkgname=review-cli\npkgver=3\npkgrel=1\n",
+        });
+        try incoming.writeFile(testing.io, .{
+            .sub_path = "nested/hook.sh",
+            .data = "echo updated\n",
+        });
+        try fixture.tmp.dir.writeFile(testing.io, .{ .sub_path = "input", .data = "n\n" });
+        const input = try fixture.tmp.dir.openFile(testing.io, "input", .{});
+        defer input.close(testing.io);
+        var buffer: [128]u8 = undefined;
+        fixture.pacman.stdin_reader = input.reader(testing.io, &buffer);
+
+        try testing.expectError(error.UserDeclined, fixture.pacman.compareUpdateAndInstall(&item));
+        try fixture.pacman.stdout().flush();
+        const output = try fixture.tmp.dir.readFileAlloc(testing.io, "output", testing.allocator, .unlimited);
+        defer testing.allocator.free(output);
+        if (baseline == .available) {
+            try testing.expect(mem.indexOf(u8, output, "- pkgver=2") != null);
+            try testing.expect(mem.indexOf(u8, output, "+ pkgver=3") != null);
+            try testing.expect(mem.indexOf(u8, output, "- echo original") != null);
+            try testing.expect(mem.indexOf(u8, output, "+ echo updated") != null);
+            try testing.expect(mem.indexOf(u8, output, "pkgname") == null);
+            try testing.expect(mem.indexOf(u8, output, "pkgrel") == null);
+            try testing.expect(mem.indexOf(u8, output, "File:") == null);
+            try testing.expect(mem.indexOf(u8, output, "Continue? [Y/n]:") != null);
+        } else {
+            try testing.expect(mem.indexOf(u8, output, "File:") != null);
+            try testing.expect(mem.indexOf(u8, output, "  pkgname review-cli\n") != null);
+            try testing.expect(mem.indexOf(u8, output, "  pkgver 3\n") != null);
+            try testing.expect(mem.indexOf(u8, output, "  pkgrel 1\n") != null);
+            try testing.expect(mem.indexOf(u8, output, "  echo updated\n") != null);
+            try testing.expect(mem.indexOf(u8, output, "echo original") == null);
+            try testing.expect(mem.indexOf(u8, output, "Install? [Y/n]:") != null);
+        }
+    }
+}
+
+test "upgrade review prefers recorded sources over a mutated legacy build directory" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const allocator = fixture.arena.allocator();
+    var item: PendingPackage = .{
+        .name = "review-cli",
+        .pkg = .{
+            .installed_version = "2-1",
+            .aur_version = "3-1",
+            .base_name = "review-base",
+        },
+    };
+    defer item.deinit(allocator);
+    item.snapshot = try testSnapshot(&fixture, item.base());
+    const produced = try testPackageArchive(&fixture, "produced.pkg.tar", item.name);
+    try item.outputs.put(allocator, item.name, .{
+        .pkg = item.pkg,
+        .artifact = try allocator.dupe(u8, produced),
+    });
+    try fixture.pacman.recordInstalledSnapshot(&item);
+    try fixture.tmp.dir.createDirPath(testing.io, "review-base-2-1");
+    try fixture.tmp.dir.writeFile(testing.io, .{
+        .sub_path = "review-base-2-1/.SRCINFO",
+        .data = "pkgbase = review-base\n\tpkgver = 2\n\tpkgrel = 1\npkgname = review-cli\n",
+    });
+    try fixture.tmp.dir.writeFile(testing.io, .{
+        .sub_path = "review-base-2-1/PKGBUILD",
+        .data = "pkgname=review-cli\npkgver=mutated\npkgrel=1\n",
+    });
+    var incoming = try Dir.openDirAbsolute(testing.io, item.snapshot.?.source_path, .{});
+    defer incoming.close(testing.io);
+    try incoming.writeFile(testing.io, .{
+        .sub_path = "PKGBUILD",
+        .data = "pkgname=review-cli\npkgver=3\npkgrel=1\n",
+    });
+    try fixture.tmp.dir.writeFile(testing.io, .{ .sub_path = "input", .data = "n\n" });
+    const input = try fixture.tmp.dir.openFile(testing.io, "input", .{});
+    defer input.close(testing.io);
+    var buffer: [128]u8 = undefined;
+    fixture.pacman.stdin_reader = input.reader(testing.io, &buffer);
+    try testing.expectError(error.UserDeclined, fixture.pacman.compareUpdateAndInstall(&item));
+    try fixture.pacman.stdout().flush();
+    const output = try fixture.tmp.dir.readFileAlloc(testing.io, "output", testing.allocator, .unlimited);
+    defer testing.allocator.free(output);
+    try testing.expect(mem.indexOf(u8, output, "- pkgver=2") != null);
+    try testing.expect(mem.indexOf(u8, output, "+ pkgver=3") != null);
+    try testing.expect(mem.indexOf(u8, output, "mutated") == null);
+    try testing.expect(mem.indexOf(u8, output, "File:") == null);
+}
+
+test "upgrade review shows both sides of function edits and omits unchanged lines" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.pacman.printPkgbuildChanges(
+        testing.allocator,
+        "pkgname=example\npackage() {\n  cd unchanged-directory\n  echo old\n}\n",
+        "pkgname=example\npackage() {\n  cd unchanged-directory\n  echo new\n}\n",
+    );
+    try fixture.pacman.stdout().flush();
+    const output = try fixture.tmp.dir.readFileAlloc(testing.io, "output", testing.allocator, .unlimited);
+    defer testing.allocator.free(output);
+    try testing.expect(mem.indexOf(u8, output, "package()") != null);
+    try testing.expect(mem.indexOf(u8, output, "-   echo old") != null);
+    try testing.expect(mem.indexOf(u8, output, "+   echo new") != null);
+    try testing.expect(mem.indexOf(u8, output, "unchanged-directory") == null);
+    try testing.expect(mem.indexOf(u8, output, "pkgname") == null);
+}
+
 test "snapshot review detects permission and symlink target changes" {
     const testing = std.testing;
     var fixture: TestDependencies = undefined;
@@ -3112,6 +3533,83 @@ test "install requests deduplicate repeated package names" {
     try testing.expectEqual(@as(usize, 2), fixture.pacman.pkgs.count());
     try testing.expect(fixture.pacman.pkgs.contains("review-cli"));
     try testing.expect(fixture.pacman.pkgs.contains("review-lib"));
+}
+
+fn testLegacyTree(fixture: *TestDependencies, path: []const u8) !void {
+    const io = std.testing.io;
+    try fixture.tmp.dir.createDirPath(io, path);
+    var legacy = try fixture.tmp.dir.openDir(io, path, .{});
+    defer legacy.close(io);
+    try legacy.writeFile(io, .{ .sub_path = "PKGBUILD", .data = "pkgname=review-cli\npkgver=2\npkgrel=1\n" });
+    try legacy.writeFile(io, .{
+        .sub_path = ".SRCINFO",
+        .data = "pkgbase = review-base\n\tpkgver = 2\n\tpkgrel = 1\n" ++
+            "\tsource = download.tar.gz::https://example.test/upstream.tar.gz\n" ++
+            "pkgname = review-cli\n",
+    });
+    try legacy.writeFile(io, .{ .sub_path = "download.tar.gz", .data = "legacy download\n" });
+}
+
+test "install failure prunes expired builds and retains recent and empty directories" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const abandoned = ".build/review-base/0";
+    try fixture.tmp.dir.createDirPath(testing.io, abandoned ++ "/src");
+    try fixture.tmp.dir.writeFile(testing.io, .{
+        .sub_path = abandoned ++ "/src/leftover",
+        .data = "interrupted build\n",
+    });
+    try fixture.tmp.dir.writeFile(testing.io, .{
+        .sub_path = abandoned ++ "/.zur-build-files",
+        .data = "PKGBUILD\n",
+    });
+    try fixture.tmp.dir.setTimestamps(testing.io, abandoned ++ "/.zur-build-files", .{
+        .modify_timestamp = .{ .new = .zero },
+    });
+    for ([_][]const u8{ "1", "2", "3", "4" }) |name| {
+        const path = try Dir.path.join(testing.allocator, &.{ ".build", "review-base", name });
+        defer testing.allocator.free(path);
+        try fixture.tmp.dir.createDirPath(testing.io, path);
+        var directory = try fixture.tmp.dir.openDir(testing.io, path, .{});
+        defer directory.close(testing.io);
+        try directory.writeFile(testing.io, .{ .sub_path = ".zur-build-files", .data = "PKGBUILD\n" });
+    }
+    try fixture.tmp.dir.createDirPath(testing.io, ".build/empty-base");
+    try fixture.tmp.dir.createDirPath(testing.io, ".src/review-base");
+    try fixture.tmp.dir.writeFile(testing.io, .{
+        .sub_path = ".src/review-base/saved.tar.gz",
+        .data = "retained source snapshot\n",
+    });
+    try fixture.tmp.dir.writeFile(testing.io, .{ .sub_path = ".layout-version", .data = "2\n" });
+    try fixture.tmp.dir.createDirPath(testing.io, ".sources/review-base/.zur-source-pending");
+    for ([_][]const u8{
+        ".sources/review-base/download.tar.gz",
+        ".sources/review-base/.zur-source-pending/download.tar.gz",
+    }) |path| try fixture.tmp.dir.writeFile(testing.io, .{
+        .sub_path = path,
+        .data = "obsolete download\n",
+    });
+    try fixture.pacman.pkgs.put(fixture.arena.allocator(), "already-loaded", .{});
+
+    try testing.expectError(error.PkgsAlreadyLoaded, fixture.pacman.installOrUpdate(&.{}));
+    try testing.expectError(error.FileNotFound, fixture.tmp.dir.statFile(testing.io, abandoned, .{}));
+    try testing.expectError(error.FileNotFound, fixture.tmp.dir.statFile(testing.io, ".sources/review-base/download.tar.gz", .{}));
+    try testing.expectError(error.FileNotFound, fixture.tmp.dir.statFile(testing.io, ".sources/review-base/.zur-source-pending", .{}));
+    _ = try fixture.tmp.dir.statFile(testing.io, ".build/review-base/1", .{});
+    _ = try fixture.tmp.dir.statFile(testing.io, ".build/empty-base", .{});
+    const saved = try fixture.tmp.dir.readFileAlloc(testing.io, ".src/review-base/saved.tar.gz", testing.allocator, .unlimited);
+    defer testing.allocator.free(saved);
+    try testing.expectEqualStrings("retained source snapshot\n", saved);
+    try fixture.pacman.stdout().flush();
+    const output = try fixture.tmp.dir.readFileAlloc(testing.io, "output", testing.allocator, .unlimited);
+    defer testing.allocator.free(output);
+    try testing.expect(mem.indexOf(u8, output, "Cleaning build directories") != null);
+    try testing.expect(mem.indexOf(u8, output, abandoned) != null);
+    try testing.expect(mem.indexOf(u8, output, "Removing build directory:") != null);
+    try testing.expect(mem.indexOf(u8, output, "Removing unexpected source entry:") != null);
+    try testing.expect(mem.indexOf(u8, output, "migration") == null);
 }
 
 test "update skips remote initialization when no foreign packages are installed" {
@@ -3249,6 +3747,11 @@ test "makepkg child paths stay managed despite environment and configuration ove
     const allocator = fixture.arena.allocator();
     var snapshot = try testSnapshot(&fixture, "review-base");
     defer snapshot.deinit(allocator);
+    try snapshot.useBuild(allocator, .{
+        .root_path = fixture.pacman.zur_path,
+        .base = "review-base",
+        .version = "2-1",
+    });
     try fixture.tmp.dir.createDirPath(testing.io, "bin");
     try fixture.tmp.dir.writeFile(testing.io, .{
         .sub_path = "bin/makepkg",
@@ -3292,6 +3795,234 @@ test "makepkg child paths stay managed despite environment and configuration ove
     defer allocator.free(listing_report);
     try testing.expectEqualStrings(build_report, listing_report);
     try testing.expectEqualStrings("/external/environment", fixture.environ.get("PKGDEST").?);
+}
+
+test "makepkg sources reuse pkgver directories and retain the current plus three older versions" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const allocator = fixture.arena.allocator();
+    const attempts = [_]struct { version: []const u8, pkgver: []const u8 }{
+        .{ .version = "1-1", .pkgver = "1" },
+        .{ .version = "2-1", .pkgver = "2" },
+        .{ .version = "3-1", .pkgver = "3" },
+        .{ .version = "1:1-2", .pkgver = "1" },
+        .{ .version = "4-1", .pkgver = "4" },
+        .{ .version = "5-1", .pkgver = "5" },
+    };
+    for (attempts, 0..) |attempt, index| {
+        var builds: BuildCache = undefined;
+        try builds.init(testing.io, fixture.pacman.zur_path, fixture.pacman.stdout());
+        defer builds.deinit();
+        var snapshot = try testSnapshot(&fixture, "review-base");
+        defer snapshot.deinit(allocator);
+        try snapshot.useBuild(allocator, .{
+            .root_path = fixture.pacman.zur_path,
+            .base = "review-base",
+            .version = attempt.version,
+        });
+        var environ = try fixture.pacman.makepkgEnviron(snapshot.source_path);
+        defer environ.deinit();
+        const expected = try Dir.path.join(allocator, &.{
+            fixture.pacman.zur_path,
+            ".sources",
+            "review-base",
+            attempt.pkgver,
+        });
+        defer allocator.free(expected);
+        try testing.expectEqualStrings(expected, environ.get("SRCDEST").?);
+        var sources = try Dir.openDirAbsolute(testing.io, expected, .{});
+        defer sources.close(testing.io);
+        if (index == 3) {
+            const contents = try sources.readFileAlloc(testing.io, "download.tar.gz", allocator, .unlimited);
+            defer allocator.free(contents);
+            try testing.expectEqualStrings("cached download\n", contents);
+        } else {
+            try sources.writeFile(testing.io, .{ .sub_path = "download.tar.gz", .data = "cached download\n" });
+        }
+        if (index < 3) {
+            var build = try Dir.openDirAbsolute(testing.io, snapshot.source_path, .{});
+            defer build.close(testing.io);
+            const timestamp: File.SetTimestamp = .{ .new = .fromNanoseconds(@as(i96, @intCast(index + 1)) * std.time.ns_per_s) };
+            try build.setTimestamps(testing.io, ".zur-build-files", .{ .modify_timestamp = timestamp });
+            try sources.setTimestamps(testing.io, ".zur-sources", .{ .modify_timestamp = timestamp });
+        }
+    }
+    for ([_][]const u8{
+        ".sources/review-base/1/download.tar.gz",
+        ".sources/review-base/3/download.tar.gz",
+        ".sources/review-base/4/download.tar.gz",
+        ".sources/review-base/5/download.tar.gz",
+    }) |path| _ = try fixture.tmp.dir.statFile(testing.io, path, .{});
+    try testing.expectError(error.FileNotFound, fixture.tmp.dir.statFile(testing.io, ".sources/review-base/2", .{}));
+    try fixture.pacman.stdout().flush();
+    const output = try fixture.tmp.dir.readFileAlloc(testing.io, "output", allocator, .unlimited);
+    defer allocator.free(output);
+    try testing.expect(mem.indexOf(u8, output, "Removing source directory:") != null);
+    try testing.expect(mem.indexOf(u8, output, ".sources/review-base/2") != null);
+}
+
+test "source cache preparation preserves reviewed local sources under src" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const allocator = fixture.arena.allocator();
+    var snapshot = try testSnapshot(&fixture, "review-base");
+    defer snapshot.deinit(allocator);
+    {
+        var review = try Dir.openDirAbsolute(testing.io, snapshot.source_path, .{});
+        defer review.close(testing.io);
+        try review.createDir(testing.io, "src", .default_dir);
+        try review.writeFile(testing.io, .{ .sub_path = "src/local.patch", .data = "reviewed patch\n" });
+    }
+    try snapshot.useBuild(allocator, .{
+        .root_path = fixture.pacman.zur_path,
+        .base = "review-base",
+        .version = "2-1",
+    });
+    var environ = try fixture.pacman.makepkgEnviron(snapshot.source_path);
+    defer environ.deinit();
+    const contents = try fixture.tmp.dir.readFileAlloc(testing.io, ".build/review-base/2/src/local.patch", allocator, .unlimited);
+    defer allocator.free(contents);
+    try testing.expectEqualStrings("reviewed patch\n", contents);
+}
+
+test "build logs and source packages retain the current version and three older versions" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const allocator = fixture.arena.allocator();
+    const attempts = [_][]const u8{
+        "1",
+        "2",
+        "3",
+        "4",
+        "1",
+        "5",
+    };
+    for (attempts, 0..) |version, index| {
+        var builds: BuildCache = undefined;
+        try builds.init(testing.io, fixture.pacman.zur_path, fixture.pacman.stdout());
+        defer builds.deinit();
+        var snapshot = try testSnapshot(&fixture, "review-base");
+        defer snapshot.deinit(allocator);
+        try snapshot.useBuild(allocator, .{
+            .root_path = fixture.pacman.zur_path,
+            .base = "review-base",
+            .version = version,
+        });
+        var environ = try fixture.pacman.makepkgEnviron(snapshot.source_path);
+        defer environ.deinit();
+        for ([_][]const u8{ "LOGDEST", "SRCPKGDEST" }) |variable| {
+            const path = environ.get(variable).?;
+            try testing.expectEqualStrings(version, Dir.path.basename(path));
+            var directory = try Dir.openDirAbsolute(testing.io, path, .{});
+            defer directory.close(testing.io);
+            if (index == 4) {
+                const contents = try directory.readFileAlloc(testing.io, "retained", allocator, .unlimited);
+                defer allocator.free(contents);
+                try testing.expectEqualStrings("saved output\n", contents);
+            } else {
+                try directory.writeFile(testing.io, .{ .sub_path = "retained", .data = "saved output\n" });
+            }
+            if (index < 4) try directory.setTimestamps(testing.io, ".zur-version", .{
+                .modify_timestamp = .{ .new = .fromNanoseconds(@as(i96, @intCast(index + 1)) * std.time.ns_per_s) },
+            });
+        }
+        if (index < 4) {
+            var build = try Dir.openDirAbsolute(testing.io, snapshot.source_path, .{});
+            defer build.close(testing.io);
+            try build.setTimestamps(testing.io, ".zur-build-files", .{
+                .modify_timestamp = .{ .new = .fromNanoseconds(@as(i96, @intCast(index + 1)) * std.time.ns_per_s) },
+            });
+        }
+    }
+    for ([_][]const u8{ ".logs", ".source_packages" }) |category| {
+        for ([_][]const u8{ "1", "3", "4", "5" }) |version| {
+            const path = try Dir.path.join(allocator, &.{ category, "review-base", version, "retained" });
+            defer allocator.free(path);
+            _ = try fixture.tmp.dir.statFile(testing.io, path, .{});
+        }
+        const expired = try Dir.path.join(allocator, &.{ category, "review-base", "2" });
+        defer allocator.free(expired);
+        try testing.expectError(error.FileNotFound, fixture.tmp.dir.statFile(testing.io, expired, .{}));
+    }
+}
+
+test "archive cleanup preserves installed review baselines and unrelated files" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const allocator = fixture.arena.allocator();
+    try fixture.tmp.dir.createDirPath(testing.io, ".src/review-base");
+    var directory = try fixture.tmp.dir.openDir(testing.io, ".src/review-base", .{});
+    defer directory.close(testing.io);
+    try directory.writeFile(testing.io, .{ .sub_path = "notes", .data = "keep these notes\n" });
+    for (0..6) |index| {
+        const hash = [_]u8{@as(u8, @intCast('0' + index))} ** 64;
+        const name = try std.fmt.allocPrint(allocator, "{s}.tar.gz", .{hash});
+        defer allocator.free(name);
+        try directory.writeFile(testing.io, .{ .sub_path = name, .data = "saved snapshot\n" });
+        try directory.setTimestamps(testing.io, name, .{
+            .modify_timestamp = .{ .new = .fromNanoseconds(@as(i96, @intCast(index)) * std.time.ns_per_s) },
+        });
+    }
+    try directory.writeFile(testing.io, .{
+        .sub_path = ".installed-review-cli.json",
+        .data = "{\"version\":\"2-1\",\"archive\":\"" ++ "0" ** 64 ++ ".tar.gz\"}",
+    });
+    const root = try Dir.path.join(allocator, &.{ fixture.pacman.zur_path, ".src" });
+    defer allocator.free(root);
+    try fixture.pacman.removeStaleArtifacts("review-base", root);
+    for ([_]u8{ '0', '3', '4', '5' }) |digit| {
+        const name = try std.fmt.allocPrint(allocator, "{s}.tar.gz", .{[_]u8{digit} ** 64});
+        defer allocator.free(name);
+        _ = try directory.statFile(testing.io, name, .{});
+    }
+    try testing.expectError(error.FileNotFound, directory.statFile(testing.io, "1" ** 64 ++ ".tar.gz", .{}));
+    try testing.expectError(error.FileNotFound, directory.statFile(testing.io, "2" ** 64 ++ ".tar.gz", .{}));
+    const notes = try directory.readFileAlloc(testing.io, "notes", allocator, .unlimited);
+    defer allocator.free(notes);
+    try testing.expectEqualStrings("keep these notes\n", notes);
+}
+
+test "failed installs prune archives while preserving every installed baseline and latest attempt" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const allocator = fixture.arena.allocator();
+    fixture.pacman.zur_pkg_dir = try Dir.path.join(allocator, &.{ fixture.pacman.zur_path, ".pkg" });
+    try fixture.tmp.dir.createDirPath(testing.io, ".src/review-base");
+    var directory = try fixture.tmp.dir.openDir(testing.io, ".src/review-base", .{});
+    defer directory.close(testing.io);
+    for (0..7) |index| {
+        const hash = [_]u8{@as(u8, @intCast('0' + index))} ** 64;
+        const name = try std.fmt.allocPrint(allocator, "{s}.tar.gz", .{hash});
+        try directory.writeFile(testing.io, .{ .sub_path = name, .data = "saved snapshot\n" });
+        try directory.setTimestamps(testing.io, name, .{
+            .modify_timestamp = .{ .new = .fromNanoseconds(@as(i96, @intCast(index)) * std.time.ns_per_s) },
+        });
+        if (index < 5) {
+            const record = try std.fmt.allocPrint(allocator, ".installed-output-{d}.json", .{index});
+            const contents = try std.json.Stringify.valueAlloc(allocator, .{
+                .version = "1-1",
+                .archive = name,
+            }, .{});
+            try directory.writeFile(testing.io, .{ .sub_path = record, .data = contents });
+        }
+    }
+    try fixture.pacman.pkgs.put(allocator, "already-loaded", .{});
+    try testing.expectError(error.PkgsAlreadyLoaded, fixture.pacman.installOrUpdate(&.{}));
+    for ([_]u8{ '0', '1', '2', '3', '4', '6' }) |digit| {
+        const name = try std.fmt.allocPrint(allocator, "{s}.tar.gz", .{[_]u8{digit} ** 64});
+        _ = try directory.statFile(testing.io, name, .{});
+    }
+    try testing.expectError(error.FileNotFound, directory.statFile(testing.io, "5" ** 64 ++ ".tar.gz", .{}));
 }
 
 test "explicit requests retain installed versions and allow intentional reinstalls" {
@@ -3391,6 +4122,7 @@ test "review cancellation prompt accepts its advertised default" {
 
 test {
     _ = Snapshot;
+    _ = BuildCache;
 }
 
 test "install review formats sources before asking for confirmation" {
@@ -3429,7 +4161,7 @@ test "install review formats sources before asking for confirmation" {
     try testing.expect(mem.indexOf(u8, output, "Install? [Y/n]:") != null);
 }
 
-test "update review labels sources and retains changed function context" {
+test "update review labels source and function diffs" {
     const testing = std.testing;
     var fixture: TestDependencies = undefined;
     try fixture.init();
@@ -3463,15 +4195,21 @@ test "update review labels sources and retains changed function context" {
     const output = try fixture.tmp.dir.readFileAlloc(testing.io, "output", testing.allocator, .unlimited);
     defer testing.allocator.free(output);
     try testing.expect(mem.indexOf(u8, output, color.bold ++ "source" ++ color.reset ++
-        " was updated:\n    \"$_mirror/new.tar.gz\"\n    'fix.patch'\n") != null);
+        " was updated:") != null);
+    try testing.expect(mem.indexOf(u8, output, "- source=(\"$_mirror/old.tar.gz\")") != null);
+    try testing.expect(mem.indexOf(u8, output, "+           \"$_mirror/new.tar.gz\"") != null);
+    try testing.expect(mem.indexOf(u8, output, "+           'fix.patch'") != null);
     try testing.expect(mem.indexOf(u8, output, color.bold ++ "_mirror" ++ color.reset ++
-        " was updated: https://new.test") != null);
+        " was updated:") != null);
+    try testing.expect(mem.indexOf(u8, output, "- _mirror=https://old.test") != null);
+    try testing.expect(mem.indexOf(u8, output, "+ _mirror=https://new.test") != null);
     try testing.expect(mem.indexOf(u8, output, color.bold ++ "install" ++ color.reset ++
         " was removed:") != null);
-    try testing.expect(mem.indexOf(u8, output, "old.install") != null);
+    try testing.expect(mem.indexOf(u8, output, "- install=old.install") != null);
     try testing.expect(mem.indexOf(u8, output, "prepare()") != null);
-    try testing.expect(mem.indexOf(u8, output, "cd \"$srcdir\"") != null);
-    try testing.expect(mem.indexOf(u8, output, "echo new") != null);
+    try testing.expect(mem.indexOf(u8, output, "cd \"$srcdir\"") == null);
+    try testing.expect(mem.indexOf(u8, output, "-   echo old") != null);
+    try testing.expect(mem.indexOf(u8, output, "+   echo new") != null);
 }
 
 test "printBarePkgbuildFields prints sources and every supporting field for review" {
@@ -3530,22 +4268,29 @@ test "printBarePkgbuildFields formats multiline sources for review" {
     try testing.expectEqualStrings(expected, writer.buffered());
 }
 
-test "printUpdatedPkgbuildField formats multiline sources for review" {
+test "PKGBUILD diff preserves multiline source syntax and indentation" {
     const testing = std.testing;
-    var output_buffer: [512]u8 = undefined;
-    var writer = Io.Writer.fixed(&output_buffer);
-    try printUpdatedPkgbuildField(
-        &writer,
-        "source_x86_64",
-        "\n\"https://example.com/testpkg.tar.gz\"\n'fix-build.patch'\n",
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.pacman.printPkgbuildChanges(
+        testing.allocator,
+        "source_x86_64=('old.tar.gz')\n",
+        "source_x86_64=(\n  \"https://example.com/testpkg.tar.gz\"\n  'fix-build.patch'\n)\n",
     );
+    try fixture.pacman.stdout().flush();
+    const output = try fixture.tmp.dir.readFileAlloc(testing.io, "output", testing.allocator, .unlimited);
+    defer testing.allocator.free(output);
 
     const expected =
         color.bold_foreground_blue ++ "::" ++ color.reset ++ " " ++
-        color.bold ++ "source_x86_64" ++ color.reset ++ " was updated:\n" ++
-        "    \"https://example.com/testpkg.tar.gz\"\n" ++
-        "    'fix-build.patch'\n";
-    try testing.expectEqualStrings(expected, writer.buffered());
+        color.bold ++ "source_x86_64" ++ color.reset ++ " was updated:" ++ color.reset ++ "\n" ++
+        "  " ++ color.foreground_red ++ "- source_x86_64=('old.tar.gz')" ++ color.reset ++ "\n" ++
+        "  " ++ color.foreground_green ++ "+ source_x86_64=(" ++ color.reset ++ "\n" ++
+        "  " ++ color.foreground_green ++ "+   \"https://example.com/testpkg.tar.gz\"" ++ color.reset ++ "\n" ++
+        "  " ++ color.foreground_green ++ "+   'fix-build.patch'" ++ color.reset ++ "\n" ++
+        "  " ++ color.foreground_green ++ "+ )" ++ color.reset ++ "\n";
+    try testing.expectEqualStrings(expected, output);
 }
 
 test "printBarePkgbuildFields prints only the native architecture source" {
@@ -3855,7 +4600,7 @@ test "PKGBUILD review preserves literal whitespace while normalizing code" {
     );
 }
 
-test "PKGBUILD review indents updated and removed multiline lists" {
+test "PKGBUILD review diffs updated and removed multiline lists" {
     const testing = std.testing;
     var fixture: TestDependencies = undefined;
     try fixture.init();
@@ -3870,11 +4615,14 @@ test "PKGBUILD review indents updated and removed multiline lists" {
     defer testing.allocator.free(output);
     try testing.expectEqualStrings(
         color.bold_foreground_blue ++ "::" ++ color.reset ++ " " ++
-            color.bold ++ "depends" ++ color.reset ++ " was updated:\n" ++
-            "    'new'\n    'another'\n" ++
+            color.bold ++ "depends" ++ color.reset ++ " was updated:" ++ color.reset ++ "\n" ++
+            "  " ++ color.foreground_red ++ "- depends=('old')" ++ color.reset ++ "\n" ++
+            "  " ++ color.foreground_green ++ "+ depends=('new'" ++ color.reset ++ "\n" ++
+            "  " ++ color.foreground_green ++ "+           'another')" ++ color.reset ++ "\n" ++
             color.bold_foreground_blue ++ "::" ++ color.reset ++ " " ++
-            color.bold ++ "optdepends" ++ color.reset ++ " was removed:\n" ++
-            "    'first'\n    'second'\n",
+            color.bold ++ "optdepends" ++ color.reset ++ " was removed:" ++ color.reset ++ "\n" ++
+            "  " ++ color.foreground_red ++ "- optdepends=('first'" ++ color.reset ++ "\n" ++
+            "  " ++ color.foreground_red ++ "-     'second')" ++ color.reset ++ "\n",
         output,
     );
 }
@@ -3988,7 +4736,8 @@ test "file review indents complete versions when diff alignment is too large" {
     try fixture.pacman.stdout().flush();
     const output = try fixture.tmp.dir.readFileAlloc(testing.io, "output", testing.allocator, .unlimited);
     defer testing.allocator.free(output);
-    try testing.expect(mem.startsWith(u8, output, ":: large.txt changed (complete old/new contents):\n"));
+    try testing.expect(mem.startsWith(u8, output, color.bold_foreground_blue ++ "::" ++ color.reset ++
+        " large.txt changed (complete old/new contents):\n"));
     try testing.expectEqual(@as(usize, 1024), mem.count(u8, output, "  - old\n"));
     try testing.expectEqual(@as(usize, 1024), mem.count(u8, output, "  + new\n"));
 }
