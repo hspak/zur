@@ -1,14 +1,14 @@
 //! AUR RPC client: info/search queries and the snapshot download URL.
 
 const std = @import("std");
-const Io = std.Io;
+const testing = std.testing;
 const log = std.log.scoped(.aur);
 
 const Request = @import("Request.zig");
 
-const ErrorSet = std.mem.Allocator.Error || Request.Error || std.json.ParseError(std.json.Scanner) ||
-    error{ RpcRejected, InvalidRpcResponse, QueryTooLong };
-pub const Error = ErrorSet;
+pub const SearchError = std.mem.Allocator.Error || Request.Error ||
+    std.json.ParseError(std.json.Scanner) || error{ RpcRejected, InvalidRpcResponse };
+pub const Error = SearchError || error{QueryTooLong};
 
 const host = "https://aur.archlinux.org/rpc/?v=5";
 // Stay below the official instance's documented 4443-byte URI limit.
@@ -39,8 +39,8 @@ fn RpcResp(comptime T: type) type {
 
         version: usize,
         type: []const u8,
-        resultcount: usize = 0,
-        results: []T = &.{},
+        resultcount: usize,
+        results: []T,
         @"error": ?[]const u8 = null,
     };
 }
@@ -204,13 +204,23 @@ fn mapSearchResp(allocator: std.mem.Allocator, json_resp: RpcResp(SearchJson)) !
     };
 }
 
-fn parseResponse(comptime T: type, allocator: std.mem.Allocator, body: []const u8, expected_type: []const u8) Error!RpcResp(T) {
-    const response = try std.json.parseFromSliceLeaky(RpcResp(T), allocator, body, .{
-        .ignore_unknown_fields = true,
-        .allocate = .alloc_always,
-    });
+fn parseResponse(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    body: []const u8,
+    expected_type: []const u8,
+) SearchError!RpcResp(T) {
+    const response = try std.json.parseFromSliceLeaky(
+        RpcResp(T),
+        allocator,
+        body,
+        .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
+    );
     if (response.@"error" != null or std.mem.eql(u8, response.type, "error")) {
-        log.debug("AUR rejected the request: {s}", .{response.@"error" orelse "unspecified RPC error"});
+        log.debug(
+            "AUR rejected the request: {s}",
+            .{response.@"error" orelse "unspecified RPC error"},
+        );
         return error.RpcRejected;
     }
     if (response.version != 5 or !std.mem.eql(u8, response.type, expected_type) or
@@ -232,7 +242,11 @@ pub fn queryAll(
     return queryAllUsing(allocator, request, names);
 }
 
-fn queryAllUsing(allocator: std.mem.Allocator, request: anytype, names: []const []const u8) !RpcRespV5 {
+fn queryAllUsing(
+    allocator: std.mem.Allocator,
+    request: anytype,
+    names: []const []const u8,
+) !RpcRespV5 {
     var results: std.ArrayList(Info) = .empty;
     errdefer results.deinit(allocator);
     var offset: usize = 0;
@@ -258,7 +272,12 @@ fn queryAllUsing(allocator: std.mem.Allocator, request: anytype, names: []const 
         for (response.results) |result| results.appendAssumeCapacity(infoFromJson(result));
     }
     const owned = try results.toOwnedSlice(allocator);
-    return .{ .version = 5, .type = "multiinfo", .resultcount = owned.len, .results = owned };
+    return .{
+        .version = 5,
+        .type = "multiinfo",
+        .resultcount = owned.len,
+        .results = owned,
+    };
 }
 
 /// Query the AUR for a single package's full info (including its Depends /
@@ -291,11 +310,16 @@ pub fn search(
     request: *Request,
     search_name: []const u8,
     by: SearchBy,
-) Error!RpcSearchRespV5 {
+) SearchError!RpcSearchRespV5 {
     return searchUsing(allocator, request, search_name, by);
 }
 
-fn searchUsing(allocator: std.mem.Allocator, request: anytype, search_name: []const u8, by: SearchBy) !RpcSearchRespV5 {
+fn searchUsing(
+    allocator: std.mem.Allocator,
+    request: anytype,
+    search_name: []const u8,
+    by: SearchBy,
+) !RpcSearchRespV5 {
     var uri: std.ArrayList(u8) = .empty;
     defer uri.deinit(allocator);
 
@@ -310,24 +334,28 @@ fn searchUsing(allocator: std.mem.Allocator, request: anytype, search_name: []co
 
     const json_resp = try parseResponse(SearchJson, allocator, body, "search");
 
-    const response = try mapSearchResp(allocator, json_resp);
-    return response;
+    return mapSearchResp(allocator, json_resp);
 }
 
 fn appendQueryValue(allocator: std.mem.Allocator, uri: *std.ArrayList(u8), raw: []const u8) !void {
-    try uri.print(allocator, "{f}", .{std.fmt.alt(std.Uri.Component{ .raw = raw }, .formatEscaped)});
+    try uri.print(
+        allocator,
+        "{f}",
+        .{std.fmt.alt(std.Uri.Component{ .raw = raw }, .formatEscaped)},
+    );
 }
 
-fn appendInfoArgument(allocator: std.mem.Allocator, uri: *std.ArrayList(u8), name: []const u8) !void {
+fn appendInfoArgument(
+    allocator: std.mem.Allocator,
+    uri: *std.ArrayList(u8),
+    name: []const u8,
+) !void {
     if (name.len > max_query_bytes) return error.QueryTooLong;
     try uri.appendSlice(allocator, "&arg[]=");
     try appendQueryValue(allocator, uri, name);
 }
 
-fn buildInfoQuery(
-    allocator: std.mem.Allocator,
-    names: []const []const u8,
-) ![]const u8 {
+fn buildInfoQuery(allocator: std.mem.Allocator, names: []const []const u8) ![]const u8 {
     var uri: std.ArrayList(u8) = .empty;
     errdefer uri.deinit(allocator);
 
@@ -338,11 +366,8 @@ fn buildInfoQuery(
         try appendInfoArgument(allocator, &uri, name);
         if (uri.items.len > max_query_bytes) return error.QueryTooLong;
     }
-    const value = try uri.toOwnedSlice(allocator);
-    return value;
+    return uri.toOwnedSlice(allocator);
 }
-
-const testing = std.testing;
 
 test "buildInfoQuery builds the complete single-package URL" {
     const result = try buildInfoQuery(testing.allocator, &.{"neovim-git"});
@@ -369,9 +394,13 @@ const TestQueryRequest = struct {
     expected_url: []const u8,
     response_type: []const u8 = "multiinfo",
 
-    fn get(self: TestQueryRequest, url: []const u8) ![]u8 {
+    fn get(self: TestQueryRequest, url: []const u8) ![]const u8 {
         try testing.expectEqualStrings(self.expected_url, url);
-        return std.fmt.allocPrint(self.allocator, "{{\"version\":5,\"type\":\"{s}\",\"resultcount\":0,\"results\":[]}}", .{self.response_type});
+        return std.fmt.allocPrint(
+            self.allocator,
+            "{{\"version\":5,\"type\":\"{s}\",\"resultcount\":0,\"results\":[]}}",
+            .{self.response_type},
+        );
     }
 };
 
@@ -399,7 +428,7 @@ const TestRpcRequest = struct {
     allocator: std.mem.Allocator,
     body: []const u8,
 
-    fn get(self: TestRpcRequest, _: []const u8) ![]u8 {
+    fn get(self: TestRpcRequest, _: []const u8) ![]const u8 {
         return self.allocator.dupe(u8, self.body);
     }
 };
@@ -411,7 +440,11 @@ test "RPC errors remain errors instead of empty package results" {
         .allocator = arena.allocator(),
         .body = "{\"version\":5,\"type\":\"error\",\"resultcount\":0,\"results\":[],\"error\":\"Too many requests\"}",
     };
-    try testing.expectError(error.RpcRejected, queryNameUsing(arena.allocator(), request, "review-cli"));
+    try testing.expectError(error.RpcRejected, queryNameUsing(
+        arena.allocator(),
+        request,
+        "review-cli",
+    ));
 }
 
 test "RPC rejects inconsistent counts before indexing results" {
@@ -421,7 +454,11 @@ test "RPC rejects inconsistent counts before indexing results" {
         .allocator = arena.allocator(),
         .body = "{\"version\":5,\"type\":\"multiinfo\",\"resultcount\":1,\"results\":[]}",
     };
-    try testing.expectError(error.InvalidRpcResponse, queryNameUsing(arena.allocator(), request, "review-cli"));
+    try testing.expectError(error.InvalidRpcResponse, queryNameUsing(
+        arena.allocator(),
+        request,
+        "review-cli",
+    ));
 }
 
 const TestBatchRequest = struct {
@@ -430,7 +467,7 @@ const TestBatchRequest = struct {
     seen: std.StringHashMapUnmanaged(void) = .empty,
     fail_on_call: ?usize = null,
 
-    fn get(self: *TestBatchRequest, url: []const u8) ![]u8 {
+    fn get(self: *TestBatchRequest, url: []const u8) ![]const u8 {
         self.calls += 1;
         try testing.expect(url.len <= 4096);
         if (self.fail_on_call == self.calls) return error.TestRpcUnavailable;
@@ -457,12 +494,16 @@ const TestBatchRequest = struct {
                 .URLPath = "/snapshot.tar.gz",
             });
         }
-        return std.json.Stringify.valueAlloc(self.allocator, .{
-            .version = 5,
-            .type = "multiinfo",
-            .resultcount = results.items.len,
-            .results = results.items,
-        }, .{});
+        return std.json.Stringify.valueAlloc(
+            self.allocator,
+            .{
+                .version = 5,
+                .type = "multiinfo",
+                .resultcount = results.items.len,
+                .results = results.items,
+            },
+            .{},
+        );
     }
 };
 
@@ -473,7 +514,11 @@ test "RPC info batches by encoded URL bytes and combines every response" {
     var names: std.ArrayList([]const u8) = .empty;
     defer names.deinit(allocator);
     for (0..80) |index| {
-        try names.append(allocator, try std.fmt.allocPrint(allocator, "review-{d}-{s}", .{ index, "lib++" ** 20 }));
+        try names.append(allocator, try std.fmt.allocPrint(
+            allocator,
+            "review-{d}-{s}",
+            .{ index, "lib++" ** 20 },
+        ));
     }
     var request: TestBatchRequest = .{ .allocator = allocator };
     defer request.seen.deinit(allocator);
@@ -482,7 +527,10 @@ test "RPC info batches by encoded URL bytes and combines every response" {
     try testing.expect(request.calls > 1);
     try testing.expectEqual(names.items.len, response.resultcount);
     try testing.expectEqual(names.items.len, request.seen.count());
-    for (names.items, response.results) |name, result| try testing.expectEqualStrings(name, result.name);
+    for (
+        names.items,
+        response.results,
+    ) |name, result| try testing.expectEqualStrings(name, result.name);
 }
 
 test "RPC info skips empty input and rejects an oversized name before requesting" {
@@ -495,7 +543,11 @@ test "RPC info skips empty input and rejects an oversized name before requesting
     defer allocator.free(response.results);
     try testing.expectEqual(@as(usize, 0), response.resultcount);
     try testing.expectEqual(@as(usize, 0), request.calls);
-    try testing.expectError(error.QueryTooLong, queryAllUsing(allocator, &request, &.{"+" ** 1400}));
+    try testing.expectError(error.QueryTooLong, queryAllUsing(
+        allocator,
+        &request,
+        &.{"+" ** 1400},
+    ));
     try testing.expectEqual(@as(usize, 0), request.calls);
 }
 
@@ -505,9 +557,10 @@ test "RPC info propagates a later batch failure instead of returning partial res
     const allocator = arena.allocator();
     var request: TestBatchRequest = .{ .allocator = allocator, .fail_on_call = 2 };
     defer request.seen.deinit(allocator);
-    try testing.expectError(error.TestRpcUnavailable, queryAllUsing(allocator, &request, &.{
-        "first-" ++ "a" ** 2400,
-        "second-" ++ "b" ** 2400,
-    }));
+    try testing.expectError(error.TestRpcUnavailable, queryAllUsing(
+        allocator,
+        &request,
+        &.{ "first-" ++ "a" ** 2400, "second-" ++ "b" ** 2400 },
+    ));
     try testing.expectEqual(@as(usize, 2), request.calls);
 }

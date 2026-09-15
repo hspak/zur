@@ -1,24 +1,26 @@
 //! Long-lived libalpm handle for local-db and sync-repo queries.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+const testing = std.testing;
 const log = std.log.scoped(.alpm);
 const alpm = @import("c");
 
 const Alpm = @This();
 
-const ErrorSet = std.mem.Allocator.Error || error{
+allocator: Allocator,
+handle: *alpm.alpm_handle_t,
+local_db: *alpm.alpm_db_t,
+
+pub const InitError = Allocator.Error || error{
     NoHandle,
     NoSyncDb,
     NoLocalDb,
-    NoCache,
-    InvalidPackageArchive,
-    InvalidInstallReason,
 };
-pub const Error = ErrorSet;
-
-allocator: std.mem.Allocator,
-handle: *alpm.alpm_handle_t,
-local_db: *alpm.alpm_db_t,
+pub const ForeignPackagesError = Allocator.Error || error{NoCache};
+pub const InstalledReasonError = Allocator.Error || error{InvalidInstallReason};
+pub const ArchiveError = Allocator.Error || error{InvalidPackageArchive};
+pub const Error = InitError || ForeignPackagesError || InstalledReasonError || ArchiveError;
 
 /// A package installed locally, with its name and version. The slices are
 /// copies owned by the caller's allocator.
@@ -42,10 +44,33 @@ pub const Options = struct {
     db_path: [:0]const u8 = "/var/lib/pacman/",
 };
 
+pub const InstallReason = enum { explicit, dependency };
+
+/// Metadata copied from a package archive. The caller owns all strings.
+pub const Archive = struct {
+    name: []const u8,
+    version: []const u8,
+    arch: []const u8,
+
+    pub fn deinit(self: *Archive, allocator: Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.version);
+        allocator.free(self.arch);
+        self.* = undefined;
+    }
+};
+
+pub const Candidate = struct {
+    name: []const u8,
+    version: []const u8,
+    provides: []const []const u8,
+};
+
 /// Open a libalpm handle and register the sync repos. Paths are borrowed during initialization.
-pub fn init(allocator: std.mem.Allocator, options: Options) Error!Alpm {
+pub fn init(allocator: Allocator, options: Options) InitError!Alpm {
     var err: alpm.alpm_errno_t = 0;
     const handle = alpm.alpm_initialize(options.root, options.db_path, &err) orelse {
+        if (err == alpm.ALPM_ERR_MEMORY) return error.OutOfMemory;
         return error.NoHandle;
     };
     errdefer _ = alpm.alpm_release(handle);
@@ -54,6 +79,7 @@ pub fn init(allocator: std.mem.Allocator, options: Options) Error!Alpm {
     // permissive signature level is fine here.
     for (repos) |repo| {
         if (alpm.alpm_register_syncdb(handle, repo, sig_level) == null) {
+            if (alpm.alpm_errno(handle) == alpm.ALPM_ERR_MEMORY) return error.OutOfMemory;
             return error.NoSyncDb;
         }
     }
@@ -77,8 +103,8 @@ pub fn deinit(self: *Alpm) void {
 /// Enumerate installed packages that are not present in any registered sync
 /// repository ("foreign" / AUR packages, i.e. what `pacman -Qm` lists).
 /// The returned name/version strings are duped into `self.allocator`; the
-/// caller owns the returned slice.
-pub fn fetchForeignPackages(self: *Alpm) Error![]ForeignPackage {
+/// caller owns the returned slice and must free each string and the slice.
+pub fn fetchForeignPackages(self: *Alpm) ForeignPackagesError![]ForeignPackage {
     const cache = alpm.alpm_db_get_pkgcache(self.local_db) orelse return error.NoCache;
 
     var list: std.ArrayList(ForeignPackage) = .empty;
@@ -101,27 +127,21 @@ pub fn fetchForeignPackages(self: *Alpm) Error![]ForeignPackage {
             const version = std.mem.span(alpm.alpm_pkg_get_version(@constCast(pkg)));
             const version_copy = try self.allocator.dupe(u8, version);
             errdefer self.allocator.free(version_copy);
-            try list.append(self.allocator, .{
-                .name = name_copy,
-                .version = version_copy,
-            });
+            try list.append(self.allocator, .{ .name = name_copy, .version = version_copy });
         }
     }
-    const value = try list.toOwnedSlice(self.allocator);
-    return value;
+    return list.toOwnedSlice(self.allocator);
 }
 
 /// True if a package `name` is installed in the local database.
-pub fn isInstalled(self: *Alpm, name: []const u8) Error!bool {
-    const name_cstr = try std.mem.concatWithSentinel(self.allocator, u8, &.{name}, 0);
+pub fn isInstalled(self: *Alpm, name: []const u8) Allocator.Error!bool {
+    const name_cstr = try self.allocator.dupeZ(u8, name);
     defer self.allocator.free(name_cstr);
     return alpm.alpm_db_get_pkg(self.local_db, @ptrCast(name_cstr.ptr)) != null;
 }
 
-pub const InstallReason = enum { explicit, dependency };
-
 /// Return the installed version, borrowed until this handle is released.
-pub fn installedVersion(self: *Alpm, name: []const u8) Error!?[]const u8 {
+pub fn installedVersion(self: *Alpm, name: []const u8) Allocator.Error!?[]const u8 {
     const name_z = try self.allocator.dupeZ(u8, name);
     defer self.allocator.free(name_z);
     const pkg = alpm.alpm_db_get_pkg(self.local_db, name_z) orelse return null;
@@ -129,7 +149,7 @@ pub fn installedVersion(self: *Alpm, name: []const u8) Error!?[]const u8 {
 }
 
 /// Return the stored install reason, or null if this exact name is not installed.
-pub fn installedReason(self: *Alpm, name: []const u8) Error!?InstallReason {
+pub fn installedReason(self: *Alpm, name: []const u8) InstalledReasonError!?InstallReason {
     const name_z = try self.allocator.dupeZ(u8, name);
     defer self.allocator.free(name_z);
     const pkg = alpm.alpm_db_get_pkg(self.local_db, name_z) orelse return null;
@@ -142,7 +162,7 @@ pub fn installedReason(self: *Alpm, name: []const u8) Error!?InstallReason {
 
 /// Return an installed package satisfying the complete dependency, including
 /// versioned provisions. The name is borrowed until this handle is released.
-pub fn installedSatisfier(self: *Alpm, dependency: []const u8) Error!?[]const u8 {
+pub fn installedSatisfier(self: *Alpm, dependency: []const u8) Allocator.Error!?[]const u8 {
     const expression = try self.allocator.dupeZ(u8, dependency);
     defer self.allocator.free(expression);
     const cache = alpm.alpm_db_get_pkgcache(self.local_db);
@@ -151,13 +171,16 @@ pub fn installedSatisfier(self: *Alpm, dependency: []const u8) Error!?[]const u8
 }
 
 /// Whether a registered binary repository can satisfy the complete dependency.
-pub fn syncSatisfies(self: *Alpm, dependency: []const u8) Error!bool {
+pub fn syncSatisfies(self: *Alpm, dependency: []const u8) Allocator.Error!bool {
     const expression = try self.allocator.dupeZ(u8, dependency);
     defer self.allocator.free(expression);
     var dbs = alpm.alpm_get_syncdbs(self.handle);
     while (dbs != null) : (dbs = dbs.*.next) {
         const db: *alpm.alpm_db_t = @ptrCast(dbs.*.data.?);
-        if (alpm.alpm_find_satisfier(alpm.alpm_db_get_pkgcache(db), expression) != null) return true;
+        if (alpm.alpm_find_satisfier(
+            alpm.alpm_db_get_pkgcache(db),
+            expression,
+        ) != null) return true;
     }
     return false;
 }
@@ -165,23 +188,23 @@ pub fn syncSatisfies(self: *Alpm, dependency: []const u8) Error!bool {
 /// Match remote metadata using libalpm's dependency parser and version ordering.
 /// All input strings are borrowed for the duration of the call.
 pub fn satisfies(
-    allocator: std.mem.Allocator,
+    allocator: Allocator,
     dependency: []const u8,
-    name: []const u8,
-    version: []const u8,
-    provides: []const []const u8,
-) Error!bool {
+    candidate: Candidate,
+) Allocator.Error!bool {
     const expression = try allocator.dupeZ(u8, dependency);
     defer allocator.free(expression);
-    const dep: *alpm.alpm_depend_t = alpm.alpm_dep_from_string(expression) orelse return error.OutOfMemory;
+    const dep: *alpm.alpm_depend_t = alpm.alpm_dep_from_string(expression) orelse
+        return error.OutOfMemory;
     defer alpm.alpm_dep_free(dep);
-    if (std.mem.eql(u8, std.mem.span(dep.name), name) and
-        try versionSatisfies(allocator, dep, version)) return true;
+    if (std.mem.eql(u8, std.mem.span(dep.name), candidate.name) and
+        try versionSatisfies(allocator, dep, candidate.version)) return true;
 
-    for (provides) |provision| {
+    for (candidate.provides) |provision| {
         const provision_z = try allocator.dupeZ(u8, provision);
         defer allocator.free(provision_z);
-        const provided: *alpm.alpm_depend_t = alpm.alpm_dep_from_string(provision_z) orelse return error.OutOfMemory;
+        const provided: *alpm.alpm_depend_t = alpm.alpm_dep_from_string(provision_z) orelse
+            return error.OutOfMemory;
         defer alpm.alpm_dep_free(provided);
         if (!std.mem.eql(u8, std.mem.span(dep.name), std.mem.span(provided.name))) continue;
         if (dep.mod == alpm.ALPM_DEP_MOD_ANY) return true;
@@ -193,10 +216,10 @@ pub fn satisfies(
 }
 
 fn versionSatisfies(
-    allocator: std.mem.Allocator,
+    allocator: Allocator,
     dep: *const alpm.alpm_depend_t,
     version: []const u8,
-) Error!bool {
+) Allocator.Error!bool {
     if (dep.mod == alpm.ALPM_DEP_MOD_ANY) return true;
     const version_z = try allocator.dupeZ(u8, version);
     defer allocator.free(version_z);
@@ -215,7 +238,7 @@ fn versionSatisfies(
 // alpm_db_get_pkg wants a C string, so this makes a sentinel copy (like
 // isInstalled) rather than trusting that `name` is already terminated.
 fn isInSyncDbs(self: *Alpm, name: []const u8) !bool {
-    const name_cstr = try std.mem.concatWithSentinel(self.allocator, u8, &.{name}, 0);
+    const name_cstr = try self.allocator.dupeZ(u8, name);
     defer self.allocator.free(name_cstr);
 
     var dbs = alpm.alpm_get_syncdbs(self.handle);
@@ -227,22 +250,8 @@ fn isInSyncDbs(self: *Alpm, name: []const u8) !bool {
     return false;
 }
 
-/// Metadata copied from a package archive. The caller owns all strings.
-pub const Archive = struct {
-    name: []const u8,
-    version: []const u8,
-    arch: []const u8,
-
-    pub fn deinit(self: *Archive, allocator: std.mem.Allocator) void {
-        allocator.free(self.name);
-        allocator.free(self.version);
-        allocator.free(self.arch);
-        self.* = undefined;
-    }
-};
-
 /// Inspect a package file without installing it. The caller must deinit the result.
-pub fn readArchive(self: *Alpm, path: []const u8) Error!Archive {
+pub fn readArchive(self: *Alpm, path: []const u8) ArchiveError!Archive {
     const path_z = try self.allocator.dupeZ(u8, path);
     defer self.allocator.free(path_z);
     var pkg: ?*alpm.alpm_pkg_t = null;
@@ -258,23 +267,31 @@ pub fn readArchive(self: *Alpm, path: []const u8) Error!Archive {
     const archive_arch = alpm.alpm_pkg_get_arch(pkg);
     if (archive_arch == null) return error.InvalidPackageArchive;
     const arch = try self.allocator.dupe(u8, std.mem.span(archive_arch));
-    return .{ .name = name, .version = version, .arch = arch };
+    return .{
+        .name = name,
+        .version = version,
+        .arch = arch,
+    };
 }
 
 /// True if `ver_a` is a newer alpm version than `ver_b`.
-pub fn isNewerThan(allocator: std.mem.Allocator, ver_a: []const u8, ver_b: []const u8) Error!bool {
+pub fn isNewerThan(
+    allocator: Allocator,
+    ver_a: []const u8,
+    ver_b: []const u8,
+) Allocator.Error!bool {
     return try compareVersions(allocator, ver_a, ver_b) == .gt;
 }
 
 /// Compare full package versions, including epoch and release, using libalpm ordering.
 pub fn compareVersions(
-    allocator: std.mem.Allocator,
+    allocator: Allocator,
     ver_a: []const u8,
     ver_b: []const u8,
-) Error!std.math.Order {
-    const ver_a_sentinel = try std.mem.concatWithSentinel(allocator, u8, &.{ver_a}, 0);
+) Allocator.Error!std.math.Order {
+    const ver_a_sentinel = try allocator.dupeZ(u8, ver_a);
     defer allocator.free(ver_a_sentinel);
-    const ver_b_sentinel = try std.mem.concatWithSentinel(allocator, u8, &.{ver_b}, 0);
+    const ver_b_sentinel = try allocator.dupeZ(u8, ver_b);
     defer allocator.free(ver_b_sentinel);
 
     const ver_a_cstr: [*c]const u8 = @ptrCast(ver_a_sentinel.ptr);
@@ -283,19 +300,37 @@ pub fn compareVersions(
     return std.math.order(alpm.alpm_pkg_vercmp(ver_a_cstr, ver_b_cstr), 0);
 }
 
-const testing = std.testing;
-
 test "isNewerThan follows libalpm version ordering" {
     const cases = [_]struct {
         candidate: []const u8,
         installed: []const u8,
         newer: bool,
     }{
-        .{ .candidate = "2.0.0", .installed = "1.0.0", .newer = true },
-        .{ .candidate = "1.0.0", .installed = "2.0.0", .newer = false },
-        .{ .candidate = "1.0.0", .installed = "1.0.0", .newer = false },
-        .{ .candidate = "2:1.0-1", .installed = "1:9.0-9", .newer = true },
-        .{ .candidate = "1.0-2", .installed = "1.0-1", .newer = true },
+        .{
+            .candidate = "2.0.0",
+            .installed = "1.0.0",
+            .newer = true,
+        },
+        .{
+            .candidate = "1.0.0",
+            .installed = "2.0.0",
+            .newer = false,
+        },
+        .{
+            .candidate = "1.0.0",
+            .installed = "1.0.0",
+            .newer = false,
+        },
+        .{
+            .candidate = "2:1.0-1",
+            .installed = "1:9.0-9",
+            .newer = true,
+        },
+        .{
+            .candidate = "1.0-2",
+            .installed = "1.0-1",
+            .newer = true,
+        },
     };
 
     for (cases) |case| {
@@ -313,25 +348,71 @@ test "satisfies uses dependency constraints and provision versions" {
         provides: []const []const u8 = &.{},
         expected: bool,
     }{
-        .{ .dependency = "foo>=2", .version = "1", .expected = false },
-        .{ .dependency = "foo>=2", .version = "2", .expected = true },
-        .{ .dependency = "foo<2", .version = "2", .expected = false },
-        .{ .dependency = "foo<=2", .version = "2", .expected = true },
-        .{ .dependency = "foo>2", .version = "3", .expected = true },
-        .{ .dependency = "foo=2", .version = "3", .expected = false },
-        .{ .dependency = "foo>=2:1", .version = "1:99", .expected = false },
-        .{ .dependency = "virtual", .version = "99", .provides = &.{"virtual"}, .expected = true },
-        .{ .dependency = "virtual>=2", .version = "99", .provides = &.{"virtual"}, .expected = false },
-        .{ .dependency = "virtual>=2", .version = "99", .provides = &.{"virtual=1"}, .expected = false },
-        .{ .dependency = "virtual>=2", .version = "1", .provides = &.{"virtual=2"}, .expected = true },
+        .{
+            .dependency = "foo>=2",
+            .version = "1",
+            .expected = false,
+        },
+        .{
+            .dependency = "foo>=2",
+            .version = "2",
+            .expected = true,
+        },
+        .{
+            .dependency = "foo<2",
+            .version = "2",
+            .expected = false,
+        },
+        .{
+            .dependency = "foo<=2",
+            .version = "2",
+            .expected = true,
+        },
+        .{
+            .dependency = "foo>2",
+            .version = "3",
+            .expected = true,
+        },
+        .{
+            .dependency = "foo=2",
+            .version = "3",
+            .expected = false,
+        },
+        .{
+            .dependency = "foo>=2:1",
+            .version = "1:99",
+            .expected = false,
+        },
+        .{
+            .dependency = "virtual",
+            .version = "99",
+            .provides = &.{"virtual"},
+            .expected = true,
+        },
+        .{
+            .dependency = "virtual>=2",
+            .version = "99",
+            .provides = &.{"virtual"},
+            .expected = false,
+        },
+        .{
+            .dependency = "virtual>=2",
+            .version = "99",
+            .provides = &.{"virtual=1"},
+            .expected = false,
+        },
+        .{
+            .dependency = "virtual>=2",
+            .version = "1",
+            .provides = &.{"virtual=2"},
+            .expected = true,
+        },
     };
     for (cases) |case| {
-        try testing.expectEqual(case.expected, try satisfies(
-            testing.allocator,
-            case.dependency,
-            "foo",
-            case.version,
-            case.provides,
-        ));
+        try testing.expectEqual(case.expected, try satisfies(testing.allocator, case.dependency, .{
+            .name = "foo",
+            .version = case.version,
+            .provides = case.provides,
+        }));
     }
 }

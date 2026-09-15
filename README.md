@@ -11,5 +11,10 @@
 ## Build
 **Dependencies**
 - Arch Linux (pacman)
-- Zig (0.16)
+- Zig (0.16.0)
 - libalpm
+
+## Validation
+
+Run `zig fmt build.zig build.zig.zon src`, then `zig build test`.
+The test step checks formatting and runs the unit, integration, and CLI tests.

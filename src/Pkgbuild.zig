@@ -28,19 +28,16 @@ pub const Error = Allocator.Error || error{
 };
 
 const Content = struct {
+    /// Owned by this field; source borrows the original PKGBUILD.
     value: []const u8,
     /// Exact borrowed statement, including syntax omitted from the display value.
-    source: []const u8 = "",
-    start: usize = 0,
+    source: []const u8,
+    start: usize,
     form: enum {
         scalar,
         array,
         function,
-    } = .scalar,
-
-    fn init(value: []const u8) Content {
-        return .{ .value = value };
-    }
+    },
 
     fn deinit(self: *Content, allocator: Allocator) void {
         allocator.free(self.value);
@@ -156,7 +153,7 @@ const Parser = struct {
     }
 
     /// Read a scalar value up to end-of-line, respecting quotes and line continuations (\).
-    fn readScalarValue(self: *Parser) ![]u8 {
+    fn readScalarValue(self: *Parser) ![]const u8 {
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(self.allocator);
 
@@ -235,7 +232,7 @@ const Parser = struct {
 
     /// Read the array body after '(', collapsing unquoted spaces/tabs while
     /// preserving quotes and newlines for display.
-    fn readArrayBody(self: *Parser) ![]u8 {
+    fn readArrayBody(self: *Parser) ![]const u8 {
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(self.allocator);
 
@@ -291,7 +288,9 @@ const Parser = struct {
                         saw_ws = true;
                         self.pos += 1;
                     }
-                    if (saw_ws and out.items.len != 0 and !isArrayWs(out.items[out.items.len - 1])) {
+                    if (saw_ws and out.items.len != 0 and
+                        !isArrayWs(out.items[out.items.len - 1]))
+                    {
                         try out.append(self.allocator, ' ');
                     }
                 },
@@ -322,7 +321,7 @@ const Parser = struct {
     }
 
     /// Read `{ ... }` with brace nesting, quotes, and comments. Includes the braces.
-    fn readBraceGroup(self: *Parser) ![]u8 {
+    fn readBraceGroup(self: *Parser) ![]const u8 {
         std.debug.assert(self.src[self.pos] == '{');
         const start = self.pos;
         self.pos += 1;
@@ -376,20 +375,22 @@ const Parser = struct {
         return error.UnterminatedFunction;
     }
 
-    fn putField(self: *Parser, name: []const u8, value: []u8) !void {
+    fn putField(self: *Parser, name: []const u8, value: []const u8) !void {
         const key = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(key);
         try self.putFieldOwnedKey(key, value);
     }
 
     // Takes ownership of key and value only on success.
-    fn putFieldOwnedKey(self: *Parser, key: []u8, value: []u8) !void {
+    fn putFieldOwnedKey(self: *Parser, key: []const u8, value: []const u8) !void {
         const content = try self.allocator.create(Content);
         errdefer self.allocator.destroy(content);
-        content.* = .init(value);
-        content.source = self.src[self.statement_start..self.pos];
-        content.start = self.statement_start;
-        content.form = self.form;
+        content.* = .{
+            .value = value,
+            .source = self.src[self.statement_start..self.pos],
+            .start = self.statement_start,
+            .form = self.form,
+        };
         // Last assignment wins (bash semantics). getOrPut first so a failed
         // insert cannot drop an existing entry.
         const gop = try self.fields.getOrPut(self.allocator, key);
@@ -412,7 +413,11 @@ const Parser = struct {
         if (!isNameStart(c0)) return false;
         self.pos += 1;
         while (self.pos < self.src.len and
-            (isNameCont(self.src[self.pos]) or mem.indexOfScalar(u8, "-+.@", self.src[self.pos]) != null))
+            (isNameCont(self.src[self.pos]) or mem.indexOfScalar(
+                u8,
+                "-+.@",
+                self.src[self.pos],
+            ) != null))
         {
             self.pos += 1;
         }
@@ -420,7 +425,11 @@ const Parser = struct {
     }
 
     fn startsComment(self: *const Parser) bool {
-        return self.pos == 0 or mem.indexOfScalar(u8, " \t\r\n;|&()", self.src[self.pos - 1]) != null;
+        return self.pos == 0 or mem.indexOfScalar(
+            u8,
+            " \t\r\n;|&()",
+            self.src[self.pos - 1],
+        ) != null;
     }
 
     fn skipBlanksAndComments(self: *Parser) void {
@@ -463,10 +472,7 @@ const Parser = struct {
 
 /// Bind `file_contents` (not copied) and an empty field map.
 pub fn init(allocator: Allocator, file_contents: []const u8) Pkgbuild {
-    return .{
-        .allocator = allocator,
-        .file_contents = file_contents,
-    };
+    return .{ .allocator = allocator, .file_contents = file_contents };
 }
 
 /// Free parsed field keys and values. Does not free `file_contents`.
@@ -499,14 +505,17 @@ pub fn readLines(self: *Pkgbuild) Error!void {
 pub fn readForReview(self: *Pkgbuild) Allocator.Error!bool {
     self.readLines() catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.MalformedFunction, error.UnterminatedArray, error.UnterminatedFunction => return false,
+        error.MalformedFunction,
+        error.UnterminatedArray,
+        error.UnterminatedFunction,
+        => return false,
     };
     return !self.unparsed;
 }
 
 /// Return the comments and whitespace between parsed statements. The caller
 /// owns the result; use only after `readForReview` returns true.
-pub fn remainingText(self: *const Pkgbuild, allocator: Allocator) Allocator.Error![]u8 {
+pub fn remainingText(self: *const Pkgbuild, allocator: Allocator) Allocator.Error![]const u8 {
     var remaining: std.ArrayList(u8) = .empty;
     errdefer remaining.deinit(allocator);
     var end: usize = 0;
@@ -526,36 +535,37 @@ pub fn indentValues(self: *Pkgbuild, spaces_count: usize) Allocator.Error!void {
     defer buf.deinit(self.allocator);
     for (self.fields.values()) |field| {
         if (mem.indexOfScalar(u8, field.value, '\n') == null) continue;
-
         buf.clearRetainingCapacity();
-        var first_line = true;
-        var lines_iter = mem.splitScalar(u8, field.value, '\n');
-        while (lines_iter.next()) |line| {
-            switch (field.form) {
-                .array => {
+        switch (field.form) {
+            .array => {
+                var lines = mem.splitScalar(u8, field.value, '\n');
+                while (lines.next()) |line| {
                     const item = mem.trim(u8, line, " \t\r");
                     if (item.len == 0) continue;
                     try buf.append(self.allocator, '\n');
                     try buf.appendNTimes(self.allocator, ' ', spaces_count * 2);
                     try buf.appendSlice(self.allocator, item);
-                },
-                .scalar => {
-                    // Whitespace in a multiline scalar can be literal data.
+                }
+            },
+            .scalar => {
+                // Whitespace in a multiline scalar can be literal data.
+                var first_line = true;
+                var lines = mem.splitScalar(u8, field.value, '\n');
+                while (lines.next()) |line| {
                     if (!first_line) {
                         try buf.append(self.allocator, '\n');
                         try buf.appendNTimes(self.allocator, ' ', spaces_count);
                     }
                     try buf.appendSlice(self.allocator, line);
-                },
-                .function => {
-                    try review_text.append(self.allocator, &buf, field.value, .{
-                        .spaces_count = spaces_count,
-                        .inline_first = true,
-                    });
-                    break;
-                },
-            }
-            first_line = false;
+                    first_line = false;
+                }
+            },
+            .function => try review_text.append(
+                self.allocator,
+                &buf,
+                field.value,
+                .{ .spaces_count = spaces_count, .inline_first = true },
+            ),
         }
         const indented = try buf.toOwnedSlice(self.allocator);
         self.allocator.free(field.value);
@@ -563,7 +573,8 @@ pub fn indentValues(self: *Pkgbuild, spaces_count: usize) Allocator.Error!void {
     }
 }
 
-/// Look up a field value by name (e.g. "pkgver", "depends", "package()").
+/// Return a borrowed field value, or null if the name was not parsed. The slice
+/// remains valid until the fields are parsed, indented, or freed again.
 pub fn get(self: *const Pkgbuild, name: []const u8) ?[]const u8 {
     const content = self.fields.get(name) orelse return null;
     return content.value;
@@ -582,72 +593,7 @@ fn isNameCont(c: u8) bool {
 }
 
 test "readLines parses a real neovim-git PKGBUILD" {
-    const file_contents =
-        \\# Maintainer: Florian Walch <florian+aur@fwalch.com>
-        \\# Contributor: Florian Hahn <flo@fhahn.com>
-        \\# Contributor: Sven-Hendrik Haase <svenstaro@gmail.com>
-        \\
-        \\pkgname=neovim-git
-        \\pkgver=0.4.0.r2972.g3fbff98cf
-        \\pkgrel=1
-        \\pkgdesc='Fork of Vim aiming to improve user experience, plugins, and GUIs.'
-        \\arch=('i686' 'x86_64' 'armv7h' 'armv6h' 'aarch64')
-        \\url='https://neovim.io'
-        \\backup=('etc/xdg/nvim/sysinit.vim')
-        \\license=('custom:neovim')
-        \\depends=('libluv' 'libtermkey' 'libutf8proc' 'libuv' 'libvterm>=0.1.git5' 'luajit' 'msgpack-c' 'unibilium' 'tree-sitter')
-        \\makedepends=('cmake' 'git' 'gperf' 'lua51-mpack' 'lua51-lpeg')
-        \\optdepends=('python2-neovim: for Python 2 plugin support (see :help provider-python)'
-        \\            'python-neovim: for Python 3 plugin support (see :help provider-python)'
-        \\            'ruby-neovim: for Ruby plugin support (see :help provider-ruby)'
-        \\            'xclip: for clipboard support (or xsel) (see :help provider-clipboard)'
-        \\            'xsel: for clipboard support (or xclip) (see :help provider-clipboard)'
-        \\            'wl-clipboard: for clipboard support on wayland (see :help clipboard)')
-        \\source=("${pkgname}::git+https://github.com/neovim/neovim.git")
-        \\sha256sums=('SKIP')
-        \\provides=("neovim=${pkgver}" 'vim-plugin-runtime')
-        \\conflicts=('neovim')
-        \\install=neovim-git.install
-        \\options=(!strip)
-        \\
-        \\pkgver() {
-        \\  cd "${pkgname}"
-        \\  git describe --long | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g'
-        \\}
-        \\
-        \\build() {
-        \\  cmake -S"${pkgname}" -Bbuild \
-        \\        -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-        \\        -DCMAKE_INSTALL_PREFIX=/usr
-        \\  cmake --build build
-        \\}
-        \\
-        \\check() {
-        \\  cd "${srcdir}/build"
-        \\  ./bin/nvim --version
-        \\  ./bin/nvim --headless -u NONE -i NONE -c ':quit'
-        \\}
-        \\
-        \\package() {
-        \\  cd "${srcdir}/build"
-        \\  DESTDIR="${pkgdir}" cmake --build . --target install
-        \\
-        \\  cd "${srcdir}/${pkgname}"
-        \\  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
-        \\  install -Dm644 runtime/nvim.desktop "${pkgdir}/usr/share/applications/nvim.desktop"
-        \\  install -Dm644 runtime/nvim.png "${pkgdir}/usr/share/pixmaps/nvim.png"
-        \\
-        \\  # Make Arch vim packages work
-        \\  mkdir -p "${pkgdir}"/etc/xdg/nvim
-        \\  echo "\" This line makes pacman-installed global Arch Linux vim packages work." > "${pkgdir}"/etc/xdg/nvim/sysinit.vim
-        \\  echo "source /usr/share/nvim/archlinux.vim" >> "${pkgdir}"/etc/xdg/nvim/sysinit.vim
-        \\
-        \\  mkdir -p "${pkgdir}"/usr/share/vim
-        \\  echo "set runtimepath+=/usr/share/vim/vimfiles" > "${pkgdir}"/usr/share/nvim/archlinux.vim
-        \\}
-        \\
-        \\# vim:set sw=2 sts=2 et:
-    ;
+    const file_contents = @embedFile("Pkgbuild/fixtures/neovim_git.pkgbuild");
 
     var pkgbuild = Pkgbuild.init(testing.allocator, file_contents);
     defer pkgbuild.deinit();
@@ -668,70 +614,7 @@ test "readLines parses a real neovim-git PKGBUILD" {
 }
 
 test "readLines parses a real google-chrome-dev PKGBUILD" {
-    const file_contents =
-        \\# Maintainer: Knut Ahlers <knut at ahlers dot me>
-        \\# Contributor: Det <nimetonmaili g-mail>
-        \\# Contributors: t3ddy, Lex Rivera aka x-demon, ruario
-        \\
-        \\# Check for new Linux releases in: http://googlechromereleases.blogspot.com/search/label/Dev%20updates
-        \\# or use: $ curl -s https://dl.google.com/linux/chrome/rpm/stable/x86_64/repodata/other.xml.gz | gzip -df | awk -F\" '/pkgid/{ sub(".*-","",$4); print $4": "$10 }'
-        \\
-        \\pkgname=google-chrome-dev
-        \\pkgver=91.0.4464.5
-        \\pkgrel=1
-        \\pkgdesc="The popular and trusted web browser by Google (Dev Channel)"
-        \\arch=('x86_64')
-        \\url="https://www.google.com/chrome"
-        \\license=('custom:chrome')
-        \\depends=('alsa-lib' 'gtk3' 'libcups' 'libxss' 'libxtst' 'nss')
-        \\optdepends=(
-        \\      'libpipewire02: WebRTC desktop sharing under Wayland'
-        \\      'kdialog: for file dialogs in KDE'
-        \\      'gnome-keyring: for storing passwords in GNOME keyring'
-        \\      'kwallet: for storing passwords in KWallet'
-        \\      'libunity: for download progress on KDE'
-        \\      'ttf-liberation: fix fonts for some PDFs - CRBug #369991'
-        \\      'xdg-utils'
-        \\)
-        \\provides=('google-chrome')
-        \\options=('!emptydirs' '!strip')
-        \\install=$pkgname.install
-        \\_channel=unstable
-        \\source=("https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-${_channel}/google-chrome-${_channel}_${pkgver}-1_amd64.deb"
-        \\      'eula_text.html'
-        \\      "google-chrome-$_channel.sh")
-        \\sha512sums=('7ab84e51b0cd80c51e0092fe67af1e4e9dd886c6437d9d0fec1552e511c1924d2dac21c02153382cbb7c8c52ef82df97428fbb12139ebc048f1db6964ddc3b45'
-        \\            'a225555c06b7c32f9f2657004558e3f996c981481dbb0d3cd79b1d59fa3f05d591af88399422d3ab29d9446c103e98d567aeafe061d9550817ab6e7eb0498396'
-        \\            '349fc419796bdea83ebcda2c33b262984ce4d37f2a0a13ef7e1c87a9f619fd05eb8ff1d41687f51b907b43b9a2c3b4a33b9b7c3a3b28c12cf9527ffdbd1ddf2e')
-        \\
-        \\package() {
-        \\      msg2 "Extracting the data.tar.xz..."
-        \\      bsdtar -xf data.tar.xz -C "$pkgdir/"
-        \\
-        \\      msg2 "Moving stuff in place..."
-        \\      # Launcher
-        \\      install -m755 google-chrome-$_channel.sh "$pkgdir"/usr/bin/google-chrome-$_channel
-        \\
-        \\      # Icons
-        \\      for i in 16x16 24x24 32x32 48x48 64x64 128x128 256x256; do
-        \\              install -Dm644 "$pkgdir"/opt/google/chrome-$_channel/product_logo_${i/x*/}_${pkgname/*-/}.png \
-        \\                      "$pkgdir"/usr/share/icons/hicolor/$i/apps/google-chrome-$_channel.png
-        \\      done
-        \\
-        \\      # License
-        \\      install -Dm644 eula_text.html "$pkgdir"/usr/share/licenses/google-chrome-$_channel/eula_text.html
-        \\
-        \\      msg2 "Fixing Chrome icon resolution..."
-        \\      sed -i \
-        \\              -e "/Exec=/i\StartupWMClass=Google-chrome-$_channel" \
-        \\              -e "s/x-scheme-handler\/ftp;\\?//g" \
-        \\              "$pkgdir"/usr/share/applications/google-chrome-$_channel.desktop
-        \\
-        \\      msg2 "Removing Debian Cron job and duplicate product logos..."
-        \\      rm -r "$pkgdir"/etc/cron.daily/ "$pkgdir"/opt/google/chrome-$_channel/cron/
-        \\      rm "$pkgdir"/opt/google/chrome-$_channel/product_logo_*.png
-        \\}
-    ;
+    const file_contents = @embedFile("Pkgbuild/fixtures/google_chrome_dev.pkgbuild");
 
     var pkgbuild = Pkgbuild.init(testing.allocator, file_contents);
     defer pkgbuild.deinit();

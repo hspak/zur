@@ -7,11 +7,11 @@ const log = std.log.scoped(.args);
 
 const Args = @This();
 
-pub const Error = Allocator.Error;
-
 pkgs: std.ArrayList([]const u8) = .empty,
 allocator: Allocator,
 action: Action = .unset,
+
+pub const Error = Allocator.Error;
 
 /// What zur should do after parsing argv.
 pub const Action = enum {
@@ -41,17 +41,18 @@ pub fn parse(self: *Args, process_args: std.process.Args) Error!void {
     if (mem.eql(u8, action, "-h") or mem.eql(u8, action, "--help")) {
         self.action = .print_help;
         return;
-    } else if (mem.eql(u8, action, "-v") or mem.eql(u8, action, "--version")) {
+    }
+    if (mem.eql(u8, action, "-v") or mem.eql(u8, action, "--version")) {
         self.action = .print_version;
         return;
-    } else if (mem.eql(u8, action, "-Ss")) {
+    }
+    if (mem.eql(u8, action, "-Ss")) {
         self.action = .search;
-        const search_name = args_iter.next();
-        if (search_name == null) {
+        const search_name = args_iter.next() orelse {
             self.action = .print_help;
             return;
-        }
-        try self.pkgs.append(self.allocator, search_name.?);
+        };
+        try self.pkgs.append(self.allocator, search_name);
     } else if (mem.eql(u8, action, "-S")) {
         self.action = .install_or_upgrade;
         while (args_iter.next()) |arg| {

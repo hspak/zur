@@ -7,25 +7,21 @@ const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.snapshot);
 
 const BuildCache = @import("BuildCache.zig");
+pub const BuildOptions = BuildCache.PrepareOptions;
 
 const Snapshot = @This();
 
-archive_path: []u8,
-source_path: []u8,
+archive_path: []const u8,
+source_path: []const u8,
 io: Io,
 persistent: bool = false,
 
-pub const BuildOptions = BuildCache.PrepareOptions;
-
-pub const Error = Allocator.Error || Dir.OpenError || Dir.CreateDirPathError ||
-    Dir.CreateDirError || Dir.DeleteTreeError || Dir.DeleteFileError ||
-    Dir.ReadFileAllocError || Dir.WriteFileError || Dir.RenameError ||
-    Io.File.OpenError || Io.File.StatError || Io.Reader.Error || Io.Writer.Error || BuildCache.PrepareError || error{
-    InvalidSnapshot,
+pub const TarError = error{
     Overflow,
     InvalidCharacter,
     EndOfStream,
     UnexpectedEndOfStream,
+    StreamTooLong,
     TarHeader,
     TarHeaderChksum,
     TarNumericValueNegative,
@@ -40,13 +36,33 @@ pub const Error = Allocator.Error || Dir.OpenError || Dir.CreateDirPathError ||
     TarComponentsOutsideStrippedPrefix,
     UnableToCreateSymLink,
 };
+pub const ExtractError = Allocator.Error || TarError || Dir.CreateDirPathError ||
+    Dir.DeleteFileError || Io.File.OpenError || Io.Reader.Error || Io.Writer.Error;
+pub const CreateError = ExtractError || Dir.OpenError || Dir.CreateDirError ||
+    Dir.WriteFileError || Dir.RenameError || Io.File.StatError || error{InvalidSnapshot};
+pub const UseBuildError = BuildCache.PrepareError || Dir.DeleteTreeError;
+pub const Error = CreateError || UseBuildError;
+
+pub const CreateOptions = struct {
+    root_path: []const u8,
+    base: []const u8,
+};
 
 /// Extract into private staging storage and publish the archive only after
 /// validation. Owns both returned paths; deinit removes the review extraction
 /// unless useBuild has promoted it to a persistent build tree.
-pub fn create(allocator: Allocator, io: Io, root: []const u8, base: []const u8, bytes: []const u8) Error!Snapshot {
+pub fn create(
+    allocator: Allocator,
+    io: Io,
+    options: CreateOptions,
+    bytes: []const u8,
+) CreateError!Snapshot {
     try validateArchive(allocator, bytes);
-    const parent = try Dir.path.join(allocator, &.{ root, ".src", base });
+    const parent = try Dir.path.join(allocator, &.{
+        options.root_path,
+        ".src",
+        options.base,
+    });
     defer allocator.free(parent);
     try Dir.cwd().createDirPath(io, parent);
     var dir = try Dir.openDirAbsolute(io, parent, .{});
@@ -54,12 +70,19 @@ pub fn create(allocator: Allocator, io: Io, root: []const u8, base: []const u8, 
 
     var random: [16]u8 = undefined;
     Io.random(io, &random);
-    const stage_name = try std.fmt.allocPrint(allocator, ".pending-{s}", .{std.fmt.bytesToHex(random, .lower)});
+    const stage_name = try std.fmt.allocPrint(
+        allocator,
+        ".pending-{s}",
+        .{std.fmt.bytesToHex(random, .lower)},
+    );
     defer allocator.free(stage_name);
     try dir.createDir(io, stage_name, .default_dir);
     defer {
         log.debug("removing staging directory: {s}/{s}", .{ parent, stage_name });
-        dir.deleteTree(io, stage_name) catch |err| log.debug("cannot remove staging directory {s}/{s}: {t}", .{
+        dir.deleteTree(
+            io,
+            stage_name,
+        ) catch |err| log.debug("cannot remove staging directory {s}/{s}: {t}", .{
             parent,
             stage_name,
             err,
@@ -74,7 +97,11 @@ pub fn create(allocator: Allocator, io: Io, root: []const u8, base: []const u8, 
     const archive_file = try stage.openFile(io, "snapshot.tar.gz", .{});
     defer archive_file.close(io);
     try extractFromFile(io, source, archive_file);
-    const pkgbuild = source.statFile(io, "PKGBUILD", .{ .follow_symlinks = false }) catch |err| switch (err) {
+    const pkgbuild = source.statFile(
+        io,
+        "PKGBUILD",
+        .{ .follow_symlinks = false },
+    ) catch |err| switch (err) {
         error.FileNotFound => return error.InvalidSnapshot,
         else => return err,
     };
@@ -82,25 +109,41 @@ pub fn create(allocator: Allocator, io: Io, root: []const u8, base: []const u8, 
 
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
-    const archive_name = try std.fmt.allocPrint(allocator, "{s}.tar.gz", .{std.fmt.bytesToHex(digest, .lower)});
+    const archive_name = try std.fmt.allocPrint(
+        allocator,
+        "{s}.tar.gz",
+        .{std.fmt.bytesToHex(digest, .lower)},
+    );
     defer allocator.free(archive_name);
     const archive_path = try Dir.path.join(allocator, &.{ parent, archive_name });
     errdefer allocator.free(archive_path);
-    const review_name = try std.fmt.allocPrint(allocator, ".review-{s}", .{std.fmt.bytesToHex(random, .lower)});
+    const review_name = try std.fmt.allocPrint(
+        allocator,
+        ".review-{s}",
+        .{std.fmt.bytesToHex(random, .lower)},
+    );
     defer allocator.free(review_name);
     const source_path = try Dir.path.join(allocator, &.{ parent, review_name });
     errdefer allocator.free(source_path);
-    const staged_source = try Dir.path.join(allocator, &.{ parent, stage_name, "source" });
+    const staged_source = try Dir.path.join(allocator, &.{
+        parent,
+        stage_name,
+        "source",
+    });
     defer allocator.free(staged_source);
 
     try stage.rename("snapshot.tar.gz", dir, archive_name, io);
     try Dir.renameAbsolute(staged_source, source_path, io);
-    return .{ .archive_path = archive_path, .source_path = source_path, .io = io };
+    return .{
+        .archive_path = archive_path,
+        .source_path = source_path,
+        .io = io,
+    };
 }
 
 /// Assumes the operation lock is held and review is complete. Replace the
 /// temporary extraction with a versioned build tree, retaining generated files.
-pub fn useBuild(self: *Snapshot, allocator: Allocator, options: BuildOptions) Error!void {
+pub fn useBuild(self: *Snapshot, allocator: Allocator, options: BuildOptions) UseBuildError!void {
     std.debug.assert(!self.persistent);
     const path = try BuildCache.prepare(allocator, self.io, self.source_path, options);
     errdefer allocator.free(path);
@@ -114,7 +157,10 @@ pub fn useBuild(self: *Snapshot, allocator: Allocator, options: BuildOptions) Er
 pub fn deinit(self: *Snapshot, allocator: Allocator) void {
     if (!self.persistent) {
         log.debug("removing review directory: {s}", .{self.source_path});
-        Dir.cwd().deleteTree(self.io, self.source_path) catch |err| log.debug("cannot remove review directory {s}: {t}", .{
+        Dir.cwd().deleteTree(
+            self.io,
+            self.source_path,
+        ) catch |err| log.debug("cannot remove review directory {s}: {t}", .{
             self.source_path,
             err,
         });
@@ -125,22 +171,24 @@ pub fn deinit(self: *Snapshot, allocator: Allocator) void {
 }
 
 /// Extract an AUR gzip archive, strip its root directory, and consume the file.
-pub fn extractTarGz(io: Io, dest_dir: Dir, archive_name: []const u8) Error!void {
+pub fn extractTarGz(io: Io, dest_dir: Dir, archive_name: []const u8) ExtractError!void {
     const file = try dest_dir.openFile(io, archive_name, .{});
     defer file.close(io);
     try extractFromFile(io, dest_dir, file);
     try dest_dir.deleteFile(io, archive_name);
 }
 
-fn extractFromFile(io: Io, dest_dir: Dir, file: Io.File) Error!void {
+fn extractFromFile(io: Io, dest_dir: Dir, file: Io.File) ExtractError!void {
     var file_buffer: [8192]u8 = undefined;
     var reader = file.reader(io, &file_buffer);
     var gzip_buffer: [std.compress.flate.max_window_len]u8 = undefined;
     var decompress = std.compress.flate.Decompress.init(&reader.interface, .gzip, &gzip_buffer);
-    try std.tar.extract(io, dest_dir, &decompress.reader, .{
-        .strip_components = 1,
-        .mode_mode = .executable_bit_only,
-    });
+    try std.tar.extract(
+        io,
+        dest_dir,
+        &decompress.reader,
+        .{ .strip_components = 1, .mode_mode = .executable_bit_only },
+    );
     // Consume the gzip trailer too: tar can stop before a truncated stream ends.
     var trailing: [8192]u8 = undefined;
     while (try decompress.reader.readSliceShort(&trailing) != 0) {}
@@ -148,7 +196,7 @@ fn extractFromFile(io: Io, dest_dir: Dir, file: Io.File) Error!void {
 
 // Git cannot track a file below a tracked symlink. Reject such archives before
 // extraction so an earlier link cannot redirect later writes outside staging.
-fn validateArchive(allocator: Allocator, bytes: []const u8) Error!void {
+fn validateArchive(allocator: Allocator, bytes: []const u8) !void {
     var input: Io.Reader = .fixed(bytes);
     var gzip_buffer: [std.compress.flate.max_window_len]u8 = undefined;
     var decompress = std.compress.flate.Decompress.init(&input, .gzip, &gzip_buffer);
@@ -193,15 +241,20 @@ fn validateArchive(allocator: Allocator, bytes: []const u8) Error!void {
     }
 }
 
-fn testArchive(tmp: Dir, root: []const u8) ![]u8 {
+fn testArchive(tmp: Dir, root: []const u8) ![]const u8 {
     const allocator = std.testing.allocator;
     const result = try std.process.run(allocator, std.testing.io, .{
-        .argv = &.{ "tar", "-czf", "input.tar.gz", "pkg" },
+        .argv = &.{
+            "tar",
+            "-czf",
+            "input.tar.gz",
+            "pkg",
+        },
         .cwd = .{ .path = root },
     });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
-    if (result.term != .exited or result.term.exited != 0) return error.TarCreate;
+    if (result.term != .exited or result.term.exited != 0) return error.UnexpectedTarExit;
     return tmp.readFileAlloc(std.testing.io, "input.tar.gz", allocator, .unlimited);
 }
 
@@ -213,19 +266,30 @@ test "snapshot publishes complete archives and isolates build mutations" {
     var root_buffer: [Dir.max_path_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(testing.io, &root_buffer)];
     try tmp.dir.createDirPath(testing.io, "pkg/nested");
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "pkg/PKGBUILD", .data = "pkgname=original\n" });
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "pkg/nested/patch", .data = "patch content\n" });
+    try tmp.dir.writeFile(
+        testing.io,
+        .{ .sub_path = "pkg/PKGBUILD", .data = "pkgname=original\n" },
+    );
+    try tmp.dir.writeFile(
+        testing.io,
+        .{ .sub_path = "pkg/nested/patch", .data = "patch content\n" },
+    );
     const bytes = try testArchive(tmp.dir, root);
     defer allocator.free(bytes);
-    var first = try create(allocator, testing.io, root, "pkg", bytes);
+    var first = try create(allocator, testing.io, .{ .root_path = root, .base = "pkg" }, bytes);
     defer first.deinit(allocator);
     var build_dir = try Dir.openDirAbsolute(testing.io, first.source_path, .{});
     defer build_dir.close(testing.io);
     try build_dir.writeFile(testing.io, .{ .sub_path = "PKGBUILD", .data = "pkgname=mutated\n" });
-    const saved = try Dir.cwd().readFileAlloc(testing.io, first.archive_path, allocator, .unlimited);
+    const saved = try Dir.cwd().readFileAlloc(
+        testing.io,
+        first.archive_path,
+        allocator,
+        .unlimited,
+    );
     defer allocator.free(saved);
     try testing.expectEqualSlices(u8, bytes, saved);
-    var second = try create(allocator, testing.io, root, "pkg", saved);
+    var second = try create(allocator, testing.io, .{ .root_path = root, .base = "pkg" }, saved);
     defer second.deinit(allocator);
     var review_dir = try Dir.openDirAbsolute(testing.io, second.source_path, .{});
     defer review_dir.close(testing.io);
@@ -251,13 +315,25 @@ test "versioned builds refresh reviewed files and retain generated sources" {
     {
         const bytes = try testArchive(tmp.dir, root);
         defer allocator.free(bytes);
-        var snapshot = try create(allocator, testing.io, root, "pkg", bytes);
+        var snapshot = try create(
+            allocator,
+            testing.io,
+            .{ .root_path = root, .base = "pkg" },
+            bytes,
+        );
         defer snapshot.deinit(allocator);
-        try snapshot.useBuild(allocator, .{ .root_path = root, .base = "pkg", .version = "1-1" });
+        try snapshot.useBuild(allocator, .{
+            .root_path = root,
+            .base = "pkg",
+            .version = "1-1",
+        });
         var build = try Dir.openDirAbsolute(testing.io, snapshot.source_path, .{});
         defer build.close(testing.io);
         try build.createDirPath(testing.io, "src/checkout");
-        try build.writeFile(testing.io, .{ .sub_path = "src/checkout/keep", .data = "downloaded\n" });
+        try build.writeFile(
+            testing.io,
+            .{ .sub_path = "src/checkout/keep", .data = "downloaded\n" },
+        );
         try build.writeFile(testing.io, .{ .sub_path = "built", .data = "compiled\n" });
         try build.writeFile(testing.io, .{ .sub_path = "PKGBUILD", .data = "pkgver=mutated\n" });
         try build.deleteTree(testing.io, "nested");
@@ -266,17 +342,24 @@ test "versioned builds refresh reviewed files and retain generated sources" {
         try build.symLink(testing.io, "../../../outside", "nested", .{});
     }
     try tmp.dir.deleteFile(testing.io, "pkg/obsolete.patch");
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "pkg/nested/hook", .data = "reviewed hook\n" });
+    try tmp.dir.writeFile(
+        testing.io,
+        .{ .sub_path = "pkg/nested/hook", .data = "reviewed hook\n" },
+    );
     const bytes = try testArchive(tmp.dir, root);
     defer allocator.free(bytes);
-    var snapshot = try create(allocator, testing.io, root, "pkg", bytes);
+    var snapshot = try create(allocator, testing.io, .{ .root_path = root, .base = "pkg" }, bytes);
     defer snapshot.deinit(allocator);
     {
         var review = try Dir.openDirAbsolute(testing.io, snapshot.source_path, .{});
         defer review.close(testing.io);
         try testing.expectError(error.FileNotFound, review.statFile(testing.io, "built", .{}));
     }
-    try snapshot.useBuild(allocator, .{ .root_path = root, .base = "pkg", .version = "1-2" });
+    try snapshot.useBuild(allocator, .{
+        .root_path = root,
+        .base = "pkg",
+        .version = "1-2",
+    });
     try testing.expectEqualStrings("1", Dir.path.basename(snapshot.source_path));
     const retained = [_]struct { path: []const u8, contents: []const u8 }{
         .{ .path = ".build/pkg/1/PKGBUILD", .contents = "pkgver=1\n" },
@@ -290,7 +373,11 @@ test "versioned builds refresh reviewed files and retain generated sources" {
         defer allocator.free(contents);
         try testing.expectEqualStrings(entry.contents, contents);
     }
-    try testing.expectError(error.FileNotFound, tmp.dir.statFile(testing.io, ".build/pkg/1/obsolete.patch", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.statFile(
+        testing.io,
+        ".build/pkg/1/obsolete.patch",
+        .{},
+    ));
 }
 
 test "snapshot rejects a directory PKGBUILD without publishing an archive" {
@@ -303,7 +390,12 @@ test "snapshot rejects a directory PKGBUILD without publishing an archive" {
     try tmp.dir.createDirPath(testing.io, "pkg/PKGBUILD");
     const bytes = try testArchive(tmp.dir, root);
     defer allocator.free(bytes);
-    try testing.expectError(error.InvalidSnapshot, create(allocator, testing.io, root, "pkg", bytes));
+    try testing.expectError(error.InvalidSnapshot, create(
+        allocator,
+        testing.io,
+        .{ .root_path = root, .base = "pkg" },
+        bytes,
+    ));
     var dir = try tmp.dir.openDir(testing.io, ".src/pkg", .{ .iterate = true });
     defer dir.close(testing.io);
     var iterator = dir.iterate();
@@ -321,12 +413,21 @@ test "snapshot rejects a truncated gzip after the PKGBUILD" {
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "pkg/PKGBUILD", .data = "pkgname=pkg\n" });
     const bytes = try testArchive(tmp.dir, root);
     defer allocator.free(bytes);
-    if (create(allocator, testing.io, root, "pkg", bytes[0 .. bytes.len - 8])) |created| {
+    if (create(
+        allocator,
+        testing.io,
+        .{ .root_path = root, .base = "pkg" },
+        bytes[0 .. bytes.len - 8],
+    )) |created| {
         var unexpected = created;
         unexpected.deinit(allocator);
         return error.TruncatedSnapshotAccepted;
     } else |_| {}
-    var dir = tmp.dir.openDir(testing.io, ".src/pkg", .{ .iterate = true }) catch |err| switch (err) {
+    var dir = tmp.dir.openDir(
+        testing.io,
+        ".src/pkg",
+        .{ .iterate = true },
+    ) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
@@ -349,16 +450,26 @@ test "snapshot rejects archive writes beneath a symlink before extraction" {
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "injected", .data = "unreviewed write\n" });
     const result = try std.process.run(allocator, testing.io, .{
         .argv = &.{
-            "tar", "-czf", "input.tar.gz", "--transform=s|^injected$|pkg/link/payload|", "pkg", "injected",
+            "tar",
+            "-czf",
+            "input.tar.gz",
+            "--transform=s|^injected$|pkg/link/payload|",
+            "pkg",
+            "injected",
         },
         .cwd = .{ .path = root },
     });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
-    if (result.term != .exited or result.term.exited != 0) return error.TarCreate;
+    if (result.term != .exited or result.term.exited != 0) return error.UnexpectedTarExit;
     const bytes = try tmp.dir.readFileAlloc(testing.io, "input.tar.gz", allocator, .unlimited);
     defer allocator.free(bytes);
-    try testing.expectError(error.InvalidSnapshot, create(allocator, testing.io, root, "pkg", bytes));
+    try testing.expectError(error.InvalidSnapshot, create(
+        allocator,
+        testing.io,
+        .{ .root_path = root, .base = "pkg" },
+        bytes,
+    ));
     try testing.expectError(error.FileNotFound, tmp.dir.openDir(testing.io, ".src", .{}));
 }
 
@@ -373,17 +484,26 @@ test "snapshot rejects multiple archive roots before stripping their prefixes" {
     try tmp.dir.createDirPath(testing.io, "other/link");
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "pkg/PKGBUILD", .data = "pkgname=pkg\n" });
     try tmp.dir.symLink(testing.io, ".", "pkg/link", .{});
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "other/link/payload", .data = "wrong destination\n" });
+    try tmp.dir.writeFile(
+        testing.io,
+        .{ .sub_path = "other/link/payload", .data = "wrong destination\n" },
+    );
     const result = try std.process.run(allocator, testing.io, .{
-        .argv = &.{ "tar", "-czf", "input.tar.gz", "pkg", "other/link/payload" },
+        .argv = &.{
+            "tar",
+            "-czf",
+            "input.tar.gz",
+            "pkg",
+            "other/link/payload",
+        },
         .cwd = .{ .path = root },
     });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
-    if (result.term != .exited or result.term.exited != 0) return error.TarCreate;
+    if (result.term != .exited or result.term.exited != 0) return error.UnexpectedTarExit;
     const bytes = try tmp.dir.readFileAlloc(testing.io, "input.tar.gz", allocator, .unlimited);
     defer allocator.free(bytes);
-    if (create(allocator, testing.io, root, "pkg", bytes)) |created| {
+    if (create(allocator, testing.io, .{ .root_path = root, .base = "pkg" }, bytes)) |created| {
         var unexpected = created;
         unexpected.deinit(allocator);
         return error.MultipleRootsAccepted;

@@ -7,13 +7,14 @@ Goals:
 review
 - All log statements are debug level, this is a CLI application
 
-# Zig Guidelines
+# Zig Coding Style Guide
 
 Shared conventions, including the [Zig language reference style
 guide](https://ziglang.org/documentation/master/#Style-Guide). `zig fmt` is the
 last word on indentation, braces, and punctuation. It does not wrap to a column
-limit — aim for 100, use common sense. A list longer than two items goes one
-per line, with a trailing comma.
+limit — aim for 100, use common sense. Keep short function calls and parameter
+lists inline when readable. Data lists longer than two items go one item per
+line, with a trailing comma.
 
 This document covers the choices the formatter cannot make.
 
@@ -21,19 +22,23 @@ This document covers the choices the formatter cannot make.
 
 ## Files and modules
 
-The filename is a visibility signal.
+The filename signals the module's purpose. Declaration visibility is
+controlled by `pub`, not by the filename.
 
 | Kind of file | Name | Shape |
 |---|---|---|
 | The file **is** a type | `TitleCase.zig` | `const Foo = @This();` plus fields at file scope |
 | Namespace of functions or peer types | `snake_case.zig` | no file-scope fields |
-| Generic type factory | `snake_case.zig` | `pub fn Name(...) type { return struct { const Self = @This(); ... }; }` |
+| Generic type factory | `snake_case.zig` | exports a TitleCase function returning a type |
 
-Do not invent a TitleCase file for a bag of free functions, and do not invent
-a snake_case file for a primary datatype.
+When a module represents one concrete struct, make the file itself that type.
+Namespaces and factory modules use snake_case even if they export just one
+type. Enums and unions remain declarations in a namespace or containing type;
+a source file itself is a struct.
 
 Directory names are `snake_case`. The exception is the sibling folder of a
-TitleCase type file, which keeps the type's name so the path matches the FQN:
+TitleCase type file, which keeps the type's name so the path matches the
+fully-qualified name (FQN):
 
 ```
 Foo.zig          // the type / façade
@@ -42,14 +47,17 @@ Foo/
   helper.zig     // usually private
 ```
 
-When a named concern outgrows one file, keep that sibling façade and nest
-children under it. Split on the concern, not on file length. Small nested
-types stay in the parent. Callers import the parent and write `Foo.Bar`.
+When a named concern outgrows one file, keep a public entry module (the façade)
+and put its implementation files in a sibling directory. A namespace follows
+the same pattern with snake_case, such as `parser.zig` and `parser/`. Split on
+the concern, not on file length. Small nested types stay in the parent.
+External callers import the façade and write `Foo.Bar`; implementation files
+within the same component may import one another directly.
 
 `usingnamespace` does not appear. Re-export names explicitly:
 
 ```zig
-pub const Config = @import("Foo/Config.zig");
+pub const Bar = @import("Foo/Bar.zig");
 const helper = @import("Foo/helper.zig");
 pub const doThing = helper.doThing;
 ```
@@ -60,10 +68,13 @@ Do not flatten a child's entire namespace into the parent.
 
 - File-as-type: `const Foo = @This();` then use `Foo` in signatures.
 - Generic factory: `const Self = @This();`.
+- Named nested struct: use its declared name; another alias is unnecessary.
 
-Keep imports in one block. `std` (and aliases peeled from it) before project
-imports. Paths are filesystem-relative to the importing file. Do not put
-imports in the middle of the file.
+Keep ordinary imports in a preamble: `std` and `builtin`, aliases from them,
+then project imports. File paths are relative to the importing file. Named
+modules such as `std` or a build-provided package name are not file paths.
+Test-only imports may appear in test blocks, including blocks that collect
+child-module tests. Keep production dependencies out of those blocks.
 
 ---
 
@@ -72,15 +83,19 @@ imports in the middle of the file.
 | Kind | Style | Examples |
 |---|---|---|
 | Types, type aliases, unions, enums, error sets | TitleCase | `Widget`, `OpenOptions`, `ResolveError` |
-| Namespace: 0-field struct, never instantiated | snake_case | `json`, `mem` |
+| Namespace struct used only to group declarations | snake_case | `json`, `mem` |
 | Type function (`fn (...) type`) | TitleCase | `ArrayList`, `ShortList` |
 | Other functions | camelCase | `toSlice`, `hasRuntimeBits` |
-| Fields, locals, log scopes, constants | snake_case | `root_src_path`, `default_quota` |
+| Fields, locals, log scopes, other constants | snake_case | `root_src_path`, `default_quota` |
 | Enum / union tags | snake_case | `.in_progress`, `.out_of_memory` |
 | Comptime type params | short TitleCase | `T`, `K`, `V`, `Child` |
 | Comptime value params | snake_case | `fixed_size`, `n` |
 
-Error names describe **why** (`OutOfMemory`, `IndexOutOfBounds`), not `Failed`.
+Aliases use the style of the declaration they expose: TitleCase for types and
+type factories, camelCase for other functions, and snake_case for namespaces.
+
+Error values describe **why**, such as `OutOfMemory` or `IndexOutOfBounds`.
+Avoid names such as `Failed` or `AddFailed` that only repeat the operation.
 
 Do not put these words in type names: `Value`, `Data`, `Context`, `Manager`,
 `State`, `utils`, `misc`, or somebody's initials. Everything is a value;
@@ -89,7 +104,7 @@ established exception — do not invent more. Declarations tempted toward
 `utils` belong at the root of the module that needs them.
 
 Name from the fully-qualified namespace. Do not repeat a segment:
-`json.Value`, not `json.JsonValue`. Files are part of that namespace.
+`json.Token`, not `json.JsonToken`. Files are part of that namespace.
 
 No underscore prefixes. Zig has no private fields; do not pretend otherwise.
 Name fields by their meaning and document the invariants. Keyword collisions
@@ -98,79 +113,117 @@ shorter one inside, rather than `foo` and `_foo`.
 
 Acronyms, initialisms, and proper nouns follow the same case rules as any
 other word: `XmlParser`, `readU32Be`, `xml_document`. Two-letter acronyms
-are not special. Follow an established exception such as `ENOENT`.
+are not special. Names mandated by a language hook, dependency interface, or
+foreign ABI retain their required spelling, such as `ENOENT`.
 
 ---
 
 ## Types
 
-A file-as-type keeps fields first, then nested types, then methods. Nested
-types that deserve their own file become
+A file-as-type puts its imports and `@This()` alias in the preamble, followed
+by fields, nested types, and methods. Imported type aliases and re-exports
+belong with the imports; locally defined nested types follow the fields.
+Types extracted to their own files become
 `pub const Child = @import("Parent/Child.zig");`.
 
-Give fields defaults so a short literal is enough. Options bags are their own
-struct rather than a long parameter list. Unmanaged containers default to
-`.empty`. Prefer enum literals (`.empty`, `.init`) over calling constructors.
+Give a field a default only when it remains valid independently of overrides
+to other fields. When fields must agree, use an initializer or a named whole
+value such as `.empty`. Require callers to supply options that have no safe
+general default. Group related or easily confused arguments in an options
+struct; unrelated dependencies can remain positional.
+
+Initialize unmanaged containers with their provided `.empty` value. The forms
+`.empty` and `.init` can be declaration literals selecting named values;
+`.init(args)` calls an initializer and can perform work or fail. Prefer these
+forms when the expected type is known; otherwise spell out `Type.empty` or
+`Type.init(args)`. Use them only when that declaration exists on the type.
+See [declaration literals](https://ziglang.org/download/0.14.0/release-notes.html#Decl-Literals).
 
 | Form | When |
 |---|---|
 | `enum` / `enum(uN)` | Closed classification, no payload |
 | `union(enum)` | One-of with payload |
 | `packed struct(uN)` | Flags or values stored as a single integer |
-| `extern struct` | Stable memory image or C layout |
+| `extern struct` | C-compatible layout for the selected target |
 
 Always specify the backing integer on packed structs. Pad unused bits
 explicitly.
 
-On a tagged union, unit variants are bare tags (`crash`), not `crash: void`,
-unless symmetry requires it. Multi-field payloads are inline structs.
+An `extern struct` alone does not define a portable disk or wire format;
+those formats also need explicit padding, byte order, and layout checks.
+
+On a tagged union, unit variants are bare tags (`crash`). Use inline structs
+for multi-field payloads unless the payload type is shared independently.
 
 ---
 
 ## Memory and ownership
 
-Unmanaged lists and maps do not store an allocator. Pass it into every
-mutating call and into `deinit`.
+Unmanaged lists and maps do not store an allocator. Pass an allocator to
+operations that allocate or release storage, as required by their API.
+Mutation within existing storage does not inherently require an allocator.
 
-`init` initializes existing storage. `deinit` frees owned resources, not the
-struct itself. After `deinit`, poison the value:
+`init` prepares a value and may allocate resources it owns. It can return the
+initialized value or initialize caller-provided `*T` storage; use the latter
+when initialization requires the object's final address. `deinit` releases
+owned resources while leaving the struct's storage to its owner.
+
+After `deinit`, treat the value as invalid until reinitialized. In `deinit`
+implementations you own, poison the receiver after cleanup:
 
 ```zig
 thing.items.deinit(gpa);
 thing.* = undefined;
 ```
 
-Methods take the receiver first. Free functions take allocator(s) before
-inputs.
+Methods take the receiver first. Free functions put comptime type parameters
+before runtime arguments, and allocator arguments before other runtime inputs.
 
-Reserve capacity before fallible work you cannot roll back. `errdefer`
-immediately under the line that acquired the resource. Cleanup is the inverse
-of the last successful step. If rollback is impossible:
+Validate inputs and reserve capacity before committing changes that cannot be
+rolled back. Put `errdefer` immediately after acquiring a resource this scope
+still owns on error. Use `defer` for a temporary resource needed only in this
+scope. Release resources in reverse acquisition order.
+
+For example, inside a function returning an index, suppose `table.add` takes
+ownership only on success and table entries cannot be removed:
 
 ```zig
 const ptr = try gpa.create(T);
 errdefer gpa.destroy(ptr);
+ptr.* = initial_value;
 
 const index = try table.add(gpa, ptr);
-errdefer comptime unreachable; // table entries are not removed
+errdefer comptime unreachable;
+return index;
 ```
+
+The final `errdefer` requires the remainder of the scope to have no reachable
+error return after ownership transfers. It does not provide rollback. If more
+fallible work is needed, move it before the transfer or implement rollback.
 
 Write down who owns a pointer and what happens on error. Default string type
 is `[]const u8`. Use a sentinel only when a consumer requires it.
+
+Keep one authoritative representation of mutable state. Avoid unnecessary
+aliases and cached copies that can get out of sync. Declare variables in the
+smallest practical scope, only when needed. Calculate and validate values
+close to where they are used, minimizing the gap between checking and use.
 
 ---
 
 ## Errors
 
-Named, closed sets at API boundaries. Merge with `||`. Inferred `!T` is fine
-on local helpers. Do not put `anyerror` on new core APIs.
+For public APIs that return errors, declare named, closed error sets. Include
+only failures the API can return and merge sets with `||`. Inferred `!T` is
+fine on private helpers and program entry points. An interface that mandates a particular
+error type keeps that signature; otherwise do not add `anyerror` to core APIs.
 
 ```zig
 pub const AddError =
     Allocator.Error ||
     error{
         CollectionFull,
-        SetSizeFailed,
+        DuplicateItem,
     };
 ```
 
@@ -183,34 +236,56 @@ pub const AddError =
 `error.OutOfMemory` is first-class. Propagate it on library APIs. Do not hide
 it in `else =>`.
 
+Validate external input and report invalid input as an error. Assertions and
+`unreachable` express internal contracts; they do not replace required input
+validation or recoverable error handling.
+
 ---
 
 ## Control flow
 
 Guard early, then do the work. Flatten with `continue` / `return` / `orelse`.
-`const` unless mutated.
+Use `var` only when the variable itself is mutated, including mutation through
+`&variable`. A pointer binding remains `const` when only its pointee changes.
+
+Centralize workflow decisions and changes to shared domain state in the parent
+function. Push `if`s up and `for`s down: let the parent select the operation
+and helpers carry it out. Helpers retain the local checks and branches needed
+for their own contracts.
+
+Keep leaf computation helpers pure: results depend on explicit inputs, with
+no hidden mutation or I/O. Container mutation, allocation, and I/O APIs are
+explicitly effectful operations. Choose the simplest return type that fully
+expresses the contract, preserving meaningful absence and failure states.
 
 Labeled blocks name the **result**, not `blk`:
 
 ```zig
 const target = target: {
-    var result = b.standardTargetOptions(.{});
+    const result = b.standardTargetOptions(.{});
     if (result.result.os.tag == .ios) return error.UnsupportedTarget;
     break :target result;
 };
 ```
 
-`if (comptime cond)` for compile-time OS and feature cuts.
+Use `if (comptime cond)` for compile-time OS and feature selection.
 
-Switches are exhaustive. Prefer listing every tag.
+List every tag when switching over a closed classification so new tags require
+a decision. Default arms are appropriate only for the following cases:
 
-- `else => unreachable` when remaining tags are a programmer error.
-- `inline else` when each prong instantiates a different type.
-- Comment the unreachable arm when it is not obvious why.
-- `comptime unreachable` for type-level impossible arms and for `errdefer`
-  that must never fire.
+- `else => unreachable` when an established internal invariant rules out all
+  remaining tags. Explain that invariant if it is not obvious.
+- `inline else` when the same operation works for every remaining case but
+  requires specialization for each case's type or compile-time value.
+- An explicit rejection or fallback for open inputs, such as integers or
+  non-exhaustive enums. Invalid external values are not unreachable.
 
-`@branchHint(.cold)` on fail paths and other rare cases in hot functions.
+Use `comptime unreachable` only in branches compile-time specialization must
+eliminate, or in `errdefer` to forbid subsequent reachable error returns.
+Runtime-impossible branches use ordinary `unreachable`.
+
+Use `@branchHint(.cold)` on failure paths and other known rare cases in hot
+functions; a case is not necessarily rare just because it returns an error.
 
 ---
 
@@ -218,14 +293,26 @@ Switches are exhaustive. Prefer listing every tag.
 
 | Mechanism | Use |
 |---|---|
-| `assert(cond)` | Safety-checked internal invariant |
-| `unreachable` | Switch/tag that cannot happen |
+| `assert(cond)` | Internal invariant; violation is illegal behavior |
+| `unreachable` | Impossible control-flow path; reaching it is illegal behavior |
 | `return error.X` | Recoverable failure |
 
-If setup around an assert is expensive and has been seen to survive
-ReleaseFast, wrap it in `std.debug.runtime_safety`.
+Here `assert` means `std.debug.assert`. Runtime safety settings determine
+whether these violations are detected or become unchecked illegal behavior;
+do not rely on them to report recoverable failures in every build mode.
+Use `std.testing.expect*` for test expectations.
 
-Unsupported platforms and misused comptime APIs are `@compileError`.
+If profiling shows expensive assertion-only setup survives optimization, gate
+both that setup and its assertion with the project's compile-time verification
+option. Keep required validation and state changes outside the gate.
+`std.debug.runtime_safety` describes the standard library's build mode and is
+deprecated as a query for the caller's settings. A module's `builtin.mode`
+can define a default verification policy, but does not report local
+`@setRuntimeSafety` overrides. See the [standard-library definition][debug-safety].
+
+Use `@compileError` for unsupported targets detected while compiling a module
+and for misused comptime APIs. Invalid options supplied to a running build
+script or application are configuration errors, handled through its error API.
 
 ---
 
@@ -236,17 +323,46 @@ Typical uses:
 1. Type functions — `pub fn Name(comptime T: type, ...) type`.
 2. Invariant checks in the type body — `comptime { assert(...); }`.
 3. Backend / feature selection — `switch` or `if` on a comptime option.
-4. `inline for` / `inline switch` when each prong is a different type.
+4. `inline for` or inline switch prongs when each iteration or case needs
+   compile-time specialization.
 
 `@setEvalBranchQuota` sits next to the loop that needs it, not at the top of
 the file by habit.
 
-Optional subsystems are compile-time capabilities. Disabled features become
-`void` or a dummy `struct {}` so call sites still type-check; they are not a
-missing import.
+Optional subsystems are compile-time capabilities. Use `void` or `struct {}`
+for storage that disappears when a feature is disabled, and guard operations
+on it with the same compile-time condition. If callers need an unconditional
+interface, supply a no-op implementation with the required methods; an empty
+type alone does not provide those methods. Keep the feature's module available
+to imports in either configuration.
 
 Prefer a comptime type parameter or a tagged union for internal polymorphism.
 Do not invent a vtable when either of those will do.
+
+---
+
+## Performance
+
+Design for performance before profiling is possible. Sketch bandwidth and
+latency costs for network, disk, memory, and CPU. Prioritize the slowest
+resource after accounting for how often it is used. Address known latency
+spikes and exponential algorithms during design; use measurements to check
+the model as the implementation becomes available.
+
+Batch work to amortize network, disk, memory, and CPU overhead while respecting
+the operation's ordering, latency, and memory requirements. Separate the
+control plane (deciding what work to do) from the data plane (processing the
+data). Move operation selection out of inner loops so each batch can run
+through a predictable loop over similar items.
+
+Express the intended fast path directly. Extract hot loops into standalone
+functions with primitive arguments and buffers, keeping their inputs explicit.
+Choose memory layouts for the access pattern. Consider cache-line alignment,
+contiguous storage, separate arrays for frequently accessed fields,
+prefetching, and SIMD (one instruction processing several values). Validate
+these choices with measurements. Make data access and computation clear enough
+that both the reader and the compiler can identify redundant work without
+having to reason through an entire receiver object.
 
 ---
 
@@ -265,8 +381,13 @@ function — IDEs show one declaration at a time.
 
 In `///` comments:
 
-- **assume** — violating this is unchecked Illegal Behavior
-- **assert** — violating this is safety-checked Illegal Behavior
+- **assume** — the caller must uphold this precondition; the API does not
+  promise a runtime check. Violation is illegal behavior.
+- **assert** — the implementation checks this precondition with an assertion;
+  detection depends on the applicable runtime safety settings.
+
+Use these words only when the implementation matches the stated contract.
+State recoverable validation errors separately.
 
 A comment that a reader already knows from the identifiers and the code
 has no job. If it would still be true as a caption of the next line, delete
@@ -287,7 +408,7 @@ just says "fix this."
 
 ## Logging
 
-Every substantial file has a scoped logger:
+Files that emit log messages use a subsystem-scoped logger:
 
 ```zig
 const log = std.log.scoped(.foo);
@@ -299,23 +420,38 @@ Scope names are `snake_case` and match the subsystem (`.foo`, `.foo_detail`).
 
 ## Tests
 
-Tests live in the same file, at the bottom (or immediately after a small
-type). Use `std.testing.allocator` and `defer` immediately after every
-resource. Name tests with a descriptive string, written for `-Dtest-filter=`:
+Unit tests live with the implementation, at the bottom of the file or just
+after the small type they exercise. Integration and end-to-end tests may live
+in separate suites that own their shared setup. Test placement does not
+determine which test level to choose.
+
+Use `std.testing.allocator` for allocations owned by an in-process test and
+register cleanup immediately. Name behavioral tests with descriptive strings
+that identify the behavior and work as substring filters. For example:
 
 ```zig
-test "put evicts the oldest" {
+const std = @import("std");
+
+test "append preserves insertion order" {
     const testing = std.testing;
     const gpa = testing.allocator;
 
-    var set = try WidgetSet.init(gpa, 2);
-    defer set.deinit(gpa);
-    // ...
-    try testing.expectEqual(@as(usize, 2), set.items.items.len);
+    var items: std.ArrayListUnmanaged(u8) = .empty;
+    defer items.deinit(gpa);
+
+    try items.append(gpa, 7);
+    try items.append(gpa, 3);
+    try testing.expectEqualSlices(u8, &.{ 7, 3 }, items.items);
 }
 ```
 
+Use the repository's test command. Direct `zig test` supports
+`--test-filter "substring"`; a `zig build` option such as `-Dtest-filter`
+exists only when the project's build script defines it.
+
 `test { _ = @import("child.zig"); }` pulls a child file into the test binary.
+Anonymous test blocks are reserved for collecting imports, rather than for
+behavioral test cases.
 Skip unavailable platforms or features with `return error.SkipZigTest`.
 
 Tests are durable specifications. Do not delete, weaken, or rewrite an existing
@@ -325,25 +461,29 @@ its behavioral coverage and state why the test had to change.
 
 Regression tests are stricter still. A regression test must reproduce the
 reported failure, fail against the code before the fix, and pass after the fix
-without being changed between those runs. Keep it permanently unless the tested
-contract is deliberately removed. If the failure cannot be demonstrated before
-the fix, explain why and test the nearest externally observable invariant.
+without being changed between those runs. Afterwards, preserve the regression
+scenario and its behavioral coverage through refactors. Adapt expectations
+only for a deliberate contract change, explaining why; remove the coverage
+only when the tested contract is deliberately removed. If the failure cannot
+be demonstrated before the fix, explain why and test the nearest externally
+observable invariant.
 
-Every test must distinguish a plausible broken implementation from a correct
-one. Do not add tautological tests, assertions derived by repeating the production
-logic, or checks equivalent to proving `1 + 1 == 2`. Assert meaningful behavior,
-state transitions, side effects, error handling, or boundary conditions.
+Every behavioral test must distinguish a plausible broken implementation from
+a correct one. Do not add tautological tests, assertions derived by repeating
+the production logic, or checks equivalent to proving `1 + 1 == 2`. Assert
+meaningful behavior, state transitions, side effects, error handling, or
+boundary conditions.
 
 Use the highest practical test level: prefer end-to-end tests over integration
 tests, and integration tests over unit tests. Use a lower level when the higher
-level cannot exercise the behavior reliably or would make the failure materially
-harder to diagnose.
+level cannot exercise the behavior reliably, would make the failure materially
+harder to diagnose, or is too expensive for routine validation.
 
 ---
 
 ## Commits
 
-Follow Linux kernel commit-message style.
+Use the following Linux-inspired commit-message format:
 
 - Use an imperative subject in the form `subsystem: concise summary`. Keep it
   under 75 characters and do not end it with a period.
@@ -358,20 +498,34 @@ Follow Linux kernel commit-message style.
 
 ## Checklist
 
-1. One primary type? `Name.zig` + `const Name = @This();`. Otherwise `snake_name.zig`.
-2. Directories are `snake_case`, except the sibling folder of a TitleCase type file.
-3. Cross-package import goes through the parent façade.
-4. Names come from the FQN: no repeated segment, no `Value`/`Data`/`Context`/`Manager`/`State`/`utils`, no `_` prefix. Acronyms are ordinary words.
-5. Type functions are TitleCase; namespace structs are snake_case.
-6. `//!` / `///` explain contract and why; `//` is for the surprising line below. Delete comments that add no information. Copy real contracts onto similar functions. **assume** vs **assert** in `///`.
-7. Unmanaged collections take an allocator on each mutating call and on `deinit`.
-8. `init` / `deinit` for values; poison after `deinit`.
-9. Named error sets composed with `Allocator.Error || error{...}`.
-10. `?T` for absence; errors for invalid / OOM; defaults on fields.
-11. Packed structs have an explicit backing integer and explicit padding.
-12. Generics are `fn Name(comptime T: type) type`. Prefer comptime or a tagged union over a vtable.
-13. `errdefer` under every acquire; `comptime unreachable` when rollback cannot happen.
-14. Document who frees what.
-15. `[]const u8` unless a sentinel is required.
-16. Tests are in-file, named for `-Dtest-filter`, `defer` immediately.
-17. Aim for 100 columns; `zig fmt`.
+1. Apply repository-specific rules first and use the pinned toolchain.
+2. File-as-struct types use `Name.zig`; namespaces and factories use snake_case.
+3. Match sibling directory names to their façade; external callers use that façade.
+4. Use the specified `@This()` alias and keep ordinary imports in the preamble.
+5. Follow the naming table, banned-name rules, and required external spelling exceptions.
+6. Keep fields before locally defined nested types and methods; defaults preserve invariants.
+7. Distinguish named initial values from initializer calls; use the type's actual API.
+8. Pass allocators where storage is allocated or released; document ownership transfers.
+9. Choose value-returning or in-place `init` deliberately; treat deinitialized values as invalid.
+10. Pair owned acquisitions with cleanup. After an irreversible ownership transfer,
+    allow no further error returns.
+11. Use `[]const u8` unless a consumer requires a sentinel.
+12. Use named public error sets, optionals for absence, and errors for recoverable failures.
+13. Reserve assertions and unreachable paths for internal contracts; account for safety settings.
+14. Keep scopes small and checks close to use; avoid duplicate mutable representations.
+15. Centralize workflow decisions; keep computation helpers pure and side effects explicit.
+16. Preserve meaningful absence and failure states when simplifying return types.
+17. Specialize generics deliberately; disabled capabilities use guarded or no-op interfaces.
+18. Sketch resource costs during design and validate the model with measurements.
+19. Batch within latency, ordering, and memory requirements; keep control decisions
+    outside hot loops.
+20. Give hot loops explicit inputs and choose memory layouts for their access patterns.
+21. Write useful contracts and rationale; use assumption/assertion terminology accurately.
+22. Scope log messages to their subsystem.
+23. Use the highest practical test level, appropriate placement, and behavioral assertions.
+24. Preserve regression coverage and use the same test for the before-fix/after-fix comparison.
+25. Use the documented commit format, explain why, and keep commits to one logical change.
+26. Run `zig fmt`, keep short calls and parameter lists inline, wrap data lists over two items,
+    and aim for 100 columns using common sense.
+
+[debug-safety]: https://github.com/ziglang/zig/blob/0.14.1/lib/std/debug.zig#L161-L167

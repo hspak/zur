@@ -7,6 +7,9 @@ const log = std.log.scoped(.request);
 
 const Request = @This();
 
+client: std.http.Client,
+allocator: Allocator,
+
 pub const HttpError = error{
     HttpBadRequest,
     HttpUnauthorized,
@@ -20,11 +23,7 @@ pub const HttpError = error{
     HttpGatewayTimeout,
     HttpUnexpectedStatus,
 };
-const ErrorSet = Allocator.Error || std.http.Client.FetchError || HttpError;
-pub const Error = ErrorSet;
-
-client: std.http.Client,
-allocator: Allocator,
+pub const Error = Allocator.Error || std.http.Client.FetchError || HttpError;
 
 const max_retries = 2;
 const retry_delays_ms = [max_retries]i64{ 100, 500 };
@@ -39,15 +38,25 @@ const ClientFetcher = struct {
     }
 };
 
+// The writer interface erases allocation failures into WriteFailed. Record the
+// cause here so response allocation failures cannot be retried as network errors.
+const BodyWriter = struct {
+    body: *Io.Writer.Allocating,
+    allocation_error: ?Allocator.Error = null,
+    writer: Io.Writer = .{ .buffer = &.{}, .vtable = &.{ .drain = drain } },
+
+    fn drain(writer: *Io.Writer, slices: []const []const u8, splat: usize) Io.Writer.Error!usize {
+        const self: *BodyWriter = @fieldParentPtr("writer", writer);
+        return self.body.writer.writeSplat(slices, splat) catch {
+            self.allocation_error = error.OutOfMemory;
+            return error.WriteFailed;
+        };
+    }
+};
+
 /// Wrap a new `std.http.Client`. Reuse one instance across requests.
 pub fn init(allocator: Allocator, io: Io) Request {
-    return .{
-        .client = .{
-            .allocator = allocator,
-            .io = io,
-        },
-        .allocator = allocator,
-    };
+    return .{ .client = .{ .allocator = allocator, .io = io }, .allocator = allocator };
 }
 
 /// Tear down the HTTP client.
@@ -89,28 +98,26 @@ fn isRetryable(err: Error) bool {
 fn resetClient(self: *Request) void {
     const io = self.client.io;
     self.client.deinit();
-    self.client = .{
-        .allocator = self.allocator,
-        .io = io,
-    };
+    self.client = .{ .allocator = self.allocator, .io = io };
 }
 
 /// GET `url` and return the response body. The caller owns the slice and
 /// must free it with `self.allocator`.
-pub fn get(self: *Request, url: []const u8) Error![]u8 {
+pub fn get(self: *Request, url: []const u8) Error![]const u8 {
     return self.getWithFetcher(url, ClientFetcher{});
 }
 
-fn fetchBody(self: *Request, url: []const u8, fetcher: anytype) Error![]u8 {
+fn fetchBody(self: *Request, url: []const u8, fetcher: anytype) Error![]const u8 {
     var body: std.Io.Writer.Allocating = .init(self.allocator);
-    errdefer body.deinit();
+    defer body.deinit();
+    var response_writer: BodyWriter = .{ .body = &body };
 
     log.debug("GET {s}", .{url});
-    const result = try fetcher.fetch(&self.client, .{
+    const result = fetcher.fetch(&self.client, .{
         .location = .{ .url = url },
         .method = .GET,
-        .response_writer = &body.writer,
-    });
+        .response_writer = &response_writer.writer,
+    }) catch |err| return response_writer.allocation_error orelse err;
     switch (result.status) {
         .ok => {},
         .bad_request => return error.HttpBadRequest,
@@ -131,7 +138,7 @@ fn fetchBody(self: *Request, url: []const u8, fetcher: anytype) Error![]u8 {
     return try body.toOwnedSlice();
 }
 
-fn getWithFetcher(self: *Request, url: []const u8, fetcher: anytype) Error![]u8 {
+fn getWithFetcher(self: *Request, url: []const u8, fetcher: anytype) Error![]const u8 {
     var retries: usize = 0;
     while (true) {
         return self.fetchBody(url, fetcher) catch |err| {
@@ -145,11 +152,7 @@ fn getWithFetcher(self: *Request, url: []const u8, fetcher: anytype) Error![]u8 
                 max_retries,
             });
             self.resetClient();
-            try Io.sleep(
-                self.client.io,
-                .fromMilliseconds(retry_delays_ms[retries - 1]),
-                .awake,
-            );
+            try Io.sleep(self.client.io, .fromMilliseconds(retry_delays_ms[retries - 1]), .awake);
             continue;
         };
     }
@@ -176,7 +179,11 @@ const FakeFetcher = struct {
             return self.failure;
         }
         try options.response_writer.?.writeAll(self.response_body);
-        return .{ .status = if (self.calls <= self.initial_statuses.len) self.initial_statuses[self.calls - 1] else self.response_status };
+        const status = if (self.calls <= self.initial_statuses.len)
+            self.initial_statuses[self.calls - 1]
+        else
+            self.response_status;
+        return .{ .status = status };
     }
 };
 
@@ -215,10 +222,7 @@ test "get stops after the built-in retry limit" {
 test "get does not retry permanent HTTP errors" {
     var request = Request.init(std.testing.allocator, std.testing.io);
     defer request.deinit();
-    var fetcher: FakeFetcher = .{
-        .failures_remaining = 1,
-        .failure = error.HttpHeadersInvalid,
-    };
+    var fetcher: FakeFetcher = .{ .failures_remaining = 1, .failure = error.HttpHeadersInvalid };
 
     try std.testing.expectError(
         error.HttpHeadersInvalid,
@@ -234,7 +238,10 @@ test "get rejects HTTP service errors after bounded retries" {
         .response_status = .service_unavailable,
         .response_body = "temporarily unavailable",
     };
-    try std.testing.expectError(error.HttpServiceUnavailable, request.getWithFetcher("https://example.test/snapshot", &fetcher));
+    try std.testing.expectError(
+        error.HttpServiceUnavailable,
+        request.getWithFetcher("https://example.test/snapshot", &fetcher),
+    );
     try std.testing.expectEqual(@as(usize, 3), fetcher.calls);
 }
 
@@ -255,6 +262,21 @@ test "get does not retry a missing HTTP resource" {
     var request = Request.init(std.testing.allocator, std.testing.io);
     defer request.deinit();
     var fetcher: FakeFetcher = .{ .response_status = .not_found };
-    try std.testing.expectError(error.HttpNotFound, request.getWithFetcher("https://example.test/snapshot", &fetcher));
+    try std.testing.expectError(
+        error.HttpNotFound,
+        request.getWithFetcher("https://example.test/snapshot", &fetcher),
+    );
+    try std.testing.expectEqual(@as(usize, 1), fetcher.calls);
+}
+
+test "get propagates response allocation failure without retrying" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var request = Request.init(failing.allocator(), std.testing.io);
+    defer request.deinit();
+    var fetcher: FakeFetcher = .{};
+    try std.testing.expectError(
+        error.OutOfMemory,
+        request.getWithFetcher("https://example.test/snapshot", &fetcher),
+    );
     try std.testing.expectEqual(@as(usize, 1), fetcher.calls);
 }

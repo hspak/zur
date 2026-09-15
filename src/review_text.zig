@@ -3,7 +3,6 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
-const log = std.log.scoped(.review_text);
 
 pub const Options = struct {
     spaces_count: usize = 2,
@@ -101,5 +100,10 @@ fn scanQuotes(quote: *?u8, line: []const u8) void {
 
 test "write propagates destination errors" {
     var writer = std.Io.Writer.fixed(&.{});
-    try std.testing.expectError(error.WriteFailed, write(std.testing.allocator, &writer, "content", .{}));
+    try std.testing.expectError(error.WriteFailed, write(
+        std.testing.allocator,
+        &writer,
+        "content",
+        .{},
+    ));
 }

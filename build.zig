@@ -20,10 +20,7 @@ pub fn build(b: *std.Build) void {
     });
     exe_mod.addImport("c", c_mod);
 
-    const exe = b.addExecutable(.{
-        .name = "zur",
-        .root_module = exe_mod,
-    });
+    const exe = b.addExecutable(.{ .name = "zur", .root_module = exe_mod });
 
     const version = b.option([]const u8, "version", "Set the build version") orelse "unset";
     const exe_options = b.addOptions();
@@ -34,7 +31,6 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
-    // Add test step
     const test_mod = b.createModule(.{
         .root_source_file = b.path("src/tests.zig"),
         .target = target,
@@ -42,9 +38,7 @@ pub fn build(b: *std.Build) void {
     });
     test_mod.addImport("c", c_mod);
 
-    const tests = b.addTest(.{
-        .root_module = test_mod,
-    });
+    const tests = b.addTest(.{ .root_module = test_mod });
 
     const run_tests = b.addRunArtifact(tests);
     const cli_options = b.addOptions();
@@ -59,7 +53,16 @@ pub fn build(b: *std.Build) void {
     cli_mod.addOptions("cli_test_options", cli_options);
     const cli_tests = b.addTest(.{ .root_module = cli_mod });
     const run_cli_tests = b.addRunArtifact(cli_tests);
+    const check_fmt = b.addFmt(.{
+        .paths = &.{
+            "build.zig",
+            "build.zig.zon",
+            "src",
+        },
+        .check = true,
+    });
     const test_step = b.step("test", "Run unit and CLI tests");
+    test_step.dependOn(&check_fmt.step);
     test_step.dependOn(&run_cli_tests.step);
     test_step.dependOn(&run_tests.step);
 }

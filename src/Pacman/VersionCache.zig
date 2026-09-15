@@ -39,8 +39,9 @@ pub const Error = Allocator.Error || Dir.OpenError || Dir.CreateDirError ||
 
 /// Assumes the operation lock is held and build_path is a reviewed, managed
 /// build tree. Return an owned version directory path; retain files on failure.
-pub fn prepare(self: *VersionCache, build_path: []const u8) Error![]u8 {
-    const base = Dir.path.basename(Dir.path.dirname(build_path) orelse return error.InvalidSourcePath);
+pub fn prepare(self: *VersionCache, build_path: []const u8) Error![]const u8 {
+    const parent_path = Dir.path.dirname(build_path) orelse return error.InvalidSourcePath;
+    const base = Dir.path.basename(parent_path);
     const version = Dir.path.basename(build_path);
     if (!safeComponent(base) or !safeComponent(version) or
         mem.startsWith(u8, version, ".zur-")) return error.InvalidSourcePath;
@@ -108,9 +109,18 @@ test "source cache preparation preserves versioned downloads and working sources
     };
     try tmp.dir.createDirPath(testing.io, ".build/example/1/src");
     try tmp.dir.createDirPath(testing.io, ".sources/example/1");
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = ".sources/example/1/HEAD", .data = "cached revision\n" });
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = ".sources/example/1/download.part", .data = "partial download\n" });
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = ".build/example/1/src/compiled", .data = "compiled object\n" });
+    try tmp.dir.writeFile(
+        testing.io,
+        .{ .sub_path = ".sources/example/1/HEAD", .data = "cached revision\n" },
+    );
+    try tmp.dir.writeFile(
+        testing.io,
+        .{ .sub_path = ".sources/example/1/download.part", .data = "partial download\n" },
+    );
+    try tmp.dir.writeFile(
+        testing.io,
+        .{ .sub_path = ".build/example/1/src/compiled", .data = "compiled object\n" },
+    );
     const build = try Dir.path.join(allocator, &.{ root, ".build/example/1" });
     defer allocator.free(build);
     const path = try cache.prepare(build);
@@ -124,11 +134,19 @@ test "source cache preparation preserves versioned downloads and working sources
         defer allocator.free(contents);
         try testing.expectEqualStrings(entry.contents, contents);
     }
-    const compiled = try tmp.dir.readFileAlloc(testing.io, ".build/example/1/src/compiled", allocator, .unlimited);
+    const compiled = try tmp.dir.readFileAlloc(
+        testing.io,
+        ".build/example/1/src/compiled",
+        allocator,
+        .unlimited,
+    );
     defer allocator.free(compiled);
     try testing.expectEqualStrings("compiled object\n", compiled);
     try tmp.dir.createDirPath(testing.io, ".build/example/1/src");
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = ".build/example/1/src/fresh", .data = "reusable checkout\n" });
+    try tmp.dir.writeFile(
+        testing.io,
+        .{ .sub_path = ".build/example/1/src/fresh", .data = "reusable checkout\n" },
+    );
     const reused = try cache.prepare(build);
     defer allocator.free(reused);
     _ = try tmp.dir.statFile(testing.io, ".build/example/1/src/fresh", .{});
@@ -160,7 +178,12 @@ test "source cache preparation retains ordinary extracted sources" {
     defer allocator.free(build);
     const path = try cache.prepare(build);
     defer allocator.free(path);
-    const compiled = try tmp.dir.readFileAlloc(testing.io, ".build/example/1/src/compiled", allocator, .unlimited);
+    const compiled = try tmp.dir.readFileAlloc(
+        testing.io,
+        ".build/example/1/src/compiled",
+        allocator,
+        .unlimited,
+    );
     defer allocator.free(compiled);
     try testing.expectEqualStrings("compiled object\n", compiled);
 }
@@ -187,14 +210,22 @@ test "log and source package caches reuse version directories" {
         var directory = try tmp.dir.openDir(testing.io, parent, .{});
         defer directory.close(testing.io);
         try directory.createDir(testing.io, "1", .default_dir);
-        try directory.writeFile(testing.io, .{ .sub_path = "1/saved", .data = "previous output\n" });
+        try directory.writeFile(
+            testing.io,
+            .{ .sub_path = "1/saved", .data = "previous output\n" },
+        );
         const before = try directory.statFile(testing.io, "1/saved", .{});
         for (0..2) |_| {
             const path = try cache.prepare(build);
             defer allocator.free(path);
             const after = try directory.statFile(testing.io, "1/saved", .{});
             try testing.expectEqual(before.inode, after.inode);
-            const contents = try directory.readFileAlloc(testing.io, "1/saved", allocator, .unlimited);
+            const contents = try directory.readFileAlloc(
+                testing.io,
+                "1/saved",
+                allocator,
+                .unlimited,
+            );
             defer allocator.free(contents);
             try testing.expectEqualStrings("previous output\n", contents);
         }
@@ -231,9 +262,18 @@ test "source cache rejects redirected parents and version directories" {
             allocator.free(path);
             return error.RedirectedSourceCacheAccepted;
         } else |_| {}
-        const contents = try tmp.dir.readFileAlloc(testing.io, "outside/keep", allocator, .unlimited);
+        const contents = try tmp.dir.readFileAlloc(
+            testing.io,
+            "outside/keep",
+            allocator,
+            .unlimited,
+        );
         defer allocator.free(contents);
         try testing.expectEqualStrings("untouched\n", contents);
-        try testing.expectError(error.FileNotFound, tmp.dir.statFile(testing.io, "outside/.zur-sources", .{}));
+        try testing.expectError(error.FileNotFound, tmp.dir.statFile(
+            testing.io,
+            "outside/.zur-sources",
+            .{},
+        ));
     }
 }

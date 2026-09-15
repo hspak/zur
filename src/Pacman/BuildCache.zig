@@ -15,6 +15,7 @@ const srcinfo = @import("srcinfo.zig");
 
 const BuildCache = @This();
 
+allocator: Allocator,
 io: Io,
 root: Dir,
 root_path: []const u8,
@@ -78,7 +79,7 @@ pub fn prepare(
     io: Io,
     source_path: []const u8,
     options: PrepareOptions,
-) PrepareError![]u8 {
+) PrepareError![]const u8 {
     // Keep the upstream version stable across epoch and packaging release changes.
     const pkgver = srcinfo.upstreamVersion(options.version);
     if (!safeComponent(options.base) or !safeComponent(pkgver)) return error.InvalidBuildPath;
@@ -105,7 +106,11 @@ pub fn prepare(
     const gpa = scratch.allocator();
     var names: std.StringArrayHashMapUnmanaged(void) = .empty;
     const previous = previous: {
-        const file = build.openFile(io, manifest_name, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        const file = build.openFile(
+            io,
+            manifest_name,
+            .{ .follow_symlinks = false },
+        ) catch |err| switch (err) {
             error.FileNotFound => break :previous "",
             else => return err,
         };
@@ -126,7 +131,11 @@ pub fn prepare(
     var fresh: std.ArrayList([]const u8) = .empty;
     var entries = source.iterate();
     while (try entries.next(io)) |entry| {
-        if (!safeComponent(entry.name) or mem.eql(u8, entry.name, manifest_name)) return error.InvalidBuildPath;
+        if (!safeComponent(entry.name) or mem.eql(
+            u8,
+            entry.name,
+            manifest_name,
+        )) return error.InvalidBuildPath;
         const name = try gpa.dupe(u8, entry.name);
         try fresh.append(gpa, name);
         try names.put(gpa, name, {});
@@ -165,7 +174,12 @@ fn safeComponent(name: []const u8) bool {
 
 /// Hold the operation lock until deinit finishes cleanup. Borrows root_path and
 /// writer for that lifetime; the caller must release its snapshots before deinit.
-pub fn init(self: *BuildCache, io: Io, root_path: []const u8, writer: *Io.Writer) Error!void {
+pub fn init(
+    allocator: Allocator,
+    io: Io,
+    root_path: []const u8,
+    writer: *Io.Writer,
+) Error!BuildCache {
     const root = try Dir.openDirAbsolute(io, root_path, .{});
     errdefer root.close(io);
     try writer.print("{s}::{s} Acquiring build lock: {s}/.build.lock\n", .{
@@ -176,10 +190,11 @@ pub fn init(self: *BuildCache, io: Io, root_path: []const u8, writer: *Io.Writer
     try writer.flush();
     // Keep this file after unlocking: unlinking it would let later processes
     // lock a different inode while another process still holds the old one.
-    const lock = try root.createFile(io, ".build.lock", .{
-        .truncate = false,
-        .resolve_beneath = true,
-    });
+    const lock = try root.createFile(
+        io,
+        ".build.lock",
+        .{ .truncate = false, .resolve_beneath = true },
+    );
     errdefer lock.close(io);
     if (!try lock.tryLock(io, .exclusive)) {
         try writer.print("{s}::{s} Waiting for another zur install/update to finish\n", .{
@@ -189,7 +204,8 @@ pub fn init(self: *BuildCache, io: Io, root_path: []const u8, writer: *Io.Writer
         try writer.flush();
         try lock.lock(io, .exclusive);
     }
-    self.* = .{
+    return .{
+        .allocator = allocator,
         .io = io,
         .root = root,
         .root_path = root_path,
@@ -226,10 +242,11 @@ pub fn deinit(self: *BuildCache) void {
 }
 
 fn cleanup(self: *BuildCache, kind: Kind) !void {
-    var builds = self.root.openDir(self.io, kind.directory(), .{
-        .iterate = true,
-        .follow_symlinks = false,
-    }) catch |err| switch (err) {
+    var builds = self.root.openDir(
+        self.io,
+        kind.directory(),
+        .{ .iterate = true, .follow_symlinks = false },
+    ) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
@@ -249,7 +266,12 @@ fn cleanup(self: *BuildCache, kind: Kind) !void {
             if (kind == .sources) try builds.deleteTree(self.io, base.name);
             continue;
         }
-        self.cleanupBase(kind, builds, base.name, &announced) catch |err| log.debug("cannot clean {s}/{s}/{s}: {t}", .{
+        self.cleanupBase(
+            kind,
+            builds,
+            base.name,
+            &announced,
+        ) catch |err| log.debug("cannot clean {s}/{s}/{s}: {t}", .{
             self.root_path,
             kind.directory(),
             base.name,
@@ -265,12 +287,9 @@ fn cleanupBase(
     name: []const u8,
     announced: *bool,
 ) !void {
-    var base = try builds.openDir(self.io, name, .{
-        .iterate = true,
-        .follow_symlinks = false,
-    });
+    var base = try builds.openDir(self.io, name, .{ .iterate = true, .follow_symlinks = false });
     defer base.close(self.io);
-    var scratch: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    var scratch: std.heap.ArenaAllocator = .init(self.allocator);
     defer scratch.deinit();
     const allocator = scratch.allocator();
     var build_base = if (kind != .build) try self.openBuildBase(name) else null;
@@ -286,7 +305,11 @@ fn cleanupBase(
         if (entry.kind == .directory) {
             var directory = try base.openDir(self.io, entry.name, .{ .follow_symlinks = false });
             defer directory.close(self.io);
-            const manifest = directory.statFile(self.io, kind.marker(), .{ .follow_symlinks = false }) catch |err| switch (err) {
+            const manifest = directory.statFile(
+                self.io,
+                kind.marker(),
+                .{ .follow_symlinks = false },
+            ) catch |err| switch (err) {
                 error.FileNotFound => null,
                 else => return err,
             };
@@ -298,7 +321,10 @@ fn cleanupBase(
                 try versions.append(allocator, .{
                     .name = try allocator.dupe(u8, entry.name),
                     .used = timestamp,
-                    .retained_build = if (build_base) |parent| try self.hasBuild(parent, entry.name) else false,
+                    .retained_build = if (build_base) |parent| try self.hasBuild(
+                        parent,
+                        entry.name,
+                    ) else false,
                 });
                 continue;
             }
@@ -319,7 +345,9 @@ fn cleanupBase(
             // Git working copies borrow objects from their source cache. Keep
             // caches used by the surviving build trees before any orphan caches.
             if (a.retained_build != b.retained_build) return a.retained_build;
-            if (a.used.nanoseconds != b.used.nanoseconds) return a.used.nanoseconds > b.used.nanoseconds;
+            if (a.used.nanoseconds != b.used.nanoseconds) {
+                return a.used.nanoseconds > b.used.nanoseconds;
+            }
             return mem.lessThan(u8, a.name, b.name);
         }
     }.newer);
@@ -351,7 +379,11 @@ fn announceCleanup(self: *BuildCache, kind: Kind, announced: *bool) Io.Writer.Er
 }
 
 fn openBuildBase(self: *BuildCache, name: []const u8) !?Dir {
-    var builds = self.root.openDir(self.io, ".build", .{ .follow_symlinks = false }) catch |err| switch (err) {
+    var builds = self.root.openDir(
+        self.io,
+        ".build",
+        .{ .follow_symlinks = false },
+    ) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => return err,
     };
@@ -363,12 +395,20 @@ fn openBuildBase(self: *BuildCache, name: []const u8) !?Dir {
 }
 
 fn hasBuild(self: *BuildCache, base: Dir, version: []const u8) !bool {
-    var build = base.openDir(self.io, version, .{ .follow_symlinks = false }) catch |err| switch (err) {
+    var build = base.openDir(
+        self.io,
+        version,
+        .{ .follow_symlinks = false },
+    ) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => return err,
     };
     defer build.close(self.io);
-    const marker = build.statFile(self.io, manifest_name, .{ .follow_symlinks = false }) catch |err| switch (err) {
+    const marker = build.statFile(
+        self.io,
+        manifest_name,
+        .{ .follow_symlinks = false },
+    ) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => return err,
     };
@@ -398,16 +438,30 @@ test "build cleanup expires old trees and preserves recent trees caches and empt
         .sub_path = abandoned ++ "/.zur-build-files",
         .data = "PKGBUILD\n",
     });
-    try tmp.dir.setTimestamps(testing.io, abandoned ++ "/.zur-build-files", .{
-        .modify_timestamp = .{ .new = .zero },
-    });
-    for ([_][]const u8{ "1", "2", "3", "4" }) |name| {
-        const path = try Dir.path.join(testing.allocator, &.{ ".build", "example", name });
+    try tmp.dir.setTimestamps(
+        testing.io,
+        abandoned ++ "/.zur-build-files",
+        .{ .modify_timestamp = .{ .new = .zero } },
+    );
+    for ([_][]const u8{
+        "1",
+        "2",
+        "3",
+        "4",
+    }) |name| {
+        const path = try Dir.path.join(testing.allocator, &.{
+            ".build",
+            "example",
+            name,
+        });
         defer testing.allocator.free(path);
         try tmp.dir.createDirPath(testing.io, path);
         var directory = try tmp.dir.openDir(testing.io, path, .{});
         defer directory.close(testing.io);
-        try directory.writeFile(testing.io, .{ .sub_path = ".zur-build-files", .data = "PKGBUILD\n" });
+        try directory.writeFile(
+            testing.io,
+            .{ .sub_path = ".zur-build-files", .data = "PKGBUILD\n" },
+        );
     }
     const retained = [_][]const u8{
         ".src/example/snapshot.tar.gz",
@@ -424,8 +478,7 @@ test "build cleanup expires old trees and preserves recent trees caches and empt
     }
     try tmp.dir.createDirPath(testing.io, ".build/empty");
     {
-        var cache: BuildCache = undefined;
-        try cache.init(testing.io, root, &output.writer);
+        var cache = try BuildCache.init(testing.allocator, testing.io, root, &output.writer);
         defer cache.deinit();
     }
     try testing.expectError(error.FileNotFound, tmp.dir.statFile(testing.io, abandoned, .{}));
@@ -438,7 +491,11 @@ test "build cleanup expires old trees and preserves recent trees caches and empt
     }
     try testing.expect(std.mem.indexOf(u8, output.written(), "Removing build directory:") != null);
     try testing.expect(std.mem.indexOf(u8, output.written(), abandoned) != null);
-    try testing.expect(std.mem.indexOf(u8, output.written(), "Keeping unexpected build entry:") != null);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        output.written(),
+        "Keeping unexpected build entry:",
+    ) != null);
 }
 
 test "build cleanup does not follow symlinks outside the build tree" {
@@ -462,11 +519,15 @@ test "build cleanup does not follow symlinks outside the build tree" {
         defer testing.allocator.free(outside);
         try tmp.dir.symLink(testing.io, outside, link, .{});
         {
-            var cache: BuildCache = undefined;
-            try cache.init(testing.io, root, &output.writer);
+            var cache = try BuildCache.init(testing.allocator, testing.io, root, &output.writer);
             defer cache.deinit();
         }
-        const contents = try tmp.dir.readFileAlloc(testing.io, "outside/keep", testing.allocator, .unlimited);
+        const contents = try tmp.dir.readFileAlloc(
+            testing.io,
+            "outside/keep",
+            testing.allocator,
+            .unlimited,
+        );
         defer testing.allocator.free(contents);
         try testing.expectEqualStrings("untouched\n", contents);
     }
@@ -486,8 +547,7 @@ test "build operation lock excludes other users and remains reusable after clean
     const abandoned = ".build/example/0123456789abcdef0123456789abcdef";
     try tmp.dir.createDirPath(testing.io, abandoned);
     {
-        var cache: BuildCache = undefined;
-        try cache.init(testing.io, root, &output.writer);
+        var cache = try BuildCache.init(testing.allocator, testing.io, root, &output.writer);
         defer cache.deinit();
         try testing.expect(!try lock.tryLock(testing.io, .exclusive));
         _ = try tmp.dir.statFile(testing.io, abandoned, .{});
@@ -524,8 +584,7 @@ test "build cleanup keeps the current and three older versions and refreshes rec
         .{ .base = "example", .version = "8" },
     };
     for (attempts, 0..) |attempt, index| {
-        var cache: BuildCache = undefined;
-        try cache.init(testing.io, root, &output.writer);
+        var cache = try BuildCache.init(testing.allocator, testing.io, root, &output.writer);
         defer cache.deinit();
         try tmp.dir.writeFile(testing.io, .{ .sub_path = "review/PKGBUILD", .data = "recipe\n" });
         const path = try prepare(allocator, testing.io, source, .{
@@ -538,7 +597,10 @@ test "build cleanup keeps the current and three older versions and refreshes rec
         defer build.close(testing.io);
         if (index < 6) {
             try build.setTimestamps(testing.io, manifest_name, .{
-                .modify_timestamp = .{ .new = .fromNanoseconds(@as(i96, @intCast(index + 1)) * std.time.ns_per_s) },
+                .modify_timestamp = .{ .new = .fromNanoseconds(@as(
+                    i96,
+                    @intCast(index + 1),
+                ) * std.time.ns_per_s) },
             });
         }
     }
@@ -551,7 +613,11 @@ test "build cleanup keeps the current and three older versions and refreshes rec
         ".build/example/2/PKGBUILD",
         ".build/example/8/PKGBUILD",
     }) |path| _ = try tmp.dir.statFile(testing.io, path, .{});
-    try testing.expectError(error.FileNotFound, tmp.dir.statFile(testing.io, ".build/example/1", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.statFile(
+        testing.io,
+        ".build/example/1",
+        .{},
+    ));
     try testing.expect(mem.indexOf(u8, output.written(), "Removing build directory:") != null);
     try testing.expect(mem.indexOf(u8, output.written(), ".build/example/1") != null);
 }
@@ -570,9 +636,15 @@ test "build preparation rejects redirected directories and escaping manifest ent
         var root_buffer: [Dir.max_path_bytes]u8 = undefined;
         const root = root_buffer[0..try tmp.dir.realPath(testing.io, &root_buffer)];
         try tmp.dir.createDirPath(testing.io, "outside");
-        try tmp.dir.writeFile(testing.io, .{ .sub_path = "outside/PKGBUILD", .data = "untouched\n" });
+        try tmp.dir.writeFile(
+            testing.io,
+            .{ .sub_path = "outside/PKGBUILD", .data = "untouched\n" },
+        );
         try tmp.dir.createDirPath(testing.io, "review");
-        try tmp.dir.writeFile(testing.io, .{ .sub_path = "review/PKGBUILD", .data = "new recipe\n" });
+        try tmp.dir.writeFile(
+            testing.io,
+            .{ .sub_path = "review/PKGBUILD", .data = "new recipe\n" },
+        );
         if (Dir.path.dirname(link)) |parent| try tmp.dir.createDirPath(testing.io, parent);
         const outside = try Dir.path.join(allocator, &.{ root, "outside" });
         defer allocator.free(outside);
@@ -587,7 +659,12 @@ test "build preparation rejects redirected directories and escaping manifest ent
             allocator.free(path);
             return error.RedirectedBuildAccepted;
         } else |_| {}
-        const contents = try tmp.dir.readFileAlloc(testing.io, "outside/PKGBUILD", allocator, .unlimited);
+        const contents = try tmp.dir.readFileAlloc(
+            testing.io,
+            "outside/PKGBUILD",
+            allocator,
+            .unlimited,
+        );
         defer allocator.free(contents);
         try testing.expectEqualStrings("untouched\n", contents);
     }
@@ -600,19 +677,43 @@ test "build preparation rejects redirected directories and escaping manifest ent
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "review/PKGBUILD", .data = "reviewed\n" });
     const source = try Dir.path.join(allocator, &.{ root, "review" });
     defer allocator.free(source);
-    var options: PrepareOptions = .{ .root_path = root, .base = "../outside", .version = "1-1" };
-    try testing.expectError(error.InvalidBuildPath, prepare(allocator, testing.io, source, options));
+    var options: PrepareOptions = .{
+        .root_path = root,
+        .base = "../outside",
+        .version = "1-1",
+    };
+    try testing.expectError(error.InvalidBuildPath, prepare(
+        allocator,
+        testing.io,
+        source,
+        options,
+    ));
     options.base = "example";
     options.version = "../outside-1";
-    try testing.expectError(error.InvalidBuildPath, prepare(allocator, testing.io, source, options));
+    try testing.expectError(error.InvalidBuildPath, prepare(
+        allocator,
+        testing.io,
+        source,
+        options,
+    ));
     options.version = "1-1";
     try tmp.dir.createDirPath(testing.io, ".build/example/1");
     try tmp.dir.writeFile(testing.io, .{
         .sub_path = ".build/example/1/.zur-build-files",
         .data = "../../../review\n",
     });
-    try testing.expectError(error.InvalidBuildPath, prepare(allocator, testing.io, source, options));
-    const contents = try tmp.dir.readFileAlloc(testing.io, "review/PKGBUILD", allocator, .unlimited);
+    try testing.expectError(error.InvalidBuildPath, prepare(
+        allocator,
+        testing.io,
+        source,
+        options,
+    ));
+    const contents = try tmp.dir.readFileAlloc(
+        testing.io,
+        "review/PKGBUILD",
+        allocator,
+        .unlimited,
+    );
     defer allocator.free(contents);
     try testing.expectEqualStrings("reviewed\n", contents);
 }
@@ -643,9 +744,11 @@ test "source cleanup preserves retained build mirrors before newer orphan caches
     for (retained) |path| {
         try tmp.dir.createDirPath(testing.io, Dir.path.dirname(path).?);
         try tmp.dir.writeFile(testing.io, .{ .sub_path = path, .data = "keep\n" });
-        try tmp.dir.setTimestamps(testing.io, path, .{
-            .modify_timestamp = .{ .new = .fromNanoseconds(std.time.ns_per_s) },
-        });
+        try tmp.dir.setTimestamps(
+            testing.io,
+            path,
+            .{ .modify_timestamp = .{ .new = .fromNanoseconds(std.time.ns_per_s) } },
+        );
     }
     try tmp.dir.createDirPath(testing.io, ".sources/example/unrecognized");
     try tmp.dir.writeFile(testing.io, .{
@@ -653,12 +756,20 @@ test "source cleanup preserves retained build mirrors before newer orphan caches
         .data = "unmarked source\n",
     });
     try tmp.dir.createDirPath(testing.io, ".sources/example/orphan");
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = ".sources/example/orphan/.zur-sources", .data = "1\n" });
+    try tmp.dir.writeFile(
+        testing.io,
+        .{ .sub_path = ".sources/example/orphan/.zur-sources", .data = "1\n" },
+    );
     try tmp.dir.createDirPath(testing.io, ".sources/other/old");
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = ".sources/other/old/.zur-sources", .data = "1\n" });
-    try tmp.dir.setTimestamps(testing.io, ".sources/other/old/.zur-sources", .{
-        .modify_timestamp = .{ .new = .zero },
-    });
+    try tmp.dir.writeFile(
+        testing.io,
+        .{ .sub_path = ".sources/other/old/.zur-sources", .data = "1\n" },
+    );
+    try tmp.dir.setTimestamps(
+        testing.io,
+        ".sources/other/old/.zur-sources",
+        .{ .modify_timestamp = .{ .new = .zero } },
+    );
     try tmp.dir.createDirPath(testing.io, "outside");
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "outside/keep", .data = "untouched\n" });
     const outside = try Dir.path.join(allocator, &.{ root, "outside" });
@@ -666,17 +777,30 @@ test "source cleanup preserves retained build mirrors before newer orphan caches
     try tmp.dir.symLink(testing.io, outside, ".sources/example/orphan/link", .{});
     try tmp.dir.symLink(testing.io, outside, ".sources/example/linked", .{});
     {
-        var cache: BuildCache = undefined;
-        try cache.init(testing.io, root, &output.writer);
+        var cache = try BuildCache.init(testing.allocator, testing.io, root, &output.writer);
         defer cache.deinit();
     }
     for (retained) |path| _ = try tmp.dir.statFile(testing.io, path, .{});
-    try testing.expectError(error.FileNotFound, tmp.dir.statFile(testing.io, ".sources/example/orphan", .{}));
-    try testing.expectError(error.FileNotFound, tmp.dir.statFile(testing.io, ".sources/other/old", .{}));
-    try testing.expectError(error.FileNotFound, tmp.dir.statFile(testing.io, ".sources/example/unrecognized", .{}));
-    try testing.expectError(error.FileNotFound, tmp.dir.statFile(testing.io, ".sources/example/linked", .{
-        .follow_symlinks = false,
-    }));
+    try testing.expectError(error.FileNotFound, tmp.dir.statFile(
+        testing.io,
+        ".sources/example/orphan",
+        .{},
+    ));
+    try testing.expectError(error.FileNotFound, tmp.dir.statFile(
+        testing.io,
+        ".sources/other/old",
+        .{},
+    ));
+    try testing.expectError(error.FileNotFound, tmp.dir.statFile(
+        testing.io,
+        ".sources/example/unrecognized",
+        .{},
+    ));
+    try testing.expectError(error.FileNotFound, tmp.dir.statFile(
+        testing.io,
+        ".sources/example/linked",
+        .{ .follow_symlinks = false },
+    ));
     const contents = try tmp.dir.readFileAlloc(testing.io, "outside/keep", allocator, .unlimited);
     defer allocator.free(contents);
     try testing.expectEqualStrings("untouched\n", contents);
@@ -736,14 +860,15 @@ test "source cleanup removes unexpected entries without following symlinks" {
         ".sources/example/dangling",
     };
     {
-        var cache: BuildCache = undefined;
-        try cache.init(testing.io, root, &output.writer);
+        var cache = try BuildCache.init(testing.allocator, testing.io, root, &output.writer);
         defer cache.deinit();
     }
     for (removed) |path| {
-        try testing.expectError(error.FileNotFound, tmp.dir.statFile(testing.io, path, .{
-            .follow_symlinks = false,
-        }));
+        try testing.expectError(error.FileNotFound, tmp.dir.statFile(
+            testing.io,
+            path,
+            .{ .follow_symlinks = false },
+        ));
         const message = try std.fmt.allocPrint(
             allocator,
             "Removing unexpected source entry: {s}/{s}\n",
@@ -757,6 +882,10 @@ test "source cleanup removes unexpected entries without following symlinks" {
         defer allocator.free(contents);
         try testing.expectEqualStrings("1\n", contents);
     }
-    try testing.expect(mem.indexOf(u8, output.written(), "Keeping unexpected source entry:") == null);
+    try testing.expect(mem.indexOf(
+        u8,
+        output.written(),
+        "Keeping unexpected source entry:",
+    ) == null);
     try testing.expect(mem.indexOf(u8, output.written(), "pending cache migration") == null);
 }

@@ -43,12 +43,7 @@ pub fn main(init: std.process.Init) !u8 {
         .print_version => {
             try stderr.writeAll("version: " ++ build_version ++ "\n");
         },
-        .search => search(
-            allocator,
-            io,
-            init.environ_map,
-            args.pkgs.items[0],
-        ) catch |err| {
+        .search => search(allocator, io, init.environ_map, args.pkgs.items[0]) catch |err| {
             try printCaughtError(stderr, err);
             exit_code = 1;
         },
@@ -100,7 +95,11 @@ test "CLI reports operational failures with a nonzero exit status" {
     defer environ.deinit();
     for ([_][]const u8{ "-S", "-Ss" }) |action| {
         const result = try std.process.run(testing.allocator, testing.io, .{
-            .argv = &.{ @import("cli_test_options").executable, action, "review-missing-home" },
+            .argv = &.{
+                @import("cli_test_options").executable,
+                action,
+                "review-missing-home",
+            },
             .environ_map = &environ,
         });
         defer testing.allocator.free(result.stdout);

@@ -3,7 +3,6 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
-const log = std.log.scoped(.srcinfo);
 
 pub const Entry = struct {
     key: []const u8,
@@ -28,7 +27,7 @@ pub fn upstreamVersion(full_version: []const u8) []const u8 {
 }
 
 /// Return an owned full version from the pkgbase section. The caller frees it.
-pub fn version(allocator: Allocator, contents: []const u8) Error![]u8 {
+pub fn version(allocator: Allocator, contents: []const u8) Error![]const u8 {
     var pkgver: ?[]const u8 = null;
     var pkgrel: ?[]const u8 = null;
     var epoch: ?[]const u8 = null;
@@ -36,7 +35,9 @@ pub fn version(allocator: Allocator, contents: []const u8) Error![]u8 {
     while (lines.next()) |line| {
         const entry = parseLine(line) orelse continue;
         if (mem.eql(u8, entry.key, "pkgname")) break;
-        const field = if (mem.eql(u8, entry.key, "pkgver")) &pkgver else if (mem.eql(u8, entry.key, "pkgrel"))
+        const field = if (mem.eql(u8, entry.key, "pkgver"))
+            &pkgver
+        else if (mem.eql(u8, entry.key, "pkgrel"))
             &pkgrel
         else if (mem.eql(u8, entry.key, "epoch"))
             &epoch
