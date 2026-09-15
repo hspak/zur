@@ -1140,6 +1140,9 @@ fn printPkgbuildChanges(
     new_contents: []const u8,
 ) !void {
     if (mem.eql(u8, old_contents, new_contents)) return;
+    if (!review_text.isText(old_contents) or !review_text.isText(new_contents)) {
+        return self.printDiff(allocator, "PKGBUILD", old_contents, new_contents);
+    }
     var old = Pkgbuild.init(allocator, old_contents);
     defer old.deinit();
     var new = Pkgbuild.init(allocator, new_contents);
@@ -1200,6 +1203,14 @@ fn printDiff(
     old_content: []const u8,
     new_content: []const u8,
 ) !void {
+    if (!review_text.isText(old_content) or !review_text.isText(new_content)) {
+        return self.print("{s}::{s} {s} was {s} (non-text contents omitted)\n", .{
+            color.bold_foreground_blue,
+            color.reset,
+            name,
+            if (new_content.len == 0) "removed" else if (old_content.len == 0) "added" else "updated",
+        });
+    }
     var old_list: std.ArrayList([]const u8) = .empty;
     defer old_list.deinit(allocator);
     var new_list: std.ArrayList([]const u8) = .empty;
@@ -1391,6 +1402,9 @@ fn printSourceFile(
         color.bold_foreground_blue,
         color.reset,
     });
+    if (!review_text.isText(file.contents)) {
+        return writer.writeAll("  Non-text contents omitted\n");
+    }
     if (mem.eql(u8, name, "PKGBUILD") and file.kind == .file) {
         try printBarePkgbuildFields(allocator, writer, file.contents);
     } else {
@@ -5646,6 +5660,142 @@ test "file review handles empty files trailing newlines and symlinks" {
         try printSourceFile(testing.allocator, &output.writer, "example", case.file);
         const header_end = mem.indexOfScalarPos(u8, output.written(), 1, '\n').?;
         try testing.expectEqualStrings(case.expected, output.written()[header_end + 1 ..]);
+    }
+}
+
+test "file review omits non-text contents before formatting" {
+    const testing = std.testing;
+    const contents = [_][]const u8{
+        "pkgdesc='hidden\x00payload'\n",
+        "pkgdesc='hidden\xffpayload'\n",
+        "pkgdesc='hidden\x1b[2Jpayload'\n",
+        "pkgdesc='hidden\x08payload'\n",
+        "pkgdesc='hidden\x7fpayload'\n",
+        "# text prefix\n" ** 1024 ++ "hidden\x00payload\n",
+    };
+    for ([_][]const u8{ "PKGBUILD", "asset.patch" }) |name| {
+        for (contents) |content| {
+            var output: Io.Writer.Allocating = .init(testing.allocator);
+            defer output.deinit();
+            try printSourceFile(testing.allocator, &output.writer, name, .{ .contents = content });
+            try testing.expect(mem.indexOf(u8, output.written(), "hidden") == null);
+            try testing.expect(mem.indexOf(u8, output.written(), name) != null);
+            try testing.expect(mem.endsWith(u8, output.written(), "  Non-text contents omitted\n"));
+        }
+    }
+}
+
+test "file review displays UTF-8 text regardless of extension" {
+    const testing = std.testing;
+    var output: Io.Writer.Allocating = .init(testing.allocator);
+    defer output.deinit();
+    try printSourceFile(testing.allocator, &output.writer, "asset.png", .{
+        .contents = "# café 日本語 ☕\r\nname\t=example\r\n",
+    });
+    try testing.expect(mem.endsWith(
+        u8,
+        output.written(),
+        "  # café 日本語 ☕\r\n  name\t=example\r\n",
+    ));
+}
+
+test "snapshot review reports non-text changes without emitting either file version" {
+    const testing = std.testing;
+    const cases = [_]struct {
+        name: []const u8,
+        old: ?[]const u8,
+        new: ?[]const u8,
+        action: []const u8,
+    }{
+        .{
+            .name = "changed.png",
+            .old = "hidden old\x00payload",
+            .new = "hidden new\x00payload",
+            .action = "updated",
+        },
+        .{
+            .name = "added.png",
+            .old = null,
+            .new = "hidden new\xffpayload",
+            .action = "added",
+        },
+        .{
+            .name = "removed.png",
+            .old = "hidden old\x00payload",
+            .new = null,
+            .action = "removed",
+        },
+        .{
+            .name = "was-text.txt",
+            .old = "hidden text\n",
+            .new = "hidden new\x00payload",
+            .action = "updated",
+        },
+        .{
+            .name = "now-text.txt",
+            .old = "hidden old\x00payload",
+            .new = "hidden text\n",
+            .action = "updated",
+        },
+        .{
+            .name = "PKGBUILD",
+            .old = "pkgdesc='hidden old'\n",
+            .new = "pkgdesc='hidden new\x00payload'\n",
+            .action = "updated",
+        },
+        .{
+            .name = "large.patch",
+            .old = "hidden old\n" ** 1024,
+            .new = "hidden new\n" ** 1024 ++ "\x00",
+            .action = "updated",
+        },
+    };
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const allocator = testing.allocator;
+    for ([_][]const u8{ "old", "new" }) |name| {
+        try fixture.tmp.dir.createDirPath(testing.io, name);
+    }
+    var old_dir = try fixture.tmp.dir.openDir(testing.io, "old", .{});
+    defer old_dir.close(testing.io);
+    var new_dir = try fixture.tmp.dir.openDir(testing.io, "new", .{});
+    defer new_dir.close(testing.io);
+    for (cases) |case| {
+        if (case.old) |contents| {
+            try old_dir.writeFile(testing.io, .{ .sub_path = case.name, .data = contents });
+        }
+        if (case.new) |contents| {
+            try new_dir.writeFile(testing.io, .{ .sub_path = case.name, .data = contents });
+        }
+    }
+    for ([_]Dir{ old_dir, new_dir }) |dir| {
+        try dir.writeFile(testing.io, .{ .sub_path = "unchanged.png", .data = "hidden\x00payload" });
+    }
+    const old_path = try std.fs.path.join(allocator, &.{ fixture.pacman.zur_path, "old" });
+    defer allocator.free(old_path);
+    const new_path = try std.fs.path.join(allocator, &.{ fixture.pacman.zur_path, "new" });
+    defer allocator.free(new_path);
+    var old_files = try fixture.pacman.readSnapshotFiles(allocator, old_path);
+    defer deinitSnapshotFiles(allocator, &old_files);
+    var new_files = try fixture.pacman.readSnapshotFiles(allocator, new_path);
+    defer deinitSnapshotFiles(allocator, &new_files);
+    try testing.expectEqualStrings(cases[0].old.?, old_files.get(cases[0].name).?.contents);
+    try testing.expectEqualStrings(cases[0].new.?, new_files.get(cases[0].name).?.contents);
+    try testing.expect(!try fixture.pacman.reviewSnapshotChanges(allocator, old_files, old_files));
+    try testing.expect(try fixture.pacman.reviewSnapshotChanges(allocator, old_files, new_files));
+    try fixture.pacman.stdout().flush();
+    const output = try fixture.tmp.dir.readFileAlloc(testing.io, "output", allocator, .unlimited);
+    defer allocator.free(output);
+    try testing.expect(mem.indexOf(u8, output, "hidden") == null);
+    try testing.expect(mem.indexOf(u8, output, "unchanged.png") == null);
+    for (cases) |case| {
+        const notice = try std.fmt.allocPrint(allocator, "{s} was {s} (non-text contents omitted)", .{
+            case.name,
+            case.action,
+        });
+        defer allocator.free(notice);
+        try testing.expect(mem.indexOf(u8, output, notice) != null);
     }
 }
 

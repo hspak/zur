@@ -1,4 +1,4 @@
-//! Shared indentation for source-file previews and parsed PKGBUILD bodies.
+//! Text classification and indentation for source-file previews and PKGBUILD bodies.
 
 const std = @import("std");
 const mem = std.mem;
@@ -13,6 +13,18 @@ pub const Options = struct {
 };
 
 pub const WriteError = Allocator.Error || std.Io.Writer.Error;
+
+/// Whether the complete contents are UTF-8 text with no ASCII controls except
+/// tabs and line endings. Empty files are text.
+pub fn isText(contents: []const u8) bool {
+    for (contents) |byte| {
+        switch (byte) {
+            '\t', '\n', '\r' => {},
+            else => if (std.ascii.isControl(byte)) return false,
+        }
+    }
+    return std.unicode.utf8ValidateSlice(contents);
+}
 
 /// Write a complete preview with an outer margin and normalized nesting.
 /// Literal strings and files containing heredocs retain their source whitespace.
