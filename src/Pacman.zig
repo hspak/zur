@@ -87,6 +87,7 @@ pub const InstallError =
         MissingPackageOutput,
         DuplicatePackageOutput,
         InvalidSrcinfo,
+        SnapshotVersionMismatch,
         UserDeclined,
     };
 
@@ -939,22 +940,84 @@ fn downloadAndExtractPackageUsing(
     request: anytype,
 ) !Snapshot {
     const base = pkg.base_name orelse pkg_name;
+    const expected_version = pkg.aur_version orelse return error.InvalidSrcinfo;
     const url = try std.fmt.allocPrint(self.allocator, "{s}/{s}.tar.gz", .{ aur.snapshot, base });
     defer self.allocator.free(url);
-    try self.print(" downloading from: {s}{s}{s}\n", .{
-        color.bold,
-        url,
-        color.reset,
-    });
-    self.flushStdout();
-    const bytes = try request.get(url);
-    defer self.allocator.free(bytes);
-    return Snapshot.create(
-        self.allocator,
-        self.io,
-        .{ .root_path = self.zur_path, .base = base },
-        bytes,
-    );
+    for (0..2) |attempt| {
+        // RPC and cgit snapshots can be cached independently. A unique retry URL
+        // avoids reusing the same stale response; its contents must still match.
+        const request_url = if (attempt == 0) url else retry_url: {
+            var random: [16]u8 = undefined;
+            Io.random(self.io, &random);
+            break :retry_url try std.fmt.allocPrint(self.allocator, "{s}?zur_refresh={s}", .{
+                url,
+                std.fmt.bytesToHex(random, .lower),
+            });
+        };
+        defer if (attempt != 0) self.allocator.free(request_url);
+        try self.print(" downloading from: {s}{s}{s}\n", .{
+            color.bold,
+            request_url,
+            color.reset,
+        });
+        self.flushStdout();
+        const bytes = try request.get(request_url);
+        defer self.allocator.free(bytes);
+        var snapshot = try Snapshot.create(
+            self.allocator,
+            self.io,
+            .{ .root_path = self.zur_path, .base = base },
+            bytes,
+        );
+        var keep = false;
+        defer if (!keep) snapshot.deinit(self.allocator);
+        const version = try self.readSnapshotVersion(snapshot.source_path, base, pkg_name);
+        defer self.allocator.free(version);
+        if (try Alpm.compareVersions(self.allocator, version, expected_version) == .eq) {
+            keep = true;
+            return snapshot;
+        }
+        try self.print("{s}::{s} AUR snapshot for {s} has version {s}; expected {s}\n", .{
+            color.bold_foreground_yellow,
+            color.reset,
+            base,
+            version,
+            expected_version,
+        });
+        if (attempt == 0) try self.print("{s}::{s} Retrying snapshot download with a fresh URL\n", .{
+            color.bold_foreground_blue,
+            color.reset,
+        });
+    }
+    return error.SnapshotVersionMismatch;
+}
+
+fn readSnapshotVersion(
+    self: *Pacman,
+    source_path: []const u8,
+    base: []const u8,
+    pkg_name: []const u8,
+) ![]const u8 {
+    var directory = try Dir.openDirAbsolute(self.io, source_path, .{});
+    defer directory.close(self.io);
+    const file = directory.openFile(self.io, ".SRCINFO", .{ .follow_symlinks = false }) catch |err|
+        switch (err) {
+            error.FileNotFound, error.SymLinkLoop => return error.InvalidSrcinfo,
+            else => return err,
+        };
+    defer file.close(self.io);
+    if ((try file.stat(self.io)).kind != .file) return error.InvalidSrcinfo;
+    var reader = file.reader(self.io, &.{});
+    const contents = reader.interface.allocRemaining(self.allocator, .limited(16 * 1024 * 1024)) catch |err|
+        switch (err) {
+            error.ReadFailed => return reader.err.?,
+            error.StreamTooLong => return error.InvalidSrcinfo,
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+    defer self.allocator.free(contents);
+    if (!srcinfo_text.hasEntry(contents, "pkgbase", base) or
+        !srcinfoHasPackage(contents, pkg_name)) return error.InvalidSrcinfo;
+    return srcinfoVersion(self.allocator, contents);
 }
 
 fn installedSnapshotPath(self: *Pacman, base: []const u8, name: []const u8) ![]const u8 {
@@ -3887,6 +3950,157 @@ const TestSnapshotRequest = struct {
         return error.TestDownloadRequired;
     }
 };
+
+const TestSnapshotResponses = struct {
+    allocator: Allocator,
+    responses: []const []const u8,
+    urls: std.ArrayList([]const u8) = .empty,
+
+    fn deinit(self: *TestSnapshotResponses) void {
+        for (self.urls.items) |url| self.allocator.free(url);
+        self.urls.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    fn get(self: *TestSnapshotResponses, url: []const u8) ![]const u8 {
+        if (self.urls.items.len >= self.responses.len) return error.UnexpectedSnapshotRequest;
+        const saved_url = try self.allocator.dupe(u8, url);
+        errdefer self.allocator.free(saved_url);
+        const bytes = try self.allocator.dupe(u8, self.responses[self.urls.items.len]);
+        errdefer self.allocator.free(bytes);
+        try self.urls.append(self.allocator, saved_url);
+        return bytes;
+    }
+};
+
+fn testSnapshotResponse(fixture: *TestDependencies, metadata: ?[]const u8) ![]const u8 {
+    const allocator = fixture.arena.allocator();
+    try fixture.tmp.dir.createDirPath(std.testing.io, "snapshot-input");
+    if (metadata) |contents| try fixture.tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "snapshot-input/.SRCINFO",
+        .data = contents,
+    });
+    var snapshot = try testSnapshot(fixture, "review-base");
+    defer snapshot.deinit(allocator);
+    return Dir.cwd().readFileAlloc(std.testing.io, snapshot.archive_path, allocator, .unlimited);
+}
+
+test "snapshot download retries an older AUR recipe before review" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const allocator = fixture.arena.allocator();
+    const stale = try testSnapshotResponse(
+        &fixture,
+        "pkgbase = review-base\n\tpkgver = 0.3.0\n\tpkgrel = 1\npkgname = review-cli\n",
+    );
+    defer allocator.free(stale);
+    const metadata = "pkgbase = review-base\n\tpkgver = 0.4.1\n\tpkgrel = 1\npkgname = review-cli\n";
+    const fresh = try testSnapshotResponse(&fixture, metadata);
+    defer allocator.free(fresh);
+    var request: TestSnapshotResponses = .{ .allocator = allocator, .responses = &.{ stale, fresh } };
+    defer request.deinit();
+    const pkg: Package = .{
+        .base_name = "review-base",
+        .installed_version = "0.3.0-1",
+        .aur_version = "0.4.1-1",
+    };
+    var snapshot = try fixture.pacman.downloadAndExtractPackageUsing("review-cli", &pkg, &request);
+    defer snapshot.deinit(allocator);
+    var directory = try Dir.openDirAbsolute(testing.io, snapshot.source_path, .{});
+    defer directory.close(testing.io);
+    const contents = try directory.readFileAlloc(testing.io, ".SRCINFO", allocator, .unlimited);
+    defer allocator.free(contents);
+    try testing.expectEqualStrings(metadata, contents);
+    try testing.expectEqual(@as(usize, 2), request.urls.items.len);
+    const url = aur.snapshot ++ "/review-base.tar.gz";
+    try testing.expectEqualStrings(url, request.urls.items[0]);
+    try testing.expect(mem.startsWith(u8, request.urls.items[1], url ++ "?"));
+    try testing.expectError(error.FileNotFound, fixture.tmp.dir.statFile(testing.io, ".build", .{}));
+}
+
+test "snapshot download stops when AUR versions still disagree after retry" {
+    const testing = std.testing;
+    for ([_][]const u8{
+        "pkgver = 0.3.0\npkgrel = 1\n",
+        "pkgver = 0.5.0\npkgrel = 1\n",
+        "pkgver = 0.4.1\npkgrel = 2\n",
+        "epoch = 1\npkgver = 0.4.1\npkgrel = 1\n",
+    }) |version_fields| {
+        var fixture: TestDependencies = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        const allocator = fixture.arena.allocator();
+        const metadata = try std.fmt.allocPrint(
+            allocator,
+            "pkgbase = review-base\n{s}pkgname = review-cli\n",
+            .{version_fields},
+        );
+        defer allocator.free(metadata);
+        const stale = try testSnapshotResponse(&fixture, metadata);
+        defer allocator.free(stale);
+        var request: TestSnapshotResponses = .{
+            .allocator = allocator,
+            .responses = &.{ stale, stale },
+        };
+        defer request.deinit();
+        const pkg: Package = .{ .base_name = "review-base", .aur_version = "0.4.1-1" };
+        try testing.expectError(
+            error.SnapshotVersionMismatch,
+            fixture.pacman.downloadAndExtractPackageUsing("review-cli", &pkg, &request),
+        );
+        try testing.expectEqual(@as(usize, 2), request.urls.items.len);
+        try testing.expectError(error.FileNotFound, fixture.tmp.dir.statFile(testing.io, ".build", .{}));
+        var directory = try fixture.tmp.dir.openDir(testing.io, ".src/review-base", .{ .iterate = true });
+        defer directory.close(testing.io);
+        var entries = directory.iterate();
+        while (try entries.next(testing.io)) |entry| {
+            try testing.expect(!mem.startsWith(u8, entry.name, ".review-"));
+        }
+    }
+}
+
+test "snapshot download accepts matching split package and epoch without retry" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const allocator = fixture.arena.allocator();
+    const bytes = try testSnapshotResponse(&fixture, "pkgbase = review-base\nepoch = 2\npkgver = 0.4.1\npkgrel = 3\n" ++
+        "pkgname = review-lib\npkgname = review-cli\n");
+    defer allocator.free(bytes);
+    var request: TestSnapshotResponses = .{ .allocator = allocator, .responses = &.{bytes} };
+    defer request.deinit();
+    const pkg: Package = .{ .base_name = "review-base", .aur_version = "2:0.4.1-3" };
+    var snapshot = try fixture.pacman.downloadAndExtractPackageUsing("review-cli", &pkg, &request);
+    defer snapshot.deinit(allocator);
+    try testing.expectEqual(@as(usize, 1), request.urls.items.len);
+}
+
+test "snapshot download rejects missing malformed or unrelated metadata" {
+    const testing = std.testing;
+    for ([_]?[]const u8{
+        null,
+        "pkgbase = review-base\npkgname = review-cli\n",
+        "pkgbase = another-base\npkgver = 2\npkgrel = 1\npkgname = review-cli\n",
+        "pkgbase = review-base\npkgver = 2\npkgrel = 1\npkgname = review-other\n",
+    }) |metadata| {
+        var fixture: TestDependencies = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        const allocator = fixture.arena.allocator();
+        const bytes = try testSnapshotResponse(&fixture, metadata);
+        defer allocator.free(bytes);
+        var request: TestSnapshotResponses = .{ .allocator = allocator, .responses = &.{bytes} };
+        defer request.deinit();
+        const pkg: Package = .{ .base_name = "review-base", .aur_version = "2-1" };
+        try testing.expectError(
+            error.InvalidSrcinfo,
+            fixture.pacman.downloadAndExtractPackageUsing("review-cli", &pkg, &request),
+        );
+    }
+}
 
 test "snapshot download retries a legacy extraction containing only PKGBUILD" {
     var fixture: TestDependencies = undefined;
