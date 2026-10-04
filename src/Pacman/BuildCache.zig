@@ -214,7 +214,7 @@ pub fn init(
     };
 }
 
-/// Prune old cache versions and unexpected source entries, report cleanup errors,
+/// Prune old cache versions and unexpected entries, report cleanup errors,
 /// then release the lock. Preserve review archives in .src and package archives
 /// in .pkg. Poisons self.
 pub fn deinit(self: *BuildCache) void {
@@ -255,15 +255,14 @@ fn cleanup(self: *BuildCache, kind: Kind) !void {
     var bases = builds.iterate();
     while (try bases.next(self.io)) |base| {
         if (base.kind != .directory) {
-            if (kind == .sources) try self.announceCleanup(kind, &announced);
-            try self.print("  {s} unexpected {s} entry: {s}/{s}/{s}\n", .{
-                if (kind == .sources) "Removing" else "Keeping",
+            try self.announceCleanup(kind, &announced);
+            try self.print("  Removing unexpected {s} entry: {s}/{s}/{s}\n", .{
                 kind.label(),
                 self.root_path,
                 kind.directory(),
                 base.name,
             });
-            if (kind == .sources) try builds.deleteTree(self.io, base.name);
+            try builds.deleteTree(self.io, base.name);
             continue;
         }
         self.cleanupBase(
@@ -329,16 +328,15 @@ fn cleanupBase(
                 continue;
             }
         }
-        if (kind == .sources) try self.announceCleanup(kind, announced);
-        try self.print("  {s} unexpected {s} entry: {s}/{s}/{s}/{s}\n", .{
-            if (kind == .sources) "Removing" else "Keeping",
+        try self.announceCleanup(kind, announced);
+        try self.print("  Removing unexpected {s} entry: {s}/{s}/{s}/{s}\n", .{
             kind.label(),
             self.root_path,
             kind.directory(),
             name,
             entry.name,
         });
-        if (kind == .sources) try base.deleteTree(self.io, entry.name);
+        try base.deleteTree(self.io, entry.name);
     }
     mem.sort(Entry, versions.items, {}, struct {
         fn newer(_: void, a: Entry, b: Entry) bool {
@@ -469,10 +467,12 @@ test "build cleanup expires old trees and preserves recent trees caches and empt
         ".sources/example/1/.zur-sources",
         ".sources/example/1/source.tar.gz",
         "example-1-1/PKGBUILD",
+    };
+    const removed = [_][]const u8{
         ".build/example/notes",
         ".build/example/not-a-build-id/keep",
     };
-    for (retained) |path| {
+    for (retained ++ removed) |path| {
         try tmp.dir.createDirPath(testing.io, Dir.path.dirname(path).?);
         try tmp.dir.writeFile(testing.io, .{ .sub_path = path, .data = "keep\n" });
     }
@@ -489,12 +489,15 @@ test "build cleanup expires old trees and preserves recent trees caches and empt
         defer testing.allocator.free(contents);
         try testing.expectEqualStrings("keep\n", contents);
     }
+    for (removed) |path| {
+        try testing.expectError(error.FileNotFound, tmp.dir.statFile(testing.io, path, .{}));
+    }
     try testing.expect(std.mem.indexOf(u8, output.written(), "Removing build directory:") != null);
     try testing.expect(std.mem.indexOf(u8, output.written(), abandoned) != null);
     try testing.expect(std.mem.indexOf(
         u8,
         output.written(),
-        "Keeping unexpected build entry:",
+        "Removing unexpected build entry:",
     ) != null);
 }
 
@@ -552,7 +555,7 @@ test "build operation lock excludes other users and remains reusable after clean
         try testing.expect(!try lock.tryLock(testing.io, .exclusive));
         _ = try tmp.dir.statFile(testing.io, abandoned, .{});
     }
-    _ = try tmp.dir.statFile(testing.io, abandoned, .{});
+    try testing.expectError(error.FileNotFound, tmp.dir.statFile(testing.io, abandoned, .{}));
     const after = try tmp.dir.statFile(testing.io, ".build.lock", .{});
     try testing.expectEqual(before.inode, after.inode);
     try testing.expect(try lock.tryLock(testing.io, .exclusive));
@@ -806,86 +809,124 @@ test "source cleanup preserves retained build mirrors before newer orphan caches
     try testing.expectEqualStrings("untouched\n", contents);
 }
 
-test "source cleanup removes unexpected entries without following symlinks" {
+test "cache cleanup removes unexpected entries without following symlinks" {
     const testing = std.testing;
     const allocator = testing.allocator;
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root_buffer: [Dir.max_path_bytes]u8 = undefined;
-    const root = root_buffer[0..try tmp.dir.realPath(testing.io, &root_buffer)];
-    var output: Io.Writer.Allocating = .init(allocator);
-    defer output.deinit();
-    const retained = [_][]const u8{
-        ".sources/example/1/.zur-sources",
-        ".sources/example/1/download.tar.gz",
-        ".build/example/notes",
-        ".logs/example/notes",
-        ".source_packages/example/notes",
-        "outside/keep",
-    };
-    for (retained) |path| {
-        try tmp.dir.createDirPath(testing.io, Dir.path.dirname(path).?);
-        try tmp.dir.writeFile(testing.io, .{ .sub_path = path, .data = "1\n" });
-    }
-    for ([_][]const u8{
-        ".sources/example/.zur-source-layout",
-        ".sources/legacy/download.tar.gz",
-        ".sources/legacy/.zur-source-pending/download.tar.gz",
-        ".sources/stray-file",
-        ".sources/example/stray-file",
-        ".sources/example/unrecognized/nested/download",
-        ".sources/example/invalid-marker/.zur-sources/stray-file",
-    }) |path| {
-        try tmp.dir.createDirPath(testing.io, Dir.path.dirname(path).?);
-        try tmp.dir.writeFile(testing.io, .{ .sub_path = path, .data = "discard\n" });
-    }
-    const outside = try Dir.path.join(allocator, &.{ root, "outside" });
-    defer allocator.free(outside);
-    for ([_][]const u8{
-        ".sources/linked-base",
-        ".sources/example/linked-version",
-        ".sources/example/unrecognized/link",
-    }) |path| try tmp.dir.symLink(testing.io, outside, path, .{});
-    try tmp.dir.symLink(testing.io, "missing", ".sources/example/dangling", .{});
-    const removed = [_][]const u8{
-        ".sources/example/.zur-source-layout",
-        ".sources/legacy/download.tar.gz",
-        ".sources/legacy/.zur-source-pending",
-        ".sources/stray-file",
-        ".sources/linked-base",
-        ".sources/example/stray-file",
-        ".sources/example/unrecognized",
-        ".sources/example/invalid-marker",
-        ".sources/example/linked-version",
-        ".sources/example/dangling",
-    };
-    {
-        var cache = try BuildCache.init(testing.allocator, testing.io, root, &output.writer);
-        defer cache.deinit();
-    }
-    for (removed) |path| {
-        try testing.expectError(error.FileNotFound, tmp.dir.statFile(
+    for ([_]Kind{
+        .build,
+        .sources,
+        .logs,
+        .source_packages,
+    }) |kind| {
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var root_buffer: [Dir.max_path_bytes]u8 = undefined;
+        const root = root_buffer[0..try tmp.dir.realPath(testing.io, &root_buffer)];
+        var output: Io.Writer.Allocating = .init(allocator);
+        defer output.deinit();
+        try tmp.dir.createDirPath(testing.io, kind.directory());
+        var directory = try tmp.dir.openDir(testing.io, kind.directory(), .{});
+        defer directory.close(testing.io);
+        const retained = [_][]const u8{
+            ".src/example/snapshot.tar.gz",
+            ".pkg/example/package.pkg.tar.zst",
+            "outside/keep",
+        };
+        for (retained) |path| {
+            try tmp.dir.createDirPath(testing.io, Dir.path.dirname(path).?);
+            try tmp.dir.writeFile(testing.io, .{ .sub_path = path, .data = "1\n" });
+        }
+        try directory.createDirPath(testing.io, "example/1");
+        var version = try directory.openDir(testing.io, "example/1", .{});
+        defer version.close(testing.io);
+        try version.writeFile(testing.io, .{ .sub_path = kind.marker(), .data = "1\n" });
+        try version.writeFile(testing.io, .{ .sub_path = "download.tar.gz", .data = "cached\n" });
+        for ([_][]const u8{
+            "example/.zur-source-layout",
+            "legacy/download.tar.gz",
+            "legacy/.zur-source-pending/download.tar.gz",
+            "stray-file",
+            "example/stray-file",
+            "example/unrecognized/nested/download",
+        }) |path| {
+            if (Dir.path.dirname(path)) |parent| try directory.createDirPath(testing.io, parent);
+            try directory.writeFile(testing.io, .{ .sub_path = path, .data = "discard\n" });
+        }
+        const invalid_marker = try Dir.path.join(allocator, &.{
+            "example/invalid-marker",
+            kind.marker(),
+            "stray-file",
+        });
+        defer allocator.free(invalid_marker);
+        try directory.createDirPath(testing.io, Dir.path.dirname(invalid_marker).?);
+        try directory.writeFile(testing.io, .{ .sub_path = invalid_marker, .data = "discard\n" });
+        const outside = try Dir.path.join(allocator, &.{ root, "outside" });
+        defer allocator.free(outside);
+        for ([_][]const u8{
+            "linked-base",
+            "example/linked-version",
+            "example/unrecognized/link",
+            "example/1/link",
+        }) |path| try directory.symLink(testing.io, outside, path, .{});
+        try directory.symLink(testing.io, "missing", "example/dangling", .{});
+        const removed = [_][]const u8{
+            "example/.zur-source-layout",
+            "legacy/download.tar.gz",
+            "legacy/.zur-source-pending",
+            "stray-file",
+            "linked-base",
+            "example/stray-file",
+            "example/unrecognized",
+            "example/invalid-marker",
+            "example/linked-version",
+            "example/dangling",
+        };
+        {
+            var cache = try BuildCache.init(testing.allocator, testing.io, root, &output.writer);
+            defer cache.deinit();
+        }
+        for (removed) |path| {
+            try testing.expectError(error.FileNotFound, directory.statFile(
+                testing.io,
+                path,
+                .{ .follow_symlinks = false },
+            ));
+            const message = try std.fmt.allocPrint(
+                allocator,
+                "Removing unexpected {s} entry: {s}/{s}/{s}\n",
+                .{
+                    kind.label(),
+                    root,
+                    kind.directory(),
+                    path,
+                },
+            );
+            defer allocator.free(message);
+            try testing.expect(mem.indexOf(u8, output.written(), message) != null);
+        }
+        for (retained) |path| {
+            const contents = try tmp.dir.readFileAlloc(testing.io, path, allocator, .unlimited);
+            defer allocator.free(contents);
+            try testing.expectEqualStrings("1\n", contents);
+        }
+        const cached = try directory.readFileAlloc(
             testing.io,
-            path,
-            .{ .follow_symlinks = false },
-        ));
-        const message = try std.fmt.allocPrint(
+            "example/1/download.tar.gz",
             allocator,
-            "Removing unexpected source entry: {s}/{s}\n",
-            .{ root, path },
+            .unlimited,
         );
-        defer allocator.free(message);
-        try testing.expect(mem.indexOf(u8, output.written(), message) != null);
+        defer allocator.free(cached);
+        try testing.expectEqualStrings("cached\n", cached);
+        try testing.expectEqual(.sym_link, (try version.statFile(
+            testing.io,
+            "link",
+            .{ .follow_symlinks = false },
+        )).kind);
+        try testing.expect(mem.indexOf(
+            u8,
+            output.written(),
+            "Keeping unexpected",
+        ) == null);
+        try testing.expect(mem.indexOf(u8, output.written(), "pending cache migration") == null);
     }
-    for (retained) |path| {
-        const contents = try tmp.dir.readFileAlloc(testing.io, path, allocator, .unlimited);
-        defer allocator.free(contents);
-        try testing.expectEqualStrings("1\n", contents);
-    }
-    try testing.expect(mem.indexOf(
-        u8,
-        output.written(),
-        "Keeping unexpected source entry:",
-    ) == null);
-    try testing.expect(mem.indexOf(u8, output.written(), "pending cache migration") == null);
 }
