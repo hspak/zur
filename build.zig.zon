@@ -1,6 +1,6 @@
 .{
     .name = .zur,
-    .version = "0.9.3",
+    .version = "0.9.4",
     .minimum_zig_version = "0.17.1",
     .fingerprint = 0x4a64a937a90c5cc4,
     .dependencies = .{},
