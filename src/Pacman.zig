@@ -90,6 +90,7 @@ pub const InstallError =
         InvalidSrcinfo,
         SnapshotVersionMismatch,
         UserDeclined,
+        PackageFailures,
     };
 
 pub const InitError = Allocator.Error || Dir.CreateDirPathError || error{NoHomeEnvVarFound};
@@ -117,6 +118,12 @@ const PendingPackage = struct {
     outputs: std.StringArrayHashMapUnmanaged(Output) = .empty,
     dependencies: std.StringHashMapUnmanaged(void) = .empty,
     snapshot: ?Snapshot = null,
+    failure: ?Failure = null,
+
+    const Failure = union(enum) {
+        failed: InstallError,
+        dependency_failed: []const u8,
+    };
 
     const Output = struct {
         pkg: Package,
@@ -143,6 +150,13 @@ const PendingPackage = struct {
             if (output.artifact == null) return false;
         }
         return true;
+    }
+
+    fn recordFailure(self: *PendingPackage, err: InstallError) error{ OutOfMemory, Canceled }!void {
+        switch (err) {
+            error.OutOfMemory, error.Canceled => |fatal| return fatal,
+            else => self.failure = .{ .failed = err },
+        }
     }
 
     fn deinit(self: *PendingPackage, allocator: Allocator) void {
@@ -419,6 +433,7 @@ fn flushStdout(self: *Pacman) void {
 
 /// Resolve, review, and install requested names, or update foreign packages
 /// when names is empty. Metadata is allocated for this Pacman run.
+/// Returns PackageFailures after reporting any failed or skipped packages.
 pub fn installOrUpdate(self: *Pacman, names: []const []const u8) InstallError!void {
     var builds = try BuildCache.init(self.allocator, self.io, self.zur_path, self.stdout());
     defer builds.deinit();
@@ -578,35 +593,82 @@ fn processOutOfDate(self: *Pacman) InstallError!void {
         return;
     }
 
-    for (pending.items) |*item| {
-        if (!item.isGit()) {
-            for (item.outputs.keys(), item.outputs.values()) |name, *output| {
-                output.artifact = try self.findExistingPackage(name, output.pkg.aur_version.?);
+    try self.processPendingPackages(pending.items, queued_bases, self.getRequest(), self);
+}
+
+fn processPendingPackages(
+    self: *Pacman,
+    pending: []PendingPackage,
+    bases: std.StringHashMapUnmanaged(usize),
+    request: anytype,
+    runner: anytype,
+) !void {
+    for (pending) |*item| {
+        self.preparePackage(item, request) catch |err| try item.recordFailure(err);
+    }
+    packages: for (pending) |*item| {
+        if (item.failure != null) continue;
+        var dependencies = item.dependencies.keyIterator();
+        while (dependencies.next()) |base| {
+            if (pending[bases.get(base.*).?].failure != null) {
+                item.failure = .{ .dependency_failed = base.* };
+                continue :packages;
             }
         }
-        if (!item.isCached()) try self.downloadAndExtractPackage(item);
+        try self.printInstallPlan(item);
+        const result = if (item.isCached())
+            self.installArtifacts(item, runner)
+        else
+            self.compareUpdateAndInstall(item, runner);
+        result catch |err| try item.recordFailure(err);
     }
-    for (pending.items) |*item| {
-        try self.print("{s}::{s} Packages to install from {s}{s}{s}:\n", .{
-            color.bold_foreground_blue,
-            color.reset,
+
+    var has_failures = false;
+    for (pending) |item| {
+        const failure = item.failure orelse continue;
+        if (!has_failures) {
+            try self.print("\nFailed or skipped packages:\n", .{});
+            has_failures = true;
+        }
+        for (item.outputs.keys()) |name| {
+            switch (failure) {
+                .failed => |err| try self.print("  {s}: {s}\n", .{ name, @errorName(err) }),
+                .dependency_failed => |base| try self.print(
+                    "  {s}: dependency {s} failed or was skipped\n",
+                    .{ name, base },
+                ),
+            }
+        }
+    }
+    if (has_failures) return error.PackageFailures;
+}
+
+fn preparePackage(self: *Pacman, item: *PendingPackage, request: anytype) !void {
+    if (!item.isGit()) {
+        for (item.outputs.keys(), item.outputs.values()) |name, *output| {
+            output.artifact = try self.findExistingPackage(name, output.pkg.aur_version.?);
+        }
+    }
+    if (!item.isCached()) {
+        item.snapshot = try self.downloadAndExtractPackageUsing(item.name, &item.pkg, request);
+    }
+}
+
+fn printInstallPlan(self: *Pacman, item: *const PendingPackage) !void {
+    try self.print("{s}::{s} Packages to install from {s}{s}{s}:\n", .{
+        color.bold_foreground_blue,
+        color.reset,
+        color.bold,
+        item.base(),
+        color.reset,
+    });
+    for (item.outputs.keys(), item.outputs.values()) |name, output| {
+        try self.print("  {s}{s}{s} ({t})\n", .{
             color.bold,
-            item.base(),
+            name,
             color.reset,
+            output.reason,
         });
-        for (item.outputs.keys(), item.outputs.values()) |name, output| {
-            try self.print("  {s}{s}{s} ({t})\n", .{
-                color.bold,
-                name,
-                color.reset,
-                output.reason,
-            });
-        }
-        if (item.isCached()) {
-            try self.installArtifacts(item, self);
-        } else {
-            try self.compareUpdateAndInstall(item);
-        }
     }
 }
 
@@ -926,14 +988,6 @@ fn snapshotPath(self: *Pacman, base: []const u8, filename: []const u8) Allocator
     });
 }
 
-fn downloadAndExtractPackage(self: *Pacman, item: *PendingPackage) !void {
-    item.snapshot = try self.downloadAndExtractPackageUsing(
-        item.name,
-        &item.pkg,
-        self.getRequest(),
-    );
-}
-
 fn downloadAndExtractPackageUsing(
     self: *Pacman,
     pkg_name: []const u8,
@@ -1099,7 +1153,7 @@ fn recordInstalledSnapshot(self: *Pacman, item: *const PendingPackage) !void {
     }
 }
 
-fn compareUpdateAndInstall(self: *Pacman, item: *PendingPackage) !void {
+fn compareUpdateAndInstall(self: *Pacman, item: *PendingPackage, runner: anytype) !void {
     var scratch: std.heap.ArenaAllocator = .init(self.allocator);
     defer scratch.deinit();
     const allocator = scratch.allocator();
@@ -1121,7 +1175,7 @@ fn compareUpdateAndInstall(self: *Pacman, item: *PendingPackage) !void {
     if (old_files.count() == 0 or new_files.count() == 0 or
         old_files.get("PKGBUILD") == null or new_files.get("PKGBUILD") == null)
     {
-        return self.bareInstall(item, new_files);
+        return self.bareInstall(item, new_files, runner);
     }
 
     const at_least_one_diff = try self.reviewSnapshotChanges(allocator, old_files, new_files);
@@ -1133,7 +1187,7 @@ fn compareUpdateAndInstall(self: *Pacman, item: *PendingPackage) !void {
             color.reset,
         });
     }
-    try self.install(item);
+    try self.installUsing(item, runner);
 }
 
 fn reviewSnapshotChanges(
@@ -1480,7 +1534,7 @@ fn printSourceFile(
     }
 }
 
-fn bareInstall(self: *Pacman, item: *PendingPackage, pkg_files: SourceFiles) !void {
+fn bareInstall(self: *Pacman, item: *PendingPackage, pkg_files: SourceFiles, runner: anytype) !void {
     var scratch: std.heap.ArenaAllocator = .init(self.allocator);
     defer scratch.deinit();
     var files = pkg_files.iterator();
@@ -1489,7 +1543,7 @@ fn bareInstall(self: *Pacman, item: *PendingPackage, pkg_files: SourceFiles) !vo
     }
 
     try self.confirmInstall("Install? [Y/n]: ");
-    try self.install(item);
+    try self.installUsing(item, runner);
 }
 
 fn confirmInstall(self: *Pacman, prompt: []const u8) !void {
@@ -1497,10 +1551,6 @@ fn confirmInstall(self: *Pacman, prompt: []const u8) !void {
     const input = try self.stdinReadByte();
     try self.print("\n", .{});
     if (input != 'y' and input != 'Y') return error.UserDeclined;
-}
-
-fn install(self: *Pacman, item: *PendingPackage) !void {
-    try self.installUsing(item, self);
 }
 
 fn installUsing(self: *Pacman, item: *PendingPackage, runner: anytype) !void {
@@ -1743,9 +1793,7 @@ fn execCommand(self: *Pacman, argv: []const []const u8, cwd: []const u8) !void {
         _ = c.tcsetpgrp(stdin_fd, child.id.?);
     }
 
-    // Surface a child failure instead of treating it as success: a
-    // non-zero exit or termination by a signal means the build/install
-    // didn't complete, so abort the operation rather than continuing.
+    // Reap the child and restore the terminal before reporting command failure.
     const term = child.wait(self.io) catch |err| {
         // Hand the terminal back before propagating the error.
         if (original_fg) |fg| _ = c.tcsetpgrp(stdin_fd, fg);
@@ -2563,6 +2611,93 @@ test "dependency planning recognizes installed versioned providers" {
     try testing.expectEqualStrings("review-lib", installed.?);
     try testing.expectEqual(null, try alpm.installedSatisfier("review-virtual>=2"));
     try testing.expectEqual(null, try fixture.pacman.resolveDependency("review-virtual>=1"));
+}
+
+const BatchTestRunner = struct {
+    trace: *Io.Writer,
+
+    fn execCommand(self: BatchTestRunner, argv: []const []const u8, _: []const u8) !void {
+        if (mem.eql(u8, argv[0], "makepkg")) {
+            try self.trace.print("makepkg {s}\n", .{argv[1]});
+            return error.NonzeroStatus;
+        }
+        const filename = Dir.path.basename(argv[4]);
+        try self.trace.print("pacman {s}\n", .{filename});
+        if (mem.eql(u8, filename, "review-rejected.pkg.tar")) return error.NonzeroStatus;
+    }
+
+    fn captureCommand(self: BatchTestRunner, argv: []const []const u8, _: []const u8) ![]const u8 {
+        try self.trace.print("unexpected command {s}\n", .{argv[0]});
+        return error.NonzeroStatus;
+    }
+};
+
+test "package batch continues after build and install failures and reports skipped dependents" {
+    const testing = std.testing;
+    var fixture: TestDependencies = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const allocator = fixture.arena.allocator();
+    const pacman = &fixture.pacman;
+    try fixture.tmp.dir.writeFile(testing.io, .{ .sub_path = "input", .data = "y\n" });
+    const input = try fixture.tmp.dir.openFile(testing.io, "input", .{});
+    defer input.close(testing.io);
+    pacman.stdin_reader = input.reader(testing.io, &pacman.stdin_buffer);
+
+    var pending: std.ArrayList(PendingPackage) = .empty;
+    defer deinitPendingPackages(allocator, &pending);
+    var bases: std.StringHashMapUnmanaged(usize) = .empty;
+    defer bases.deinit(allocator);
+    const pkg: Package = .{ .aur_version = "2-1" };
+    try queuePendingPackage(
+        allocator,
+        &pending,
+        &bases,
+        "review-cli",
+        .{ .aur_version = "2-1", .base_name = "review-base" },
+        null,
+    );
+    for ([_][]const u8{
+        "review-rejected",
+        "review-dependent",
+        "review-unrelated",
+    }) |name| {
+        try fixture.tmp.dir.createDirPath(testing.io, name);
+        const filename = try std.fmt.allocPrint(allocator, "{s}/{s}.pkg.tar", .{ name, name });
+        _ = try testPackageArchive(&fixture, filename, name);
+        try queuePendingPackage(allocator, &pending, &bases, name, pkg, null);
+    }
+    try pending.items[bases.get("review-dependent").?].dependencies.put(
+        allocator,
+        "review-rejected",
+        {},
+    );
+    const snapshot = try testSnapshotResponse(
+        &fixture,
+        "pkgbase = review-base\n\tpkgver = 2\n\tpkgrel = 1\npkgname = review-cli\n",
+    );
+    var request: TestSnapshotResponses = .{ .allocator = allocator, .responses = &.{snapshot} };
+    defer request.deinit();
+
+    var trace: Io.Writer.Allocating = .init(allocator);
+    defer trace.deinit();
+    const runner: BatchTestRunner = .{ .trace = &trace.writer };
+    const result = pacman.processPendingPackages(pending.items, bases, &request, runner);
+    try pacman.stdout().flush();
+    try testing.expectEqualStrings(
+        "makepkg -sf\npacman review-rejected.pkg.tar\npacman review-unrelated.pkg.tar\n",
+        trace.written(),
+    );
+    try testing.expectError(error.PackageFailures, result);
+    const output = try fixture.tmp.dir.readFileAlloc(testing.io, "output", allocator, .unlimited);
+    const summary = mem.indexOf(u8, output, "Failed or skipped packages:") orelse
+        return error.TestUnexpectedResult;
+    try testing.expect(mem.indexOf(u8, output[summary..], "review-cli: NonzeroStatus") != null);
+    try testing.expect(mem.indexOf(u8, output[summary..], "review-rejected: NonzeroStatus") != null);
+    try testing.expect(
+        mem.indexOf(u8, output[summary..], "review-dependent: dependency review-rejected failed") != null,
+    );
+    try testing.expect(mem.indexOf(u8, output[summary..], "review-unrelated") == null);
 }
 
 test "dependency planning retains scheduled upgrade edges and rejects incompatible updates" {
@@ -3867,7 +4002,7 @@ test "upgrade review ignores unrecorded source directories" {
         var buffer: [128]u8 = undefined;
         fixture.pacman.stdin_reader = input.reader(testing.io, &buffer);
 
-        try testing.expectError(error.UserDeclined, fixture.pacman.compareUpdateAndInstall(&item));
+        try testing.expectError(error.UserDeclined, fixture.pacman.compareUpdateAndInstall(&item, &fixture.pacman));
         try fixture.pacman.stdout().flush();
         const output = try fixture.tmp.dir.readFileAlloc(
             testing.io,
@@ -3964,7 +4099,7 @@ const TestSnapshotResponses = struct {
     }
 
     fn get(self: *TestSnapshotResponses, url: []const u8) ![]const u8 {
-        if (self.urls.items.len >= self.responses.len) return error.UnexpectedSnapshotRequest;
+        if (self.urls.items.len >= self.responses.len) return error.Unexpected;
         const saved_url = try self.allocator.dupe(u8, url);
         errdefer self.allocator.free(saved_url);
         const bytes = try self.allocator.dupe(u8, self.responses[self.urls.items.len]);
@@ -4255,7 +4390,7 @@ test "upgrade review diffs installed source files and falls back when the baseli
         var buffer: [128]u8 = undefined;
         fixture.pacman.stdin_reader = input.reader(testing.io, &buffer);
 
-        try testing.expectError(error.UserDeclined, fixture.pacman.compareUpdateAndInstall(&item));
+        try testing.expectError(error.UserDeclined, fixture.pacman.compareUpdateAndInstall(&item, &fixture.pacman));
         try fixture.pacman.stdout().flush();
         const output = try fixture.tmp.dir.readFileAlloc(
             testing.io,
@@ -4328,7 +4463,7 @@ test "upgrade review prefers recorded sources over a mutated legacy build direct
     defer input.close(testing.io);
     var buffer: [128]u8 = undefined;
     fixture.pacman.stdin_reader = input.reader(testing.io, &buffer);
-    try testing.expectError(error.UserDeclined, fixture.pacman.compareUpdateAndInstall(&item));
+    try testing.expectError(error.UserDeclined, fixture.pacman.compareUpdateAndInstall(&item, &fixture.pacman));
     try fixture.pacman.stdout().flush();
     const output = try fixture.tmp.dir.readFileAlloc(
         testing.io,
@@ -5185,7 +5320,7 @@ test "review cancellation stops the install pipeline" {
     fixture.pacman.stdin_reader = input.reader(std.testing.io, &buffer);
     var item: PendingPackage = .{ .name = "review-dependency", .pkg = .{} };
     defer item.deinit(fixture.arena.allocator());
-    try std.testing.expectError(error.UserDeclined, fixture.pacman.bareInstall(&item, .empty));
+    try std.testing.expectError(error.UserDeclined, fixture.pacman.bareInstall(&item, .empty, &fixture.pacman));
 }
 
 test "review cancellation prompt accepts its advertised default" {
@@ -5230,7 +5365,7 @@ test "install review formats sources before asking for confirmation" {
     });
     var item: PendingPackage = .{ .name = "example", .pkg = .{} };
     defer item.deinit(fixture.arena.allocator());
-    try testing.expectError(error.UserDeclined, fixture.pacman.bareInstall(&item, files));
+    try testing.expectError(error.UserDeclined, fixture.pacman.bareInstall(&item, files, &fixture.pacman));
     try fixture.pacman.stdout().flush();
     const output = try fixture.tmp.dir.readFileAlloc(
         testing.io,

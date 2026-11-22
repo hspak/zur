@@ -53,7 +53,7 @@ pub fn main(init: std.process.Init) !u8 {
             init.environ_map,
             args.pkgs.items,
         ) catch |err| {
-            try printCaughtError(stderr, err);
+            if (err != error.PackageFailures) try printCaughtError(stderr, err);
             exit_code = 1;
         },
         // parse() never leaves action unset; Unset is only the pre-parse default.
