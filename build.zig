@@ -54,11 +54,11 @@ pub fn build(b: *std.Build) void {
     const cli_tests = b.addTest(.{ .root_module = cli_mod });
     const run_cli_tests = b.addRunArtifact(cli_tests);
     const check_fmt = b.addFmt(.{
-        .paths = &.{
+        .paths = b.pathList(&.{
             "build.zig",
             "build.zig.zon",
             "src",
-        },
+        }),
         .check = true,
     });
     const test_step = b.step("test", "Run unit and CLI tests");

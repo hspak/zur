@@ -10,5 +10,6 @@ jobs:
           clean: false
       - name: Build and test
         run: |
+          test "$(zig version)" = 0.17.1
           zig build test
           zig build

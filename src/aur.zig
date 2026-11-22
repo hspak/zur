@@ -5,6 +5,7 @@ const testing = std.testing;
 const log = std.log.scoped(.aur);
 
 const Request = @import("Request.zig");
+const repeat = @import("test_fixtures.zig").repeat;
 
 pub const SearchError = std.mem.Allocator.Error || Request.Error ||
     std.json.ParseError(std.json.Scanner) || error{ RpcRejected, InvalidRpcResponse };
@@ -517,7 +518,7 @@ test "RPC info batches by encoded URL bytes and combines every response" {
         try names.append(allocator, try std.fmt.allocPrint(
             allocator,
             "review-{d}-{s}",
-            .{ index, "lib++" ** 20 },
+            .{ index, repeat("lib++", 20) },
         ));
     }
     var request: TestBatchRequest = .{ .allocator = allocator };
@@ -546,7 +547,7 @@ test "RPC info skips empty input and rejects an oversized name before requesting
     try testing.expectError(error.QueryTooLong, queryAllUsing(
         allocator,
         &request,
-        &.{"+" ** 1400},
+        &.{repeat("+", 1400)},
     ));
     try testing.expectEqual(@as(usize, 0), request.calls);
 }
@@ -560,7 +561,7 @@ test "RPC info propagates a later batch failure instead of returning partial res
     try testing.expectError(error.TestRpcUnavailable, queryAllUsing(
         allocator,
         &request,
-        &.{ "first-" ++ "a" ** 2400, "second-" ++ "b" ** 2400 },
+        &.{ "first-" ++ repeat("a", 2400), "second-" ++ repeat("b", 2400) },
     ));
     try testing.expectEqual(@as(usize, 2), request.calls);
 }

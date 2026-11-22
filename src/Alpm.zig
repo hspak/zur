@@ -135,14 +135,14 @@ pub fn fetchForeignPackages(self: *Alpm) ForeignPackagesError![]ForeignPackage {
 
 /// True if a package `name` is installed in the local database.
 pub fn isInstalled(self: *Alpm, name: []const u8) Allocator.Error!bool {
-    const name_cstr = try self.allocator.dupeZ(u8, name);
+    const name_cstr = try self.allocator.dupeSentinel(u8, name, 0);
     defer self.allocator.free(name_cstr);
     return alpm.alpm_db_get_pkg(self.local_db, @ptrCast(name_cstr.ptr)) != null;
 }
 
 /// Return the installed version, borrowed until this handle is released.
 pub fn installedVersion(self: *Alpm, name: []const u8) Allocator.Error!?[]const u8 {
-    const name_z = try self.allocator.dupeZ(u8, name);
+    const name_z = try self.allocator.dupeSentinel(u8, name, 0);
     defer self.allocator.free(name_z);
     const pkg = alpm.alpm_db_get_pkg(self.local_db, name_z) orelse return null;
     return std.mem.span(alpm.alpm_pkg_get_version(pkg));
@@ -150,7 +150,7 @@ pub fn installedVersion(self: *Alpm, name: []const u8) Allocator.Error!?[]const 
 
 /// Return the stored install reason, or null if this exact name is not installed.
 pub fn installedReason(self: *Alpm, name: []const u8) InstalledReasonError!?InstallReason {
-    const name_z = try self.allocator.dupeZ(u8, name);
+    const name_z = try self.allocator.dupeSentinel(u8, name, 0);
     defer self.allocator.free(name_z);
     const pkg = alpm.alpm_db_get_pkg(self.local_db, name_z) orelse return null;
     return switch (alpm.alpm_pkg_get_reason(pkg)) {
@@ -163,7 +163,7 @@ pub fn installedReason(self: *Alpm, name: []const u8) InstalledReasonError!?Inst
 /// Return an installed package satisfying the complete dependency, including
 /// versioned provisions. The name is borrowed until this handle is released.
 pub fn installedSatisfier(self: *Alpm, dependency: []const u8) Allocator.Error!?[]const u8 {
-    const expression = try self.allocator.dupeZ(u8, dependency);
+    const expression = try self.allocator.dupeSentinel(u8, dependency, 0);
     defer self.allocator.free(expression);
     const cache = alpm.alpm_db_get_pkgcache(self.local_db);
     const pkg = alpm.alpm_find_satisfier(cache, expression) orelse return null;
@@ -172,7 +172,7 @@ pub fn installedSatisfier(self: *Alpm, dependency: []const u8) Allocator.Error!?
 
 /// Whether a registered binary repository can satisfy the complete dependency.
 pub fn syncSatisfies(self: *Alpm, dependency: []const u8) Allocator.Error!bool {
-    const expression = try self.allocator.dupeZ(u8, dependency);
+    const expression = try self.allocator.dupeSentinel(u8, dependency, 0);
     defer self.allocator.free(expression);
     var dbs = alpm.alpm_get_syncdbs(self.handle);
     while (dbs != null) : (dbs = dbs.*.next) {
@@ -192,7 +192,7 @@ pub fn satisfies(
     dependency: []const u8,
     candidate: Candidate,
 ) Allocator.Error!bool {
-    const expression = try allocator.dupeZ(u8, dependency);
+    const expression = try allocator.dupeSentinel(u8, dependency, 0);
     defer allocator.free(expression);
     const dep: *alpm.alpm_depend_t = alpm.alpm_dep_from_string(expression) orelse
         return error.OutOfMemory;
@@ -201,7 +201,7 @@ pub fn satisfies(
         try versionSatisfies(allocator, dep, candidate.version)) return true;
 
     for (candidate.provides) |provision| {
-        const provision_z = try allocator.dupeZ(u8, provision);
+        const provision_z = try allocator.dupeSentinel(u8, provision, 0);
         defer allocator.free(provision_z);
         const provided: *alpm.alpm_depend_t = alpm.alpm_dep_from_string(provision_z) orelse
             return error.OutOfMemory;
@@ -221,7 +221,7 @@ fn versionSatisfies(
     version: []const u8,
 ) Allocator.Error!bool {
     if (dep.mod == alpm.ALPM_DEP_MOD_ANY) return true;
-    const version_z = try allocator.dupeZ(u8, version);
+    const version_z = try allocator.dupeSentinel(u8, version, 0);
     defer allocator.free(version_z);
     const comparison = alpm.alpm_pkg_vercmp(version_z, dep.version);
     return switch (dep.mod) {
@@ -238,7 +238,7 @@ fn versionSatisfies(
 // alpm_db_get_pkg wants a C string, so this makes a sentinel copy (like
 // isInstalled) rather than trusting that `name` is already terminated.
 fn isInSyncDbs(self: *Alpm, name: []const u8) !bool {
-    const name_cstr = try self.allocator.dupeZ(u8, name);
+    const name_cstr = try self.allocator.dupeSentinel(u8, name, 0);
     defer self.allocator.free(name_cstr);
 
     var dbs = alpm.alpm_get_syncdbs(self.handle);
@@ -252,7 +252,7 @@ fn isInSyncDbs(self: *Alpm, name: []const u8) !bool {
 
 /// Inspect a package file without installing it. The caller must deinit the result.
 pub fn readArchive(self: *Alpm, path: []const u8) ArchiveError!Archive {
-    const path_z = try self.allocator.dupeZ(u8, path);
+    const path_z = try self.allocator.dupeSentinel(u8, path, 0);
     defer self.allocator.free(path_z);
     var pkg: ?*alpm.alpm_pkg_t = null;
     if (alpm.alpm_pkg_load(self.handle, path_z, 0, 0, &pkg) != 0) {
@@ -289,9 +289,9 @@ pub fn compareVersions(
     ver_a: []const u8,
     ver_b: []const u8,
 ) Allocator.Error!std.math.Order {
-    const ver_a_sentinel = try allocator.dupeZ(u8, ver_a);
+    const ver_a_sentinel = try allocator.dupeSentinel(u8, ver_a, 0);
     defer allocator.free(ver_a_sentinel);
-    const ver_b_sentinel = try allocator.dupeZ(u8, ver_b);
+    const ver_b_sentinel = try allocator.dupeSentinel(u8, ver_b, 0);
     defer allocator.free(ver_b_sentinel);
 
     const ver_a_cstr: [*c]const u8 = @ptrCast(ver_a_sentinel.ptr);

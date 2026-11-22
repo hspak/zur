@@ -25,6 +25,7 @@ const extractTarGz = Snapshot.extractTarGz;
 const BuildCache = @import("Pacman/BuildCache.zig");
 const VersionCache = @import("Pacman/VersionCache.zig");
 const retention = @import("Pacman/retention.zig");
+const repeat = @import("test_fixtures.zig").repeat;
 const srcinfo_text = @import("Pacman/srcinfo.zig");
 const srcinfoVersion = srcinfo_text.version;
 const srcinfoHasPackage = srcinfo_text.hasPackage;
@@ -272,9 +273,9 @@ fn visitPendingPackage(
 
 // Architecture component in built package filenames (native compile target).
 fn machineArch() []const u8 {
-    if (comptime builtin.cpu.arch == .x86_64) return "x86_64";
-    if (comptime builtin.cpu.arch == .aarch64) return "aarch64";
-    if (comptime builtin.cpu.arch == .riscv64) return "riscv64";
+    if (comptime builtin.target.cpu.arch == .x86_64) return "x86_64";
+    if (comptime builtin.target.cpu.arch == .aarch64) return "aarch64";
+    if (comptime builtin.target.cpu.arch == .riscv64) return "riscv64";
     @compileError("unsupported architecture for package filenames");
 }
 
@@ -2408,7 +2409,7 @@ test "snapshot review retains scripts larger than four kilobytes" {
     defer snapshot.deinit(fixture.arena.allocator());
     var source = try Dir.openDirAbsolute(testing.io, snapshot.source_path, .{});
     defer source.close(testing.io);
-    const script = "echo reviewed\n" ** 400;
+    const script = repeat("echo reviewed\n", 400);
     try source.writeFile(testing.io, .{ .sub_path = "prepare.sh", .data = script });
     var files = try fixture.pacman.readSnapshotFiles(testing.allocator, snapshot.source_path);
     defer deinitSnapshotFiles(testing.allocator, &files);
@@ -2522,7 +2523,7 @@ const TestDependencies = struct {
         const len = try self.tmp.dir.realPath(testing.io, &path_buffer);
         const path = try allocator.dupe(u8, path_buffer[0..len]);
         errdefer allocator.free(path);
-        const db_path = try allocator.dupeZ(u8, path);
+        const db_path = try allocator.dupeSentinel(u8, path, 0);
         defer allocator.free(db_path);
         self.environ = .init(allocator);
         errdefer self.environ.deinit();
@@ -3228,7 +3229,7 @@ test "git install refreshes local upstream commits with real makepkg" {
         const prepared = try directory.readFileAlloc(testing.io, "prepared", allocator, .unlimited);
         defer allocator.free(prepared);
         try testing.expectEqualStrings(
-            ("prepared\n" ** 3)[0 .. "prepared\n".len * (attempt + 1)],
+            repeat("prepared\n", 3)[0 .. "prepared\n".len * (attempt + 1)],
             prepared,
         );
         if (attempt == 0) {
@@ -4993,7 +4994,7 @@ test "archive cleanup preserves installed review baselines and unrelated files" 
     defer directory.close(testing.io);
     try directory.writeFile(testing.io, .{ .sub_path = "notes", .data = "keep these notes\n" });
     for (0..6) |index| {
-        const hash = [_]u8{@as(u8, @intCast('0' + index))} ** 64;
+        const hash = @as([64]u8, @splat(@intCast('0' + index)));
         const name = try std.fmt.allocPrint(allocator, "{s}.tar.gz", .{hash});
         defer allocator.free(name);
         try directory.writeFile(testing.io, .{ .sub_path = name, .data = "saved snapshot\n" });
@@ -5006,7 +5007,7 @@ test "archive cleanup preserves installed review baselines and unrelated files" 
     }
     try directory.writeFile(testing.io, .{
         .sub_path = ".installed-review-cli.json",
-        .data = "{\"version\":\"2-1\",\"archive\":\"" ++ "0" ** 64 ++ ".tar.gz\"}",
+        .data = "{\"version\":\"2-1\",\"archive\":\"" ++ repeat("0", 64) ++ ".tar.gz\"}",
     });
     const root = try Dir.path.join(allocator, &.{ fixture.pacman.zur_path, ".src" });
     defer allocator.free(root);
@@ -5017,18 +5018,19 @@ test "archive cleanup preserves installed review baselines and unrelated files" 
         '4',
         '5',
     }) |digit| {
-        const name = try std.fmt.allocPrint(allocator, "{s}.tar.gz", .{[_]u8{digit} ** 64});
+        const hash: [64]u8 = @splat(digit);
+        const name = try allocator.print("{s}.tar.gz", .{hash});
         defer allocator.free(name);
         _ = try directory.statFile(testing.io, name, .{});
     }
     try testing.expectError(error.FileNotFound, directory.statFile(
         testing.io,
-        "1" ** 64 ++ ".tar.gz",
+        repeat("1", 64) ++ ".tar.gz",
         .{},
     ));
     try testing.expectError(error.FileNotFound, directory.statFile(
         testing.io,
-        "2" ** 64 ++ ".tar.gz",
+        repeat("2", 64) ++ ".tar.gz",
         .{},
     ));
     const notes = try directory.readFileAlloc(testing.io, "notes", allocator, .unlimited);
@@ -5051,7 +5053,7 @@ test "failed installs prune archives while preserving every installed baseline a
     var directory = try fixture.tmp.dir.openDir(testing.io, ".src/review-base", .{});
     defer directory.close(testing.io);
     for (0..7) |index| {
-        const hash = [_]u8{@as(u8, @intCast('0' + index))} ** 64;
+        const hash = @as([64]u8, @splat(@intCast('0' + index)));
         const name = try std.fmt.allocPrint(allocator, "{s}.tar.gz", .{hash});
         try directory.writeFile(testing.io, .{ .sub_path = name, .data = "saved snapshot\n" });
         try directory.setTimestamps(testing.io, name, .{
@@ -5084,12 +5086,13 @@ test "failed installs prune archives while preserving every installed baseline a
         '4',
         '6',
     }) |digit| {
-        const name = try std.fmt.allocPrint(allocator, "{s}.tar.gz", .{[_]u8{digit} ** 64});
+        const hash: [64]u8 = @splat(digit);
+        const name = try allocator.print("{s}.tar.gz", .{hash});
         _ = try directory.statFile(testing.io, name, .{});
     }
     try testing.expectError(error.FileNotFound, directory.statFile(
         testing.io,
-        "5" ** 64 ++ ".tar.gz",
+        repeat("5", 64) ++ ".tar.gz",
         .{},
     ));
 }
@@ -5410,11 +5413,11 @@ test "printBarePkgbuildFields prints only the native architecture source" {
     try printBarePkgbuildFields(testing.allocator, &writer, pkgbuild_contents);
 
     const output = writer.buffered();
-    const expected_arch = if (comptime builtin.cpu.arch == .x86_64)
+    const expected_arch = if (comptime builtin.target.cpu.arch == .x86_64)
         "x86_64"
-    else if (comptime builtin.cpu.arch == .aarch64)
+    else if (comptime builtin.target.cpu.arch == .aarch64)
         "aarch64"
-    else if (comptime builtin.cpu.arch == .riscv64)
+    else if (comptime builtin.target.cpu.arch == .riscv64)
         "riscv64"
     else
         @compileError("unsupported test architecture");
@@ -5453,11 +5456,11 @@ test "printBarePkgbuildFields formats the native architecture multiline source" 
     var writer = Io.Writer.fixed(&output_buffer);
     try printBarePkgbuildFields(testing.allocator, &writer, pkgbuild_contents);
 
-    const expected_arch = if (comptime builtin.cpu.arch == .x86_64)
+    const expected_arch = if (comptime builtin.target.cpu.arch == .x86_64)
         "x86_64"
-    else if (comptime builtin.cpu.arch == .aarch64)
+    else if (comptime builtin.target.cpu.arch == .aarch64)
         "aarch64"
-    else if (comptime builtin.cpu.arch == .riscv64)
+    else if (comptime builtin.target.cpu.arch == .riscv64)
         "riscv64"
     else
         @compileError("unsupported test architecture");
@@ -5885,7 +5888,7 @@ test "file review omits non-text contents before formatting" {
         "pkgdesc='hidden\x1b[2Jpayload'\n",
         "pkgdesc='hidden\x08payload'\n",
         "pkgdesc='hidden\x7fpayload'\n",
-        "# text prefix\n" ** 1024 ++ "hidden\x00payload\n",
+        repeat("# text prefix\n", 1024) ++ "hidden\x00payload\n",
     };
     for ([_][]const u8{ "PKGBUILD", "asset.patch" }) |name| {
         for (contents) |content| {
@@ -5959,8 +5962,8 @@ test "snapshot review reports non-text changes without emitting either file vers
         },
         .{
             .name = "large.patch",
-            .old = "hidden old\n" ** 1024,
-            .new = "hidden new\n" ** 1024 ++ "\x00",
+            .old = repeat("hidden old\n", 1024),
+            .new = repeat("hidden new\n", 1024) ++ "\x00",
             .action = "updated",
         },
     };
@@ -6045,7 +6048,9 @@ test "file review indents complete versions when diff alignment is too large" {
     var fixture: TestDependencies = undefined;
     try fixture.init();
     defer fixture.deinit();
-    try fixture.pacman.printDiff(testing.allocator, "large.txt", "old\n" ** 1024, "new\n" ** 1024);
+    const old = repeat("old\n", 1024);
+    const new = repeat("new\n", 1024);
+    try fixture.pacman.printDiff(testing.allocator, "large.txt", old, new);
     try fixture.pacman.stdout().flush();
     const output = try fixture.tmp.dir.readFileAlloc(
         testing.io,

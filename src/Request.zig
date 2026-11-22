@@ -131,7 +131,7 @@ fn fetchBody(self: *Request, url: []const u8, fetcher: anytype) Error![]const u8
         .service_unavailable => return error.HttpServiceUnavailable,
         .gateway_timeout => return error.HttpGatewayTimeout,
         else => {
-            log.debug("GET {s} returned HTTP {d}", .{ url, @intFromEnum(result.status) });
+            log.debug("GET {s} returned HTTP {d}", .{ url, @backingInt(result.status) });
             return error.HttpUnexpectedStatus;
         },
     }

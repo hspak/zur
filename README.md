@@ -11,7 +11,7 @@
 ## Build
 **Dependencies**
 - Arch Linux (pacman)
-- Zig (0.16.0)
+- Zig (0.17.1)
 - libalpm
 
 ## Validation
